@@ -319,32 +319,11 @@
     list-style: none;
   }
 
-  .editor-tabs {
-    display: flex;
-    gap: 0.5em;
+  .editor-divider {
     clear: both;
-  }
-
-  .editor-tab {
-    cursor: pointer;
-    user-select: none;
-    padding: 0.4em 0.8em;
-    border-radius: 0.5em 0.5em 0 0;
-    background: #EEE;
-    color: #666;
-  }
-
-  .editor-tab.active {
-    background: #33AA00;
-    color: white;
-  }
-
-  .editor-panel {
-    display: none;
-  }
-
-  .editor-panel.active {
-    display: block;
+    margin: 1.5em 0;
+    border: none;
+    border-top: 1px solid #DDD;
   }
 
   #llm-cost-tracker {
@@ -544,12 +523,41 @@
         <h1>Action Editor</h1>
       </div>
 
-      <div class="editor-tabs">
-        <div class="editor-tab active" id="action-editor-tab-manual">Manual</div>
-        <div class="editor-tab" id="action-editor-tab-llm">LLM</div>
+      <div id="action-editor-llm-panel">
+        <div class="actions-editor-group">
+          <span class="label description">describe the action in plain language, e.g. "a line with extrusion of 2mm" or "dots spaced 5mm apart". generating will fill in the fields below, which you can then check and tweak directly.</span>
+        </div>
+        <div class="actions-editor-group">
+          <span class="label">Description</span><textarea id="llm-description" placeholder="e.g. a line with extrusion of 2mm"></textarea>
+        </div>
+        <div class="actions-editor-group">
+          <span class="label">App password</span><input type="password" id="llm-app-secret">
+        </div>
+        <div class="actions-editor-group">
+          <span class="label">Model</span>
+          <select id="llm-model">
+            <option value="gpt-5.6-luna">gpt-5.6-luna (cheapest)</option>
+            <option value="gpt-5.6-terra" selected>gpt-5.6-terra (recommended)</option>
+            <option value="gpt-5.6-sol">gpt-5.6-sol (best quality)</option>
+          </select>
+        </div>
+        <div class="actions-editor-group">
+          <div class="ui-item">
+            <div class="btn" id="llm-generate-btn">generate with AI</div>
+          </div>
+          <span id="llm-status"></span>
+        </div>
+        <div class="actions-editor-group">
+          <div id="llm-cost-tracker"></div>
+        </div>
+        <div class="actions-editor-group">
+          <div id="llm-messages"></div>
+        </div>
       </div>
 
-      <div id="action-editor-manual-panel" class="editor-panel active">
+      <hr class="editor-divider">
+
+      <div id="action-editor-manual-panel">
         <div class="actions-editor-group">
           <span class="label">Action Name</span><input type="text" id="action-name">
         </div>
@@ -583,38 +591,6 @@
         </div>
         <div class="actions-editor-group">
           <div id="actions-editor-messages"></div>
-        </div>
-      </div>
-
-      <div id="action-editor-llm-panel" class="editor-panel">
-        <div class="actions-editor-group">
-          <span class="label description">describe the action in plain language, e.g. "a line with extrusion of 2mm" or "dots spaced 5mm apart". generating will fill in the Manual tab.</span>
-        </div>
-        <div class="actions-editor-group">
-          <span class="label">Description</span><textarea id="llm-description" placeholder="e.g. a line with extrusion of 2mm"></textarea>
-        </div>
-        <div class="actions-editor-group">
-          <span class="label">App password</span><input type="password" id="llm-app-secret">
-        </div>
-        <div class="actions-editor-group">
-          <span class="label">Model</span>
-          <select id="llm-model">
-            <option value="gpt-5.6-luna">gpt-5.6-luna (cheapest)</option>
-            <option value="gpt-5.6-terra" selected>gpt-5.6-terra (recommended)</option>
-            <option value="gpt-5.6-sol">gpt-5.6-sol (best quality)</option>
-          </select>
-        </div>
-        <div class="actions-editor-group">
-          <div class="ui-item">
-            <div class="btn" id="llm-generate-btn">generate with AI</div>
-          </div>
-          <span id="llm-status"></span>
-        </div>
-        <div class="actions-editor-group">
-          <div id="llm-cost-tracker"></div>
-        </div>
-        <div class="actions-editor-group">
-          <div id="llm-messages"></div>
         </div>
       </div>
     </div>

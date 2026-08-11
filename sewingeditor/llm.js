@@ -1,6 +1,7 @@
 // LLM-assisted action generation. Reads/writes the same DOM fields as the
-// Manual tab (#action-name, #action-description, #action-variables-container,
-// #action-gcode) so the two tabs never hold conflicting state.
+// manual edit section below the generate button (#action-name,
+// #action-description, #action-variables-container, #action-gcode) so
+// generated results and hand edits never hold conflicting state.
 
 const LLM_PRICE_PER_MTOK = {
   "gpt-5.6-luna": { input: 0.20, output: 1.20 },
@@ -10,14 +11,6 @@ const LLM_PRICE_PER_MTOK = {
 
 let lastAppliedGcode = "";
 let llmSessionCost = parseFloat(localStorage.getItem("llmCostTotal") || "0");
-
-function switchEditorTab(tab) {
-  const isManual = tab === "manual";
-  document.querySelector("#action-editor-tab-manual").classList.toggle("active", isManual);
-  document.querySelector("#action-editor-tab-llm").classList.toggle("active", !isManual);
-  document.querySelector("#action-editor-manual-panel").classList.toggle("active", isManual);
-  document.querySelector("#action-editor-llm-panel").classList.toggle("active", !isManual);
-}
 
 function resetLlmPanel() {
   document.querySelector("#llm-description").value = "";
@@ -315,8 +308,6 @@ async function onGenerateClick() {
 }
 
 function initLlmEditor() {
-  document.querySelector("#action-editor-tab-manual").addEventListener("click", () => switchEditorTab("manual"));
-  document.querySelector("#action-editor-tab-llm").addEventListener("click", () => switchEditorTab("llm"));
   document.querySelector("#llm-generate-btn").addEventListener("click", onGenerateClick);
   document.querySelector("#llm-app-secret").addEventListener("change", saveAppSecret);
   loadAppSecret();
