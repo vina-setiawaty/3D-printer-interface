@@ -18,6 +18,7 @@ function setup() {
 
   loadActions();
   initActionEditor();
+  initLlmEditor();
 
   loadLocalData();
 

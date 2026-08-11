@@ -205,6 +205,8 @@ function closeModal() {
 
 function initActionEditor() {
   document.querySelector("#add-action-btn").addEventListener("click", () => {
+    switchEditorTab("manual");
+    resetLlmPanel();
     document.querySelector(".modal").classList.add("active");
   });
 
@@ -345,6 +347,8 @@ function editAction(name) {
       document.querySelector("#action-variables-container .action-variable-item:last-child .action-variable-val").value = actions.find(a => a.name === name)[key];
     }
   }
+  switchEditorTab("manual");
+  resetLlmPanel();
   document.querySelector(".modal").classList.add("active");
 }
 
