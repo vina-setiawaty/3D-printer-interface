@@ -28,6 +28,19 @@ const LLM_PRICE_PER_MTOK = {
 let lastAppliedGcode = "";
 let llmSessionCost = parseFloat(localStorage.getItem("llmCostTotal") || "0");
 
+function escapeHtml(str) {
+  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// Detects whether the response was cut off by the token limit, so the parse
+// failure below can say "hit the token limit" instead of a bare stack trace.
+function wasTruncated(data, provider) {
+  if (provider === "anthropic") {
+    return data.stop_reason === "max_tokens";
+  }
+  return data.status === "incomplete" && data.incomplete_details && data.incomplete_details.reason === "max_output_tokens";
+}
+
 function updateModelOptions() {
   const provider = document.querySelector("#llm-provider").value;
   const modelSelect = document.querySelector("#llm-model");
@@ -333,7 +346,12 @@ async function onGenerateClick() {
   } catch (e) {
     status.textContent = "";
     btn.classList.remove("active");
-    messages.innerHTML = "<li>could not parse the generated action as JSON</li>";
+    if (wasTruncated(data, provider)) {
+      messages.innerHTML = "<li>generation was cut off before finishing (hit the token limit) — try again, or shorten the description</li>";
+    } else {
+      const preview = outputText.length > 500 ? outputText.slice(0, 500) + "…" : outputText;
+      messages.innerHTML = `<li>could not parse the generated action as JSON: ${escapeHtml(e.message)}</li><li style="white-space:pre-wrap;">${escapeHtml(preview)}</li>`;
+    }
     return;
   }
 

@@ -52,8 +52,8 @@ async function callOpenAI(apiKey, model, systemPrompt, userMessage) {
       model,
       instructions: systemPrompt,
       input: userMessage,
-      max_output_tokens: 2048,
-      reasoning: { effort: "low" },
+      max_output_tokens: 4096,
+      reasoning: { effort: "medium" },
       text: {
         format: {
           type: "json_schema",
@@ -76,10 +76,10 @@ async function callAnthropic(apiKey, model, systemPrompt, userMessage) {
     },
     body: JSON.stringify({
       model,
-      max_tokens: 2048,
+      max_tokens: 4096,
       thinking: { type: "disabled" },
       output_config: {
-        effort: "low",
+        effort: "medium",
         format: { type: "json_schema", schema: ACTION_SCHEMA },
       },
       system: systemPrompt,
