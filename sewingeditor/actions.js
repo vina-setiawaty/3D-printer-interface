@@ -2,6 +2,7 @@ let activeAction = "";
 let loopingAction = false;
 let loopTimestamp = 0;
 let loopInterval = 1000;
+let editingActionName = null;
 
 let actions = [
   {
@@ -205,6 +206,7 @@ function closeModal() {
 
 function initActionEditor() {
   document.querySelector("#add-action-btn").addEventListener("click", () => {
+    editingActionName = null;
     resetLlmPanel();
     document.querySelector(".modal").classList.add("active");
   });
@@ -235,7 +237,6 @@ function initActionEditor() {
         actions = JSON.parse(reader.result);
         saveActions();
         loadActions();
-        loadLocalData();
       };
       reader.readAsText(file);
     });
@@ -267,9 +268,6 @@ function initActionEditor() {
       action[key] = val;
     });
 
-    actions = actions.filter(a => a.name !== name);
-    actions.push(action);
-
     let messages = "";
     if (name === "") {
       messages += "<li>name is required</li>";
@@ -281,9 +279,11 @@ function initActionEditor() {
       document.querySelector("#actions-editor-messages").innerHTML = messages;
       console.log(messages);
     } else {
+      actions = actions.filter(a => a.name !== name && a.name !== editingActionName);
+      actions.push(action);
+      editingActionName = name;
       saveActions();
       loadActions();
-      loadLocalData();
       closeModal();
     }
   });
@@ -335,6 +335,7 @@ function addVariable() {
 }
 
 function editAction(name) {
+  editingActionName = name;
   document.querySelector("#action-name").value = name;
   document.querySelector("#action-description").value = actions.find(a => a.name === name).description;
   document.querySelector("#action-gcode").value = actions.find(a => a.name === name).gcode.join("\n");
@@ -363,7 +364,6 @@ function deleteAction(name) {
   actions = actions.filter(a => a.name !== name);
   saveActions();
   loadActions();
-  loadLocalData();
   console.log(actions);
 }
 
