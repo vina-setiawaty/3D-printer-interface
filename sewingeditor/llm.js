@@ -3,14 +3,43 @@
 // #action-description, #action-variables-container, #action-gcode) so
 // generated results and hand edits never hold conflicting state.
 
+const MODEL_OPTIONS = {
+  openai: [
+    { value: "gpt-5.6-luna", label: "gpt-5.6-luna (cheapest)" },
+    { value: "gpt-5.6-terra", label: "gpt-5.6-terra (recommended)" },
+    { value: "gpt-5.6-sol", label: "gpt-5.6-sol (best quality)" },
+  ],
+  anthropic: [
+    { value: "claude-haiku-4-5", label: "claude-haiku-4-5 (cheapest)" },
+    { value: "claude-sonnet-5", label: "claude-sonnet-5 (recommended)" },
+    { value: "claude-opus-5", label: "claude-opus-5 (best quality)" },
+  ],
+};
+
 const LLM_PRICE_PER_MTOK = {
   "gpt-5.6-luna": { input: 0.20, output: 1.20 },
   "gpt-5.6-terra": { input: 2.00, output: 12.00 },
   "gpt-5.6-sol": { input: 5.00, output: 30.00 },
+  "claude-haiku-4-5": { input: 1.00, output: 5.00 },
+  "claude-sonnet-5": { input: 2.00, output: 10.00 },
+  "claude-opus-5": { input: 5.00, output: 25.00 },
 };
 
 let lastAppliedGcode = "";
 let llmSessionCost = parseFloat(localStorage.getItem("llmCostTotal") || "0");
+
+function updateModelOptions() {
+  const provider = document.querySelector("#llm-provider").value;
+  const modelSelect = document.querySelector("#llm-model");
+  modelSelect.innerHTML = "";
+  MODEL_OPTIONS[provider].forEach((opt, i) => {
+    const optionEl = document.createElement("option");
+    optionEl.value = opt.value;
+    optionEl.textContent = opt.label;
+    if (i === 1) optionEl.selected = true;
+    modelSelect.appendChild(optionEl);
+  });
+}
 
 function resetLlmPanel() {
   document.querySelector("#llm-description").value = "";
@@ -82,8 +111,9 @@ function buildUserMessage(nlDescription, currentState) {
   return `Current action editor state (JSON):\n${JSON.stringify(currentState, null, 2)}\n\nInstruction: ${nlDescription}`;
 }
 
-function buildRequestBody(nlDescription, model, currentState) {
+function buildRequestBody(nlDescription, provider, model, currentState) {
   return {
+    provider,
     model,
     systemPrompt: buildSystemPrompt(),
     userMessage: buildUserMessage(nlDescription, currentState),
@@ -179,7 +209,7 @@ function recordCost(usage, model) {
 
 function renderCostTracker() {
   document.querySelector("#llm-cost-tracker").textContent =
-    `estimated cost so far: $${llmSessionCost.toFixed(4)} (client-side estimate only — set real limits on the OpenAI platform dashboard)`;
+    `estimated cost so far: $${llmSessionCost.toFixed(4)} (client-side estimate only — set real spend limits with your provider directly)`;
 }
 
 function saveAppSecret() {
@@ -193,10 +223,21 @@ function loadAppSecret() {
   }
 }
 
-// Walks the OpenAI Responses API "output" array (one or more items of type
-// "message", "reasoning", etc.) to find either the generated JSON text or a
-// refusal explanation, wherever they landed in the array.
-function extractResponseOutput(data) {
+// Anthropic Messages API and OpenAI Responses API return the generated text
+// (and a refusal, if any) in different shapes — branch on which provider the
+// request was sent to rather than guessing from the payload shape.
+function extractResponseOutput(data, provider) {
+  if (provider === "anthropic") {
+    if (data.stop_reason === "refusal") {
+      return { text: null, refusal: "the model declined this request" };
+    }
+    const textBlock = (data.content || []).find(b => b.type === "text");
+    return { text: textBlock ? textBlock.text : null, refusal: null };
+  }
+
+  // OpenAI: walk the "output" array (one or more items of type "message",
+  // "reasoning", etc.) to find either the generated JSON text or a refusal
+  // explanation, wherever they landed in the array.
   for (const item of data.output || []) {
     if (item.type !== "message") continue;
     for (const block of item.content || []) {
@@ -213,6 +254,7 @@ async function onGenerateClick() {
   const messages = document.querySelector("#llm-messages");
   const description = document.querySelector("#llm-description").value.trim();
   const secret = document.querySelector("#llm-app-secret").value;
+  const provider = document.querySelector("#llm-provider").value;
   const model = document.querySelector("#llm-model").value;
 
   messages.innerHTML = "";
@@ -242,7 +284,7 @@ async function onGenerateClick() {
     response = await fetch("/api/generate", {
       method: "POST",
       headers: { "content-type": "application/json", "x-app-secret": secret },
-      body: JSON.stringify(buildRequestBody(description, model, currentState)),
+      body: JSON.stringify(buildRequestBody(description, provider, model, currentState)),
     });
   } catch (e) {
     status.textContent = "";
@@ -269,7 +311,7 @@ async function onGenerateClick() {
     return;
   }
 
-  const { text: outputText, refusal } = extractResponseOutput(data);
+  const { text: outputText, refusal } = extractResponseOutput(data, provider);
 
   if (refusal) {
     status.textContent = "";
@@ -310,6 +352,8 @@ async function onGenerateClick() {
 function initLlmEditor() {
   document.querySelector("#llm-generate-btn").addEventListener("click", onGenerateClick);
   document.querySelector("#llm-app-secret").addEventListener("change", saveAppSecret);
+  document.querySelector("#llm-provider").addEventListener("change", updateModelOptions);
+  updateModelOptions();
   loadAppSecret();
   renderCostTracker();
 }
