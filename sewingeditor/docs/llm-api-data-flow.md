@@ -37,7 +37,7 @@ The `userMessage` string embeds this object (from `collectManualFormState()`):
   "model": "gpt-5.6-terra",
   "instructions": "<systemPrompt — see llm-system-prompt.md>",
   "input": "<userMessage>",
-  "max_output_tokens": 4096,
+  "max_output_tokens": 8192,
   "reasoning": { "effort": "medium" },
   "text": {
     "format": { "type": "json_schema", "name": "action", "schema": ACTION_SCHEMA, "strict": true }
@@ -57,7 +57,7 @@ Auth: `authorization: Bearer <OPENAI_API_KEY>`.
 ```json
 {
   "model": "claude-sonnet-5",
-  "max_tokens": 4096,
+  "max_tokens": 8192,
   "thinking": { "type": "disabled" },
   "output_config": {
     "effort": "medium",
@@ -82,7 +82,8 @@ Both providers are constrained by the same `ACTION_SCHEMA` (defined in `api/gene
   name: string,
   description: string,
   variables: { key: string, default: number }[],
-  gcode: string[]
+  gcode: string[],
+  explanation: string   // chat-style summary of what was generated, why, and any caveats
 }
 ```
-That object is what `validateGeneratedAction()` checks and `applyResultToManualForm()` writes into the Manual-tab DOM fields.
+`validateGeneratedAction()` checks `variables`/`gcode`, `applyResultToManualForm()` writes `name`/`description`/`variables`/`gcode` into the Manual-tab DOM fields, and `explanation` is rendered as-is into `#llm-explanation`.

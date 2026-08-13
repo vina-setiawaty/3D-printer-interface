@@ -36,8 +36,12 @@ const ACTION_SCHEMA = {
       items: { type: "string" },
       description: "one G/M/T-code command per line",
     },
+    explanation: {
+      type: "string",
+      description: "a short, conversational explanation (a few hundred words max) of what this action does, why it was designed this way, and any warnings the user should know before running it on hardware",
+    },
   },
-  required: ["name", "description", "variables", "gcode"],
+  required: ["name", "description", "variables", "gcode", "explanation"],
   additionalProperties: false,
 };
 

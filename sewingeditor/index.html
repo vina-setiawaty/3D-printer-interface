@@ -326,6 +326,19 @@
     border-top: 1px solid #DDD;
   }
 
+  #llm-explanation {
+    font-size: 0.9em;
+    color: #333;
+    background: #F5F5F0;
+    border-radius: 0.5em;
+    padding: 0.75em;
+    white-space: pre-wrap;
+  }
+
+  #llm-explanation:empty {
+    display: none;
+  }
+
   #llm-cost-tracker {
     font-size: 0.8em;
     font-family: monospace;
@@ -549,6 +562,9 @@
             <div class="btn" id="llm-generate-btn">generate with AI</div>
           </div>
           <span id="llm-status"></span>
+        </div>
+        <div class="actions-editor-group">
+          <div id="llm-explanation"></div>
         </div>
         <div class="actions-editor-group">
           <div id="llm-cost-tracker"></div>

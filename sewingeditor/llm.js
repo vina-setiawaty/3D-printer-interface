@@ -57,6 +57,7 @@ function updateModelOptions() {
 function resetLlmPanel() {
   document.querySelector("#llm-description").value = "";
   document.querySelector("#llm-messages").innerHTML = "";
+  document.querySelector("#llm-explanation").textContent = "";
   document.querySelector("#llm-status").textContent = "";
   lastAppliedGcode = "";
 }
@@ -85,6 +86,7 @@ function buildSystemPrompt() {
 - description: one sentence, plain language
 - variables: array of {key, default} where key starts with "__" and contains only letters/digits (e.g. "__z"), default is a number
 - gcode: array of strings, each one G-code line
+- explanation: a short, conversational explanation of what you generated and why, written the way you'd reply in a chat interface
 
 GCODE LINE RULES (all must be followed exactly):
 1. Each line's command word (before the first space) MUST be one of this exact whitelist — any other G/M/T code is silently dropped by the app at runtime and will not run:
@@ -94,6 +96,7 @@ GCODE LINE RULES (all must be followed exactly):
 4. Do not include comments (// ...) in gcode lines.
 5. Every __key placeholder used in gcode must be declared in variables with a sensible numeric default. Keep defaults physically conservative (small travel distances, e.g. a few mm, unless the instruction clearly calls for more) since this controls a physical machine.
 6. Prefer relative positioning (G91) with a trailing G90 to restore absolute mode for self-contained relative moves, matching the style of the example below — but use whatever mode is correct for the requested motion.
+7. Keep "explanation" to a few sentences (a few hundred words at most): say plainly what the action does, briefly why you made the key choices (variable defaults, gcode structure), and flag anything the user should double-check before running it on hardware — e.g. an unusually large travel distance or an assumption you had to make because the instruction was ambiguous. Write it as you would reply directly to the user in a chat, not as a code comment or a list of field names.
 
 EXAMPLE (existing action in this app, for style reference):
 {
@@ -112,7 +115,8 @@ EXAMPLE (existing action in this app, for style reference):
     "G0 Z{-__z * 2} F__fm",
     "G1 F__fe E__e",
     "G1 Z__z F__fm E-__r"
-  ]
+  ],
+  "explanation": "This moves the nozzle up 5mm, then back down while extruding, and retracts on the way up — a simple stitch-like up/down motion. I used moderate defaults (600mm/min travel, 200mm/min extrusion) since none were specified in the request. Worth double-checking __z if your material needs a taller lift before it clears the work surface."
 }
 
 You will also be given the CURRENT state of the action editor (may be empty/default, or already contain a name/description/variables/gcode from prior manual or AI edits). Treat the new instruction as a modification of that current state where it makes sense (e.g. "also add a pause at the top" keeps existing lines and adds to them); start fresh only if the instruction clearly describes a new, unrelated action. Always return the FULL resulting action, not a diff.
@@ -265,12 +269,14 @@ async function onGenerateClick() {
   const btn = document.querySelector("#llm-generate-btn");
   const status = document.querySelector("#llm-status");
   const messages = document.querySelector("#llm-messages");
+  const explanationEl = document.querySelector("#llm-explanation");
   const description = document.querySelector("#llm-description").value.trim();
   const secret = document.querySelector("#llm-app-secret").value;
   const provider = document.querySelector("#llm-provider").value;
   const model = document.querySelector("#llm-model").value;
 
   messages.innerHTML = "";
+  explanationEl.textContent = "";
 
   if (!description) {
     messages.innerHTML = "<li>describe the action before generating</li>";
@@ -357,6 +363,7 @@ async function onGenerateClick() {
 
   const warnings = validateGeneratedAction(result);
   applyResultToManualForm(result);
+  explanationEl.textContent = result.explanation || "";
 
   if (data.usage) {
     recordCost(data.usage, model);
