@@ -361,6 +361,9 @@ function duplicateAction(name) {
 }
 
 function deleteAction(name) {
+  if (!confirm(`Delete action "${name}"? This cannot be undone.`)) {
+    return;
+  }
   actions = actions.filter(a => a.name !== name);
   saveActions();
   loadActions();
