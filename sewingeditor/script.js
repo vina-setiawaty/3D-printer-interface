@@ -19,6 +19,7 @@ function setup() {
   loadActions();
   initActionEditor();
   initLlmEditor();
+  initGcodeLlmEditor();
 
   loadLocalData();
 
@@ -123,7 +124,7 @@ function setup() {
 
   document.querySelector("#run-gcode-btn").addEventListener("click", () => {
     if (fab.isPrinting) {
-      let gcode = document.querySelector("#raw-gcode-container textarea").value.split("\n");
+      let gcode = document.querySelector("#raw-gcode-textarea").value.split("\n");
       gcode = gcode.map(g => (checkGcode(g)));
       fab.commands = gcode;
       fab.print();
@@ -131,6 +132,21 @@ function setup() {
     } else {
       pushMessage("initialize printer first", "red");
     }
+  });
+
+  document.querySelector("#save-gcode-btn").addEventListener("click", () => {
+    const gcode = document.querySelector("#raw-gcode-textarea").value;
+    const blob = new Blob([gcode], { type: "text/plain" });
+
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = "output.gcode";
+
+    document.body.appendChild(link);
+    link.click();
+
+    document.body.removeChild(link);
+    URL.revokeObjectURL(link.href);
   });
 
   setupMotionControl();

@@ -41,9 +41,11 @@ function wasTruncated(data, provider) {
   return data.status === "incomplete" && data.incomplete_details && data.incomplete_details.reason === "max_output_tokens";
 }
 
-function updateModelOptions() {
-  const provider = document.querySelector("#llm-provider").value;
-  const modelSelect = document.querySelector("#llm-model");
+// Shared by the action editor's and the raw-gcode box's LLM panels — each
+// passes its own pair of provider/model <select> element ids.
+function updateModelOptions(providerSelectId, modelSelectId) {
+  const provider = document.querySelector(`#${providerSelectId}`).value;
+  const modelSelect = document.querySelector(`#${modelSelectId}`);
   modelSelect.innerHTML = "";
   MODEL_OPTIONS[provider].forEach((opt, i) => {
     const optionEl = document.createElement("option");
@@ -224,19 +226,25 @@ function recordCost(usage, model) {
   renderCostTracker();
 }
 
+// The action editor and the raw-gcode box each show their own cost-tracker
+// element, but both reflect the same combined running total — update every
+// element with this class so typing in either panel keeps both in sync.
 function renderCostTracker() {
-  document.querySelector("#llm-cost-tracker").textContent =
-    `estimated cost so far: $${llmSessionCost.toFixed(4)} (client-side estimate only — set real spend limits with your provider directly)`;
+  const text = `estimated cost so far: $${llmSessionCost.toFixed(4)} (client-side estimate only — set real spend limits with your provider directly)`;
+  document.querySelectorAll(".llm-cost-tracker").forEach(el => { el.textContent = text; });
 }
 
-function saveAppSecret() {
-  localStorage.setItem("llmAppSecret", document.querySelector("#llm-app-secret").value);
+// Both LLM panels share the same app-password value (one Vercel deployment,
+// one APP_SECRET), so any input bound here reads/writes the same key —
+// entering it in one panel fills it in for the other next time it loads.
+function saveAppSecretFrom(inputId) {
+  localStorage.setItem("llmAppSecret", document.querySelector(`#${inputId}`).value);
 }
 
-function loadAppSecret() {
+function loadAppSecretInto(inputId) {
   const secret = localStorage.getItem("llmAppSecret");
   if (secret) {
-    document.querySelector("#llm-app-secret").value = secret;
+    document.querySelector(`#${inputId}`).value = secret;
   }
 }
 
@@ -376,9 +384,9 @@ async function onGenerateClick() {
 
 function initLlmEditor() {
   document.querySelector("#llm-generate-btn").addEventListener("click", onGenerateClick);
-  document.querySelector("#llm-app-secret").addEventListener("change", saveAppSecret);
-  document.querySelector("#llm-provider").addEventListener("change", updateModelOptions);
-  updateModelOptions();
-  loadAppSecret();
+  document.querySelector("#llm-app-secret").addEventListener("change", () => saveAppSecretFrom("llm-app-secret"));
+  document.querySelector("#llm-provider").addEventListener("change", () => updateModelOptions("llm-provider", "llm-model"));
+  updateModelOptions("llm-provider", "llm-model");
+  loadAppSecretInto("llm-app-secret");
   renderCostTracker();
 }

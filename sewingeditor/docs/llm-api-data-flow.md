@@ -1,19 +1,32 @@
 # LLM API Data Flow
 
-How a click on "generate with AI" turns into a saved action. There are two chained API calls: browser → proxy, then proxy → LLM provider.
+> **Keep this current:** whenever a system prompt (`buildSystemPrompt()` in `llm.js` or `buildGcodeSystemPrompt()` in `llm-gcode.js`) or an endpoint's generation settings change, update the matching section here and in the linked system-prompt doc in the same change.
 
-## Hop 1: Browser → proxy (`POST /api/generate`)
+There are two independent generation flows in the app, each a click on its own "generate with AI" button. Both follow the same two-hop shape — browser → proxy → LLM provider — via shared proxy logic, but each has its own endpoint, JSON schema, and system prompt:
 
-**Request** — built by `buildRequestBody()` in `sewingeditor/llm.js`:
+| Flow | Frontend | Endpoint | Schema | System prompt |
+|---|---|---|---|---|
+| Action generation | `llm.js`, action editor's LLM panel | `POST /api/generate` | `ACTION_SCHEMA` in `api/generate.js` | [llm-system-prompt.md](llm-system-prompt.md) |
+| Raw gcode generation | `llm-gcode.js`, "Raw gcode" panel | `POST /api/generate-gcode` | `GCODE_SCHEMA` in `api/generate-gcode.js` | [gcode-system-prompt.md](gcode-system-prompt.md) |
+
+Both endpoints call into the same `handleGenerateRequest()` in `api/_lib/llm-proxy.js` (app-secret gate, input validation, calling the chosen provider, relaying the response) — each just supplies its own schema and generation settings:
+
+| Setting | Action generation | Raw gcode generation | Why they differ |
+|---|---|---|---|
+| `max_output_tokens` / `max_tokens` | 8192 | 32768 | A tactile graphic can expand into hundreds/thousands of gcode lines; an action macro is a handful of lines. |
+| `reasoning.effort` / `output_config.effort` | `medium` | `high` | Gcode generation involves real extrusion-math/spatial reasoning per stroke; actions are short parameterized templates. |
+| Anthropic `thinking` | `disabled` | `adaptive` | Same reasoning-load difference as above. |
+
+## Hop 1: Browser → proxy
+
+**Action generation** (`POST /api/generate`) — request built by `buildRequestBody()` in `llm.js`:
 
 | Field | Type | Content |
 |---|---|---|
 | `provider` | `string` | `"openai"` or `"anthropic"` |
 | `model` | `string` | e.g. `"gpt-5.6-terra"` or `"claude-sonnet-5"` |
-| `systemPrompt` | `string` | the whole instruction block from `buildSystemPrompt()` — the g-code whitelist + syntax rules + the `simple-up-down` few-shot example; full text in [llm-system-prompt.md](llm-system-prompt.md) |
+| `systemPrompt` | `string` | `buildSystemPrompt()` — full text in [llm-system-prompt.md](llm-system-prompt.md) |
 | `userMessage` | `string` | `buildUserMessage()` — a stringified JSON snapshot of the current Manual-tab form, followed by the typed instruction |
-
-Header: `x-app-secret: <app password>`.
 
 The `userMessage` string embeds this object (from `collectManualFormState()`):
 ```ts
@@ -21,21 +34,35 @@ The `userMessage` string embeds this object (from `collectManualFormState()`):
   name: string,
   description: string,
   variables: { key: string, default: number }[],
-  gcode: string[]   // current lines in the GCode textarea
+  gcode: string[]   // current lines in the action editor's GCode textarea
 }
 ```
 
-**Response** — on success, the proxy relays the *entire raw upstream response* back verbatim (`api/generate.js`, `res.status(200).json(data)`) — so what the browser gets here is literally whatever OpenAI or Anthropic returned (see Hop 2's output below). On failure, it's `{ error: string }` with a matching HTTP status.
+**Raw gcode generation** (`POST /api/generate-gcode`) — request built by `buildGcodeRequestBody()` in `llm-gcode.js`, same `provider`/`model` shape, but:
+
+| Field | Type | Content |
+|---|---|---|
+| `systemPrompt` | `string` | `buildGcodeSystemPrompt()` — full text in [gcode-system-prompt.md](gcode-system-prompt.md) |
+| `userMessage` | `string` | `buildGcodeUserMessage()` — a stringified JSON snapshot of the current raw-gcode box, followed by the typed instruction |
+
+The `userMessage` string embeds this object (from `collectGcodeBoxState()`):
+```ts
+{
+  gcode: string[]   // current lines in the "Raw gcode" textarea
+}
+```
+
+Both endpoints require header `x-app-secret: <app password>`, and on success relay the *entire raw upstream response* back verbatim (`res.status(200).json(data)`) — so what the browser gets is literally whatever OpenAI or Anthropic returned (see Hop 2's output below). On failure, both return `{ error: string }` with a matching HTTP status.
 
 ## Hop 2: Proxy → the LLM provider
 
 ### If `provider === "openai"` → `POST https://api.openai.com/v1/responses`
 
-**Input:**
+**Input** (values shown are the action-generation defaults; see the settings table above for the gcode endpoint's values):
 ```json
 {
   "model": "gpt-5.6-terra",
-  "instructions": "<systemPrompt — see llm-system-prompt.md>",
+  "instructions": "<systemPrompt>",
   "input": "<userMessage>",
   "max_output_tokens": 8192,
   "reasoning": { "effort": "medium" },
@@ -44,16 +71,16 @@ The `userMessage` string embeds this object (from `collectManualFormState()`):
   }
 }
 ```
-Auth: `authorization: Bearer <OPENAI_API_KEY>`.
+`name` is `"action"` for the action endpoint and `"gcode"` for the raw-gcode endpoint. Auth: `authorization: Bearer <OPENAI_API_KEY>`.
 
-**Output** (fields the app reads, per `extractResponseOutput()`):
+**Output** (fields the app reads, per `extractResponseOutput()` in `llm.js`, shared by both flows):
 - `output: []` — array of items; walked for one with `type: "message"`, then its `content: []` for a block of `type: "output_text"` (→ `.text`, the generated JSON string) or `type: "refusal"` (→ `.refusal`, a string).
 - `status` / `incomplete_details.reason` — used by `wasTruncated()` to detect a token-limit cutoff.
 - `usage: { input_tokens: number, output_tokens: number, ... }` — feeds the cost tracker.
 
 ### If `provider === "anthropic"` → `POST https://api.anthropic.com/v1/messages`
 
-**Input:**
+**Input** (action-generation defaults; see the settings table above for the gcode endpoint's values):
 ```json
 {
   "model": "claude-sonnet-5",
@@ -63,7 +90,7 @@ Auth: `authorization: Bearer <OPENAI_API_KEY>`.
     "effort": "medium",
     "format": { "type": "json_schema", "schema": ACTION_SCHEMA }
   },
-  "system": "<systemPrompt — see llm-system-prompt.md>",
+  "system": "<systemPrompt>",
   "messages": [{ "role": "user", "content": "<userMessage>" }]
 }
 ```
@@ -76,7 +103,7 @@ Auth: `x-api-key: <ANTHROPIC_API_KEY>` + `anthropic-version: 2023-06-01`.
 
 ## The final payload
 
-Both providers are constrained by the same `ACTION_SCHEMA` (defined in `api/generate.js`), so once `extractResponseOutput()`'s `.text` string is `JSON.parse()`d, the result is an identical shape regardless of provider:
+**Action generation** — `ACTION_SCHEMA` constrains both providers, so once `extractResponseOutput()`'s `.text` string is `JSON.parse()`d, the result is:
 ```ts
 {
   name: string,
@@ -87,3 +114,12 @@ Both providers are constrained by the same `ACTION_SCHEMA` (defined in `api/gene
 }
 ```
 `validateGeneratedAction()` checks `variables`/`gcode`, `applyResultToManualForm()` writes `name`/`description`/`variables`/`gcode` into the Manual-tab DOM fields, and `explanation` is rendered as-is into `#llm-explanation`.
+
+**Raw gcode generation** — `GCODE_SCHEMA` constrains both providers:
+```ts
+{
+  gcode: string[],
+  explanation: string
+}
+```
+No `name`/`description`/`variables` — raw gcode has no action-style templating. `validateGeneratedGcode()` checks `gcode` (including flagging any accidental `__`/`{}` syntax, which isn't supported here), `applyResultToGcodeBox()` writes `gcode` into `#raw-gcode-textarea`, and `explanation` is rendered into `#gcode-llm-explanation`.

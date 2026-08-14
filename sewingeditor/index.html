@@ -326,7 +326,7 @@
     border-top: 1px solid #DDD;
   }
 
-  #llm-explanation {
+  .llm-explanation {
     font-size: 0.9em;
     color: #333;
     background: #F5F5F0;
@@ -335,24 +335,24 @@
     white-space: pre-wrap;
   }
 
-  #llm-explanation:empty {
+  .llm-explanation:empty {
     display: none;
   }
 
-  #llm-cost-tracker {
+  .llm-cost-tracker {
     font-size: 0.8em;
     font-family: monospace;
     color: #666;
   }
 
-  #llm-messages {
+  .llm-messages {
     font-size: 1em;
     font-family: monospace;
     color: red;
     list-style: none;
   }
 
-  #llm-status {
+  .llm-status {
     font-size: 0.8em;
     font-family: monospace;
     color: #666;
@@ -504,12 +504,53 @@
     <div class="ui-frame" id="raw-gcode-container">
       <h1>Raw gcode</h1>
       <div class="ui-group" id="gcode-field-editor">
-        <textarea></textarea>
+        <textarea id="raw-gcode-textarea"></textarea>
       </div>
-      <div class="ui-group" id="actions-editor-menu">
+      <div class="ui-group" id="raw-gcode-menu">
         <div class="ui-item">
           <div class="btn" id="run-gcode-btn">run gcode</div>
         </div>
+        <div class="ui-item">
+          <div class="btn" id="save-gcode-btn">save gcode</div>
+        </div>
+      </div>
+
+      <hr class="editor-divider">
+
+      <div class="ui-group">
+        <span class="label description">describe gcode in plain language and generate it directly into the box above. this is separate from the Actions system — no __variables or {} expressions here, just plain runnable gcode.</span>
+      </div>
+      <div class="ui-group">
+        <span class="label">Description</span><textarea id="gcode-llm-description" placeholder="e.g. move to X100 Y100 then home"></textarea>
+      </div>
+      <div class="ui-group">
+        <span class="label">App password</span><input type="password" id="gcode-llm-app-secret">
+      </div>
+      <div class="ui-group">
+        <span class="label">Provider</span>
+        <select id="gcode-llm-provider">
+          <option value="openai" selected>OpenAI</option>
+          <option value="anthropic">Claude (Anthropic)</option>
+        </select>
+      </div>
+      <div class="ui-group">
+        <span class="label">Model</span>
+        <select id="gcode-llm-model"></select>
+      </div>
+      <div class="ui-group">
+        <div class="ui-item">
+          <div class="btn" id="gcode-llm-generate-btn">generate with AI</div>
+        </div>
+        <span id="gcode-llm-status" class="llm-status"></span>
+      </div>
+      <div class="ui-group">
+        <div id="gcode-llm-explanation" class="llm-explanation"></div>
+      </div>
+      <div class="ui-group">
+        <div id="gcode-llm-cost-tracker" class="llm-cost-tracker"></div>
+      </div>
+      <div class="ui-group">
+        <div id="gcode-llm-messages" class="llm-messages"></div>
       </div>
     </div>
 
@@ -561,16 +602,16 @@
           <div class="ui-item">
             <div class="btn" id="llm-generate-btn">generate with AI</div>
           </div>
-          <span id="llm-status"></span>
+          <span id="llm-status" class="llm-status"></span>
         </div>
         <div class="actions-editor-group">
-          <div id="llm-explanation"></div>
+          <div id="llm-explanation" class="llm-explanation"></div>
         </div>
         <div class="actions-editor-group">
-          <div id="llm-cost-tracker"></div>
+          <div id="llm-cost-tracker" class="llm-cost-tracker"></div>
         </div>
         <div class="actions-editor-group">
-          <div id="llm-messages"></div>
+          <div id="llm-messages" class="llm-messages"></div>
         </div>
       </div>
 
@@ -618,6 +659,7 @@
   <script type="text/javascript" src="script.js?v=4"></script>
   <script type="text/javascript" src="actions.js?v=4"></script>
   <script type="text/javascript" src="llm.js?v=1"></script>
+  <script type="text/javascript" src="llm-gcode.js?v=1"></script>
 </body>
 
 </html>
