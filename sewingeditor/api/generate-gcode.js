@@ -49,6 +49,10 @@ export default async function handler(req, res) {
   // Complex multi-feature tactile graphics can run to hundreds or low
   // thousands of gcode lines — raise this further if generation still gets
   // truncated (see wasTruncated() in llm-gcode.js) on very large graphics.
+  // `thinking: true` only makes it eligible for Anthropic's extended
+  // thinking — handleGenerateRequest() only actually turns it on when the
+  // caller picked "high" effort, since low/medium exist specifically to
+  // trade quality for a faster response.
   return handleGenerateRequest(req, res, GCODE_SCHEMA, "gcode", {
     maxOutputTokens: 32768,
     effort: "medium",

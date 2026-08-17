@@ -67,7 +67,7 @@ export async function handleGenerateRequest(req, res, schema, schemaName, option
   const {
     maxOutputTokens = 8192,
     effort: defaultEffort = "medium",
-    thinking = false,
+    thinking: thinkingCapable = false,
   } = options;
 
   if (req.method !== "POST") {
@@ -99,6 +99,11 @@ export async function handleGenerateRequest(req, res, schema, schemaName, option
     return;
   }
   const effort = requestedEffort || defaultEffort;
+  // Extended thinking is the largest single latency cost on a slow endpoint
+  // like generate-gcode — only pay for it at "high" effort, so picking
+  // "low"/"medium" in the UI actually buys a faster response, not just a
+  // differently-labeled one.
+  const thinking = thinkingCapable && effort === "high";
   if (typeof systemPrompt !== "string" || typeof userMessage !== "string" || !userMessage.trim()) {
     res.status(400).json({ error: "systemPrompt and userMessage are required strings" });
     return;
