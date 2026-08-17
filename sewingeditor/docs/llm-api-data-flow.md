@@ -1,13 +1,14 @@
 # LLM API Data Flow
 
-> **Keep this current:** whenever a system prompt (`buildSystemPrompt()` in `llm.js` or `buildGcodeSystemPrompt()` in `llm-gcode.js`) or an endpoint's generation settings change, update the matching section here and in the linked system-prompt doc in the same change.
+> **Keep this current:** whenever a system prompt (`buildSystemPrompt()` in `llm.js`, `buildGcodeSystemPrompt()` in `llm-gcode.js`, or `buildGcodeSessionSystemPrompt()` in `gcode-session.js`) or an endpoint's generation settings change, update the matching section here and in the linked system-prompt doc in the same change.
 
-There are two independent generation flows in the app, each a click on its own "generate with AI" button. Both follow the same two-hop shape — browser → proxy → LLM provider — via shared proxy logic, but each has its own endpoint, JSON schema, and system prompt:
+There are three independent generation flows in the app, each a click on its own "generate with AI" button. All follow the same two-hop shape — browser → proxy → LLM provider — via shared proxy logic, but each has its own frontend and system prompt (the first two also have their own endpoint/schema; the third reuses the raw-gcode endpoint/schema unchanged):
 
 | Flow | Frontend | Endpoint | Schema | System prompt |
 |---|---|---|---|---|
 | Action generation | `llm.js`, action editor's LLM panel | `POST /api/generate` | `ACTION_SCHEMA` in `api/generate.js` | [llm-system-prompt.md](llm-system-prompt.md) |
-| Raw gcode generation | `llm-gcode.js`, "Raw gcode" panel | `POST /api/generate-gcode` | `GCODE_SCHEMA` in `api/generate-gcode.js` | [gcode-system-prompt.md](gcode-system-prompt.md) |
+| Raw gcode generation | `llm-gcode.js`, "Raw gcode" panel (`index.html`) | `POST /api/generate-gcode` | `GCODE_SCHEMA` in `api/generate-gcode.js` | [gcode-system-prompt.md](gcode-system-prompt.md) |
+| Raw gcode, multi-turn session | `gcode-session.js`, "Raw gcode — printing session" panel (`gcode-session.html`) | `POST /api/generate-gcode` (same endpoint/schema as above — no backend changes for this flow) | `GCODE_SCHEMA` in `api/generate-gcode.js` | [gcode-session-system-prompt.md](gcode-session-system-prompt.md) |
 
 Both endpoints call into the same `handleGenerateRequest()` in `api/_lib/llm-proxy.js` (app-secret gate, input validation, calling the chosen provider, relaying the response) — each just supplies its own schema and generation settings:
 
@@ -51,6 +52,8 @@ The `userMessage` string embeds this object (from `collectGcodeBoxState()`):
   gcode: string[]   // current lines in the "Raw gcode" textarea
 }
 ```
+
+**Raw gcode, multi-turn session** (`POST /api/generate-gcode`, same endpoint as above) — request built by `buildGcodeSessionRequestBody()` in `gcode-session.js`. The wire shape sent to the proxy is **identical** to plain raw-gcode generation (`provider`/`model`/`effort`/`thinking`/`systemPrompt`/`userMessage`, all strings) — no backend change was needed for this flow. `userMessage` itself is also the same shape as above (current textarea content + typed instruction, via `collectGcodeSessionBoxState()`). All of the session-specific context — filament, print temp, Z-start offset, continuity mode, whether the substrate is fresh, the app-chosen prime coordinate for this turn, and a short summary of prior turns — lives entirely in `systemPrompt` instead, rebuilt fresh from client-side session state (`gcodeSession`, persisted to `localStorage["gcodeSessionState"]`) on every call. See [gcode-session-system-prompt.md](gcode-session-system-prompt.md) for how that state shapes the prompt.
 
 Both endpoints require header `x-app-secret: <app password>`, and on success relay the *entire raw upstream response* back verbatim (`res.status(200).json(data)`) — so what the browser gets is literally whatever OpenAI or Anthropic returned (see Hop 2's output below). On failure, both return `{ error: string }` with a matching HTTP status.
 
@@ -123,3 +126,5 @@ Auth: `x-api-key: <ANTHROPIC_API_KEY>` + `anthropic-version: 2023-06-01`.
 }
 ```
 No `name`/`description`/`variables` — raw gcode has no action-style templating. `validateGeneratedGcode()` checks `gcode` (including flagging any accidental `__`/`{}` syntax, which isn't supported here), `applyResultToGcodeBox()` writes `gcode` into `#raw-gcode-textarea`, and `explanation` is rendered into `#gcode-llm-explanation`.
+
+**Raw gcode, multi-turn session** — same `GCODE_SCHEMA` shape, `{gcode: string[], explanation: string}` (a fresh-turn `gcode` is a full job; a continuation-turn `gcode` is only that turn's new lines, per the SESSION CONTINUITY branch used — see [gcode-session-system-prompt.md](gcode-session-system-prompt.md)). `validateGeneratedSessionGcode()` runs the same checks as the single-turn flow. `applyResultToSessionGcodeBox()` writes `gcode` into `#raw-gcode-textarea` and stashes the result as `pendingTurn` (not yet committed to session history). Only clicking `#run-gcode-btn` — which both streams the gcode to the printer *and* triggers `commitPendingTurnIfMatches()` — appends `pendingTurn` to `gcodeSession.turns` and renders it into the Session History panel; a Generate that's never run leaves history untouched.
