@@ -20,15 +20,17 @@ The nozzle temp line is always the literal `config.printTemp` value the user typ
 
 The single-turn prompt infers fresh-vs-continuation purely from whether the gcode box's text is empty. This flow instead derives it explicitly from app-tracked session state (`turns.length === 0` = fresh), and additionally branches on the user-facing **Continuity** setting (`config.continuityMode`, `"stay-hot"` or `"full-reset"`). Only the one applicable branch is included in a given call — the model is never shown the other three.
 
+**Every turn ends with a presentation move**, regardless of branch: `G1 Z10 F3000 / G0 X0 Y220 F3000` — the same travel this class of printer normally does at the end of a print (it's literally Cura's stock Ender 3 end-gcode's "Present print" move) — so the current state of the substrate is visible before the next instruction, not just at the very end of the whole job. Built by `buildPresentationMove(includeCooldown)`. When `includeCooldown` is true (`full-reset` mode, or the closing action from `stay-hot` mode) the heaters/steppers also shut off (`M104 S0 / M140 S0 / M106 S0 / M84 X Y E`); when false (`stay-hot` mid-session), only the travel happens — the nozzle stays hot and homed for the next turn.
+
 **1. Fresh turn** (first turn on a substrate, either mode): full heat/home/prime sequence, e.g.
 ```
 G21 / G90 / M83 / M104 S{printTemp} / M140 S60 / M190 S60 / M109 S{printTemp} / G28 / G92 E0 / G1 Z{zStartOffset} F3000
 ```
-then a short prime line at the app-chosen prime coordinate (see below). `stay-hot` mode omits the closing cooldown/park sequence (nozzle stays hot/positioned for the next turn); `full-reset` mode keeps it.
+then a short prime line at the app-chosen prime coordinate (see below), then the presentation move (with cooldown in `full-reset` mode, without it in `stay-hot` mode).
 
-**2. Continuation + `stay-hot`:** no re-home/re-heat/`G92` — the model is told the nozzle is still hot and homed from the prior turn. It travels to a new prime spot, primes, then must return **only this turn's new gcode**, nothing already printed — an explicit, stated exception to "always return the full result," since the app's Session History panel (not the gcode box) carries the running record. No cooldown at the end; the job is still ongoing.
+**2. Continuation + `stay-hot`:** no re-home/re-heat/`G92` — the model is told the nozzle is still hot and homed from the prior turn's presentation position. It travels to a new prime spot, primes, then must return **only this turn's new gcode**, nothing already printed — an explicit, stated exception to "always return the full result," since the app's Session History panel (not the gcode box) carries the running record. Ends with the presentation move, no cooldown; the job is still ongoing.
 
-**3. Continuation + `full-reset`:** same "only new geometry" instruction, but wrapped in a full self-contained job (heat/home/prime…cooldown/park) every single run, even though the physical substrate itself isn't being reset — only the machine-state boilerplate resets each time, not the geometry already on the bed.
+**3. Continuation + `full-reset`:** same "only new geometry" instruction, but wrapped in a full self-contained job (heat/home/prime…draw…presentation move+cooldown/park) every single run, even though the physical substrate itself isn't being reset — only the machine-state boilerplate resets each time, not the geometry already on the bed.
 
 **4. A short PRIOR TURNS list** (last 5 entries: instruction + truncated explanation) is appended in continuation branches for narrative context, built by `summarizePriorTurns()`.
 

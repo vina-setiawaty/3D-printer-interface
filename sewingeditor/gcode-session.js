@@ -107,19 +107,32 @@ CAVEAT: these TPU numbers are best-effort defaults, not hands-on tuned on this s
 - Bed size 220x220mm.`;
 }
 
+// Every turn, regardless of fresh/continuation or continuity mode, ends with
+// the same travel move a normal end-of-print gcode does on this class of
+// printer (Cura's stock Ender 3 end-gcode: lift Z, then "G1 X0 Y220 ;Present
+// print") — moving the bed clear so the current state of the substrate is
+// visible before the next instruction, not just at the very end of the whole
+// job. `includeCooldown` controls whether the heaters/steppers also shut off
+// here (only when this turn is genuinely the end of physical activity until
+// Reset) or whether the session stays live for another turn.
+function buildPresentationMove(includeCooldown) {
+  if (includeCooldown) {
+    return "End with this hardware's normal end-of-print presentation move, then cool down and park: G1 Z10 F3000 / G0 X0 Y220 F3000 / M104 S0 / M140 S0 / M106 S0 / M84 X Y E.";
+  }
+  return "End with this hardware's normal end-of-print presentation move — G1 Z10 F3000 / G0 X0 Y220 F3000 — so the current state of the substrate is visible before the next turn. Do NOT turn off the heaters or disable steppers (no M104 S0/M140 S0/M84) — the session continues from here.";
+}
+
 function buildSessionContinuitySection(config, primeLocation, fresh, turns) {
   const primeText = `X${primeLocation.x} Y${primeLocation.y}`;
   const zStart = config.zStartOffset;
+  const presentationMove = buildPresentationMove(config.continuityMode === "full-reset");
 
   if (fresh) {
-    const closingLine = config.continuityMode === "stay-hot"
-      ? "Do NOT include a cooldown/park sequence at the end — this session stays hot and homed between turns; cooldown/park only happens when the session is finished (the app's \"New substrate / Reset Session\" action)."
-      : "End with a cooldown and park, e.g.: G1 Z10 F3000 / G0 X0 Y220 F3000 / M104 S0 / M140 S0 / M106 S0 / M84 X Y E — this session fully resets after every run, so always close the job out.";
     return `SESSION CONTINUITY
 This is the FIRST turn on a fresh, blank substrate — nothing has been printed yet. Start with a heat/home/prime sequence, e.g. (adapt coordinates as needed, but keep the shape of it):
   G21 / G90 / M83 / M104 S${config.printTemp} / M140 S60 / M190 S60 / M109 S${config.printTemp} / G28 / G92 E0 / G1 Z${zStart} F3000
 then a short prime line at ${primeText} (move there, extrude a short line to purge the nozzle, e.g. ~12mm of E over ~15mm of travel, then retract) before the first real feature — this avoids the first real stroke starting under-extruded from a cold, unprimed nozzle.
-${closingLine}`;
+${presentationMove}`;
   }
 
   const priorTurnsText = summarizePriorTurns(turns);
@@ -129,13 +142,13 @@ ${closingLine}`;
 This is a CONTINUATION turn on the same physical substrate as prior turns — the nozzle is assumed to still be hot and homed from the end of the last turn (this session keeps the machine hot between turns rather than cooling down each time). Do NOT re-home (no G28), do NOT re-heat (no M104/M140/M109/M190), and do NOT repeat G92 E0.
 Travel to the new prime location ${primeText} (this turn's prime spot is deliberately different from every prior turn's, to avoid priming on top of existing work) and prime there the same way a fresh job would (short purge line, then retract) before drawing anything new.
 Emit ONLY this turn's new feature(s) in "gcode" — do not restate, redraw, or re-derive anything from a prior turn; the app's own history panel keeps the full record of what's already been printed, not the gcode box. This is a deliberate exception to returning "the full result" — for this session, each turn's gcode is additive, not a full restatement.
-Do not end with a cooldown/park sequence — the job is still ongoing; cooldown/park only happens when the session is finished (the app's "New substrate / Reset Session" action).${priorTurnsText}`;
+${presentationMove}${priorTurnsText}`;
   }
 
   return `SESSION CONTINUITY
 This is a CONTINUATION turn — the physical substrate already has prior turns' geometry on it, so do NOT redraw or restate anything from a prior turn; emit ONLY this turn's new feature(s) in "gcode". However, this session fully resets machine state on every single run, so even though the substrate itself continues, treat this turn as its own complete job:
   G21 / G90 / M83 / M104 S${config.printTemp} / M140 S60 / M190 S60 / M109 S${config.printTemp} / G28 / G92 E0 / G1 Z${zStart} F3000
-then prime at ${primeText} (this turn's prime spot is deliberately different from every prior turn's, to avoid priming on top of existing work), draw only the new feature(s), then end with a cooldown and park, e.g.: G1 Z10 F3000 / G0 X0 Y220 F3000 / M104 S0 / M140 S0 / M106 S0 / M84 X Y E.${priorTurnsText}`;
+then prime at ${primeText} (this turn's prime spot is deliberately different from every prior turn's, to avoid priming on top of existing work), draw only the new feature(s). ${presentationMove}${priorTurnsText}`;
 }
 
 function buildGcodeSessionSystemPrompt(config, primeLocation, fresh, turns) {
