@@ -162,13 +162,48 @@
   }
 
   #raw-gcode-container {
-    width: 300px;
-    overflow-y: auto;
+    width: 560px;
+    display: flex;
+    flex-direction: column;
   }
 
-  #raw-gcode-container textarea {
+  .raw-gcode-columns {
+    display: flex;
+    gap: 1em;
+    flex: 1;
+    min-height: 0;
+  }
+
+  .raw-gcode-editor-col {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .raw-gcode-editor-col #gcode-field-editor {
+    flex: 1;
+    display: flex;
+    margin-top: 0;
+  }
+
+  #raw-gcode-textarea {
+    flex: 1;
     width: 100%;
-    height: 10em;
+    resize: none;
+  }
+
+  .raw-gcode-llm-col {
+    flex: 1;
+    min-width: 0;
+    overflow-y: auto;
+    padding-left: 0.75em;
+    border-left: 1px solid #DDD;
+  }
+
+  #gcode-llm-description {
+    width: 100%;
+    height: 6em;
   }
 
   .action-item {
@@ -504,54 +539,66 @@
 
     <div class="ui-frame" id="raw-gcode-container">
       <h1>Raw gcode</h1>
-      <div class="ui-group" id="gcode-field-editor">
-        <textarea id="raw-gcode-textarea"></textarea>
-      </div>
-      <div class="ui-group" id="raw-gcode-menu">
-        <div class="ui-item">
-          <div class="btn" id="run-gcode-btn">run gcode</div>
+      <div class="raw-gcode-columns">
+        <div class="raw-gcode-editor-col">
+          <div class="ui-group" id="gcode-field-editor">
+            <textarea id="raw-gcode-textarea"></textarea>
+          </div>
+          <div class="ui-group" id="raw-gcode-menu">
+            <div class="ui-item">
+              <div class="btn" id="run-gcode-btn">run gcode</div>
+            </div>
+            <div class="ui-item">
+              <div class="btn" id="save-gcode-btn">save gcode</div>
+            </div>
+          </div>
         </div>
-        <div class="ui-item">
-          <div class="btn" id="save-gcode-btn">save gcode</div>
-        </div>
-      </div>
 
-      <hr class="editor-divider">
-
-      <div class="ui-group">
-        <span class="label description">describe gcode in plain language and generate it directly into the box above. this is separate from the Actions system — no __variables or {} expressions here, just plain runnable gcode.</span>
-      </div>
-      <div class="ui-group">
-        <span class="label">Description</span><textarea id="gcode-llm-description" placeholder="e.g. move to X100 Y100 then home"></textarea>
-      </div>
-      <div class="ui-group">
-        <span class="label">App password</span><input type="password" id="gcode-llm-app-secret">
-      </div>
-      <div class="ui-group">
-        <span class="label">Provider</span>
-        <select id="gcode-llm-provider">
-          <option value="openai" selected>OpenAI</option>
-          <option value="anthropic">Claude (Anthropic)</option>
-        </select>
-      </div>
-      <div class="ui-group">
-        <span class="label">Model</span>
-        <select id="gcode-llm-model"></select>
-      </div>
-      <div class="ui-group">
-        <div class="ui-item">
-          <div class="btn" id="gcode-llm-generate-btn">generate with AI</div>
+        <div class="raw-gcode-llm-col">
+          <div class="ui-group">
+            <span class="label description">describe gcode in plain language and generate it directly into the box on the left. this is separate from the Actions system — no __variables or {} expressions here, just plain runnable gcode.</span>
+          </div>
+          <div class="ui-group">
+            <span class="label">Description</span><textarea id="gcode-llm-description" placeholder="e.g. move to X100 Y100 then home"></textarea>
+          </div>
+          <div class="ui-group">
+            <span class="label">App password</span><input type="password" id="gcode-llm-app-secret">
+          </div>
+          <div class="ui-group">
+            <span class="label">Provider</span>
+            <select id="gcode-llm-provider">
+              <option value="openai" selected>OpenAI</option>
+              <option value="anthropic">Claude (Anthropic)</option>
+            </select>
+          </div>
+          <div class="ui-group">
+            <span class="label">Model</span>
+            <select id="gcode-llm-model"></select>
+          </div>
+          <div class="ui-group">
+            <span class="label">Effort</span>
+            <select id="gcode-llm-effort">
+              <option value="low">low (fastest, cheapest)</option>
+              <option value="medium" selected>medium</option>
+              <option value="high">high (slower, more prone to timing out)</option>
+            </select>
+          </div>
+          <div class="ui-group">
+            <div class="ui-item">
+              <div class="btn" id="gcode-llm-generate-btn">generate with AI</div>
+            </div>
+            <span id="gcode-llm-status" class="llm-status"></span>
+          </div>
+          <div class="ui-group">
+            <div id="gcode-llm-explanation" class="llm-explanation"></div>
+          </div>
+          <div class="ui-group">
+            <div id="gcode-llm-cost-tracker" class="llm-cost-tracker"></div>
+          </div>
+          <div class="ui-group">
+            <div id="gcode-llm-messages" class="llm-messages"></div>
+          </div>
         </div>
-        <span id="gcode-llm-status" class="llm-status"></span>
-      </div>
-      <div class="ui-group">
-        <div id="gcode-llm-explanation" class="llm-explanation"></div>
-      </div>
-      <div class="ui-group">
-        <div id="gcode-llm-cost-tracker" class="llm-cost-tracker"></div>
-      </div>
-      <div class="ui-group">
-        <div id="gcode-llm-messages" class="llm-messages"></div>
       </div>
     </div>
 

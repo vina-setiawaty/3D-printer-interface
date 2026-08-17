@@ -17,6 +17,17 @@
 
 import { handleGenerateRequest } from "./_lib/llm-proxy.js";
 
+// This endpoint's max token budget + effort/thinking settings make it the
+// slowest generation call in the app, and Vercel's default function timeout
+// (10s on Hobby, 15s on Pro) is nowhere near enough for it — that mismatch
+// is what FUNCTION_INVOCATION_TIMEOUT means when it shows up in the raw
+// proxy-response preview in llm-gcode.js. 60s is the highest value the
+// Hobby plan allows; raise it further here if still timing out on a paid
+// plan with a higher cap.
+export const config = {
+  maxDuration: 60,
+};
+
 const GCODE_SCHEMA = {
   type: "object",
   properties: {
@@ -40,7 +51,7 @@ export default async function handler(req, res) {
   // truncated (see wasTruncated() in llm-gcode.js) on very large graphics.
   return handleGenerateRequest(req, res, GCODE_SCHEMA, "gcode", {
     maxOutputTokens: 32768,
-    effort: "high",
+    effort: "medium",
     thinking: true,
   });
 }

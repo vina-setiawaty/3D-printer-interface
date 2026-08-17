@@ -7,6 +7,8 @@ export const ALLOWED_MODELS = {
   anthropic: ["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5"],
 };
 
+export const ALLOWED_EFFORTS = ["low", "medium", "high"];
+
 async function callOpenAI(apiKey, model, systemPrompt, userMessage, schema, schemaName, maxOutputTokens, effort) {
   return fetch("https://api.openai.com/v1/responses", {
     method: "POST",
@@ -64,7 +66,7 @@ async function callAnthropic(apiKey, model, systemPrompt, userMessage, schema, m
 export async function handleGenerateRequest(req, res, schema, schemaName, options = {}) {
   const {
     maxOutputTokens = 8192,
-    effort = "medium",
+    effort: defaultEffort = "medium",
     thinking = false,
   } = options;
 
@@ -83,7 +85,7 @@ export async function handleGenerateRequest(req, res, schema, schemaName, option
     return;
   }
 
-  const { provider, model, systemPrompt, userMessage } = req.body || {};
+  const { provider, model, systemPrompt, userMessage, effort: requestedEffort } = req.body || {};
   if (provider !== "openai" && provider !== "anthropic") {
     res.status(400).json({ error: "provider must be 'openai' or 'anthropic'" });
     return;
@@ -92,6 +94,11 @@ export async function handleGenerateRequest(req, res, schema, schemaName, option
     res.status(400).json({ error: `model must be one of: ${ALLOWED_MODELS[provider].join(", ")}` });
     return;
   }
+  if (requestedEffort !== undefined && !ALLOWED_EFFORTS.includes(requestedEffort)) {
+    res.status(400).json({ error: `effort must be one of: ${ALLOWED_EFFORTS.join(", ")}` });
+    return;
+  }
+  const effort = requestedEffort || defaultEffort;
   if (typeof systemPrompt !== "string" || typeof userMessage !== "string" || !userMessage.trim()) {
     res.status(400).json({ error: "systemPrompt and userMessage are required strings" });
     return;

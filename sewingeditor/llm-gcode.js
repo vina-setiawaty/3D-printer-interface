@@ -103,10 +103,11 @@ function buildGcodeUserMessage(nlDescription, currentState) {
   return `Current gcode box content (JSON):\n${JSON.stringify(currentState, null, 2)}\n\nInstruction: ${nlDescription}`;
 }
 
-function buildGcodeRequestBody(nlDescription, provider, model, currentState) {
+function buildGcodeRequestBody(nlDescription, provider, model, effort, currentState) {
   return {
     provider,
     model,
+    effort,
     systemPrompt: buildGcodeSystemPrompt(),
     userMessage: buildGcodeUserMessage(nlDescription, currentState),
   };
@@ -152,6 +153,7 @@ async function onGcodeGenerateClick() {
   const secret = document.querySelector("#gcode-llm-app-secret").value;
   const provider = document.querySelector("#gcode-llm-provider").value;
   const model = document.querySelector("#gcode-llm-model").value;
+  const effort = document.querySelector("#gcode-llm-effort").value;
 
   messages.innerHTML = "";
   explanationEl.textContent = "";
@@ -181,7 +183,7 @@ async function onGcodeGenerateClick() {
     response = await fetch("/api/generate-gcode", {
       method: "POST",
       headers: { "content-type": "application/json", "x-app-secret": secret },
-      body: JSON.stringify(buildGcodeRequestBody(description, provider, model, currentState)),
+      body: JSON.stringify(buildGcodeRequestBody(description, provider, model, effort, currentState)),
     });
   } catch (e) {
     status.textContent = "";
