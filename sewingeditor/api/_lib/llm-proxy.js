@@ -85,7 +85,7 @@ export async function handleGenerateRequest(req, res, schema, schemaName, option
     return;
   }
 
-  const { provider, model, systemPrompt, userMessage, effort: requestedEffort } = req.body || {};
+  const { provider, model, systemPrompt, userMessage, effort: requestedEffort, thinking: requestedThinking } = req.body || {};
   if (provider !== "openai" && provider !== "anthropic") {
     res.status(400).json({ error: "provider must be 'openai' or 'anthropic'" });
     return;
@@ -98,12 +98,19 @@ export async function handleGenerateRequest(req, res, schema, schemaName, option
     res.status(400).json({ error: `effort must be one of: ${ALLOWED_EFFORTS.join(", ")}` });
     return;
   }
+  if (requestedThinking !== undefined && typeof requestedThinking !== "boolean") {
+    res.status(400).json({ error: "thinking must be a boolean" });
+    return;
+  }
   const effort = requestedEffort || defaultEffort;
   // Extended thinking is the largest single latency cost on a slow endpoint
-  // like generate-gcode — only pay for it at "high" effort, so picking
-  // "low"/"medium" in the UI actually buys a faster response, not just a
-  // differently-labeled one.
-  const thinking = thinkingCapable && effort === "high";
+  // like generate-gcode. A caller that exposes its own thinking toggle sends
+  // an explicit boolean; one that doesn't (or omits it) falls back to only
+  // paying for it at "high" effort, so effort alone still buys a faster
+  // response on its own. Either way it's gated on thinkingCapable, since an
+  // endpoint that never asked for it (e.g. generate.js) shouldn't have a
+  // client be able to turn it on.
+  const thinking = thinkingCapable && (requestedThinking !== undefined ? requestedThinking : effort === "high");
   if (typeof systemPrompt !== "string" || typeof userMessage !== "string" || !userMessage.trim()) {
     res.status(400).json({ error: "systemPrompt and userMessage are required strings" });
     return;
