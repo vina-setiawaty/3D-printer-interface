@@ -228,6 +228,8 @@ function setup() {
   });
 
   frameRate(10);
+
+  syncRawGcodeHeight();
 }
 
 function draw() {
@@ -340,6 +342,7 @@ function setupMotionControl() {
     } else {
       document.querySelector("#motion-keyboard-control-instructions").style.display = "none";
     }
+    syncRawGcodeHeight();
   });
 }
 
@@ -401,6 +404,22 @@ function pushMessage(msg, color, check = false) {
 
 function clearMsg() {
   document.querySelector("#message-container").innerHTML = "";
+}
+
+function syncRawGcodeHeight() {
+  const rawGcodeContainer = document.querySelector("#raw-gcode-container");
+  const siblingFrames = ["#messages", "#main-controller", "#motion-controller"]
+    .map(sel => document.querySelector(sel))
+    .filter(Boolean);
+  if (!rawGcodeContainer || siblingFrames.length === 0) return;
+
+  rawGcodeContainer.style.height = "auto";
+  const targetHeight = Math.max(...siblingFrames.map(el => el.offsetHeight));
+  rawGcodeContainer.style.height = `${targetHeight}px`;
+}
+
+function windowResized() {
+  syncRawGcodeHeight();
 }
 
 function checkGcode(_gcode) {
