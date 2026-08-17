@@ -32,6 +32,20 @@ function escapeHtml(str) {
   return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+// response.json() gives no access to the body once it fails to parse, which
+// leaves failures like a Vercel timeout page (HTML, not JSON) undiagnosable.
+// Read the raw text first so a parse failure can still show what actually
+// came back, the same way a bad model-generated JSON body is previewed below.
+async function readJsonResponse(response) {
+  const rawText = await response.text();
+  try {
+    return JSON.parse(rawText);
+  } catch (e) {
+    e.rawText = rawText;
+    throw e;
+  }
+}
+
 // Detects whether the response was cut off by the token limit, so the parse
 // failure below can say "hit the token limit" instead of a bare stack trace.
 function wasTruncated(data, provider) {
@@ -322,11 +336,12 @@ async function onGenerateClick() {
 
   let data;
   try {
-    data = await response.json();
+    data = await readJsonResponse(response);
   } catch (e) {
     status.textContent = "";
     btn.classList.remove("active");
-    messages.innerHTML = "<li>the proxy returned a response that wasn't valid JSON</li>";
+    const preview = e.rawText ? (e.rawText.length > 500 ? e.rawText.slice(0, 500) + "…" : e.rawText) : "(empty response)";
+    messages.innerHTML = `<li>the proxy returned a response that wasn't valid JSON</li><li style="white-space:pre-wrap;">${escapeHtml(preview)}</li>`;
     return;
   }
 

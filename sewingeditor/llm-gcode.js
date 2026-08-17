@@ -5,7 +5,7 @@
 // placeholders or {} expressions, since #run-gcode-btn does no
 // substitution at all; every generated line must be a concrete literal.
 // Reuses the provider-agnostic helpers from llm.js (extractResponseOutput,
-// wasTruncated, escapeHtml, recordCost, updateModelOptions,
+// wasTruncated, escapeHtml, readJsonResponse, recordCost, updateModelOptions,
 // saveAppSecretFrom/loadAppSecretInto) since those don't know or care about
 // the shape of the generated payload.
 
@@ -192,11 +192,12 @@ async function onGcodeGenerateClick() {
 
   let data;
   try {
-    data = await response.json();
+    data = await readJsonResponse(response);
   } catch (e) {
     status.textContent = "";
     btn.classList.remove("active");
-    messages.innerHTML = "<li>the proxy returned a response that wasn't valid JSON</li>";
+    const preview = e.rawText ? (e.rawText.length > 500 ? e.rawText.slice(0, 500) + "…" : e.rawText) : "(empty response)";
+    messages.innerHTML = `<li>the proxy returned a response that wasn't valid JSON</li><li style="white-space:pre-wrap;">${escapeHtml(preview)}</li>`;
     return;
   }
 
