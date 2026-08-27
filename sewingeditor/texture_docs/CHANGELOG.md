@@ -1890,3 +1890,103 @@ eTotal 6.9. **Not yet print-tested.**
 problematic in #50) is not touched yet — its `peakDwellMs` param is dead
 (never used in the body), and its behaviour on the print hasn't been
 described in detail. Next.
+
+---
+
+## 52. Segmented line v3: slower + more flow + per-segment dwell + boundary pressure nudge
+
+**Problem reported** (from printing the #51 v2 file): "just printing a
+solid line without much difference in thickness." The cone was fixed, but
+v2's 2:1 thin/fat E-per-mm ratio (0.0665 vs 0.133 mm/mm) at `speed` 400 /
+`flowMult` 1.0 was too small a difference to survive — both segments
+smeared to ~nozzle width and read as one uniform line.
+
+**Asked**: slower travel so the filament deposits well; a dwell before
+each segment to make sure enough is deposited; maybe a small retract when
+moving thick→thin; more filament, proportionate to thickness. "Try
+again."
+
+**Given** (`freeformSegmented` **v3**) — four changes, all from that
+feedback:
+- `speed` 400 → **120** mm/min.
+- `flowMult` 1.0 → **1.8** — the fat segment (already 2× the thin's
+  E/mm) now genuinely over-extrudes; on one layer the excess bulges
+  upward, which is what reads as a raised fat segment.
+- `segDwellMs` (new, **400** ms) — stationary dwell at the start of
+  every segment so nozzle pressure settles to that segment's rate first.
+- `transE` / `transESpeed` (new, **0.3** mm / 900) — a small stationary
+  E nudge at each type boundary: **+**`transE` entering a fat segment
+  (pre-charge), **−**`transE` entering a thin one (relieve). Symmetric,
+  ≈ net-zero per thin+fat pair. Explicitly *not* v1's mistake: 10×
+  smaller, matched, and biased toward the fat segment.
+- Updated the `freeformSegmented` docstring, `texture_patterns.md`
+  (Segmented section — header → v3, signature, prose, full param table
+  with the four new rows), `troubleshooting.md` §14 (v2 print result +
+  v3 fix), `global_printing_parameters.md`'s retraction-table row.
+
+**Given** (file):
+`test_print_gcode/20260827-123241_segmented-v3-testmode-slow-flow1p8-dwell-transE.gcode`
+— test mode, **14th** test-mode print, vertical calibration stripe at
+**x=161** (march 170 → 167 → 164 → 161; next −3 hits x=158 ≤ 160 → column
+wrap). One `freeformSegmented` line, x=80→140 (60mm), **y=90** (one step
+below the y=100 v2 line), thin 0.8mm×8mm / fat 1.6mm×4mm → 10 segments.
+Verified by digest: prime `G1 E1.6000 F150`; then per segment a `G4 P400`
++ `G1 X8/X4 … E0.9579 F120` (E0.9579 = `eRate(w, 0.2, 1.8)·segLen`, 1.8×
+the v2 value, still equal thin↔fat by construction); `G1 E0.3000` before
+each fat move, `G1 E-0.3000` before each thin move; one `G1 E-4.0000
+F1000` at the end; 8 negative-E (1 + 2 + 4 thin-entry nudges + 1 final);
+`verifyLayout` ok; eTotal 11.5. **Not yet print-tested.**
+
+**Note**: the test-mode calibration stripe has now marched x=200 → 161
+across 14 prints; the next −3 step (x=158) triggers the §6 column wrap —
+reset to x=200, y-band 110→170.
+
+---
+
+## 53. Segmented line v4: per-segment bead height + speed so the fat segment prints genuinely wider
+
+**Problem reported** (from printing the #52 v3 file): "clear segment
+demarcation between the 8mm segment and the 4mm segment, but I can't see a
+difference in the thickness of the line." v3's `transE` nudge made a
+visible boundary blob (the demarcation), but the segment *bodies* still
+printed the same width despite a 3:1 E-per-mm ratio.
+
+**Diagnosis**: at a fixed low nozzle Z (0.2mm) the nozzle tip physically
+confines the bead — the fat segment's extra material backs up / oozes
+rather than spreading sideways into a wider bead. More flow at a fixed Z
+domes or blobs; it doesn't widen. Logged in `troubleshooting.md` §14.
+
+**Clarified with the user**: "thickness" means in-plane **width** (a
+single-layer line whose width varies by segment), driven by extrusion
+volume + travel/extrusion speed, with volume = width × height.
+
+**Given** (`freeformSegmented` **v4**):
+- **Per-segment bead height** (`thinHeight` 0.2 / `fatHeight` 0.3), and
+  the nozzle Z steps to it per segment (`G1 Z±0.1` relative, inside the
+  G91 block). The fat nozzle sitting a little higher is the mechanism
+  that lets its extra volume spread wide instead of doming.
+- E/mm = `eRate(width, height, flowMult)` with the per-segment height —
+  volume = width × height, per the user's model. Fat is now 3× the thin's
+  E/mm (`eRate(1.6, 0.3, 1.4)` vs `eRate(0.8, 0.2, 1.4)`).
+- **Per-segment speed** (`thinSpeed` 130 / `fatSpeed` 60) — the wide fat
+  bead needs a slower pass to lay down without drag distortion.
+- `transE` / `transESpeed` **removed** — the per-segment Z step marks the
+  boundaries on its own, and the nudge's blob wasn't helping width.
+  `flowMult` 1.8 → 1.4, `segDwellMs` 400 → 250, `z` param gone (replaced
+  by the per-segment heights).
+- Updated the `freeformSegmented` docstring, `texture_patterns.md`
+  (Segmented section — header → v4, signature, prose, full param table
+  rewritten with the height/speed pairs), `troubleshooting.md` §14 (v3
+  print result + v4 fix), `global_printing_parameters.md` retraction row.
+
+**Given** (file):
+`test_print_gcode/20260827-124623_segmented-v4-testmode-perseg-height-speed-width.gcode`
+— test mode, **15th** test-mode print, **column wrap**: x=161 −3 = x=158
+≤ 160, so per §6 the stripe resets to **x=200, y-band 110→170** (start of
+the second column). One `freeformSegmented` line, x=80→140 (60mm),
+**y=80** (one step below the y=90 v3 line), thin 0.8mm×8mm×0.2h / fat
+1.6mm×4mm×0.3h → 10 segments. Verified by digest: prime `G1 E1.6000
+F150`; per thin `G1 X8 … E0.7450 F130`, per fat `G1 X4 … E1.1175 F60`;
+`G1 Z0.100 F600` before each fat / `G1 Z-0.100 F600` before each thin,
+`G4 P250` after each; one `G1 E-4.0000 F1000` at the end; 4 negative-E
+(1 + 2 + 1); `verifyLayout` ok; eTotal 10.9. **Not yet print-tested.**

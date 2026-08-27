@@ -593,39 +593,44 @@ line heading +X the tangent is 0°, so `azimuthDeg` still reads as an
 absolute heading there (the az-0 and az-45 hardware tests regenerate
 byte-identical).
 
-### Segmented line — ✅ implemented, v2 (independent thin/fat length + width), not yet print-tested
-`freeformSegmented(em, xFunc, yFunc, tStart, tEnd, {thinLen = 8.0, thinWidth = 0.8, fatLen = 4.0, fatWidth = 1.6, z = 0.2, speed = 400, flowMult = 1.0, eprime = 1.6, primedwellS = 1.0, retractMm = 4.0, retractSpeed = 1000, step = 0.1})`
+### Segmented line — ✅ implemented, v4, not yet print-tested (v2/v3 printed with no visible width contrast)
+`freeformSegmented(em, xFunc, yFunc, tStart, tEnd, {thinLen = 8.0, thinWidth = 0.8, thinHeight = 0.2, thinSpeed = 130, fatLen = 4.0, fatWidth = 1.6, fatHeight = 0.3, fatSpeed = 60, flowMult = 1.4, segDwellMs = 250, eprime = 1.6, primedwellS = 1.0, retractMm = 4.0, retractSpeed = 1000, step = 0.1})`
 
-**(v2)** A continuous single-layer line that alternates between two
-segment types, each with its **own length and its own bead width**:
-`thinWidth × thinLen`, then `fatWidth × fatLen`, repeating to the end of
-the path. This is the "independently-controlled length/width per segment
-type" the original spec asked for — v1 had only one shared `segLen` and a
-flow-rate `multiplier`.
+A continuous line that alternates between two segment types, each a single
+bead with its **own length, width, bead height, and speed**: `thinWidth ×
+thinLen`, then `fatWidth × fatLen`, repeating. "Thickness" = in-plane bead
+**width**. E per segment = `eRate(width, height, flowMult) · segLen` —
+volume follows from width × height, as intended.
 
-v1 also **retracted `retractMm` between every segment with no matching
-un-retract**, so each segment's own extrusion first had to refill that
-4mm before any pressure reached the nozzle — printing every segment as a
-**cone** (starved point at the start, full flow only near the end),
-confirmed on hardware. v2 removes the inter-segment retract entirely: the
-line is continuous, there is no travel move between segments, and the
-retract was the direct cause. Just one prime at the start and one retract
-at the very end. See `troubleshooting.md` §14.
+**v1** retracted between every segment (no un-retract) → each segment a
+**cone**. **v2** removed that, used the standard bead model → printed as a
+**near-uniform line** (2:1 E/mm ratio smeared to nozzle width). **v3**
+added `speed` 120 / `flowMult` 1.8 / a per-segment dwell / a boundary
+pressure nudge → **clear boundary demarcation but still no width contrast**
+(hardware): at a fixed low nozzle Z the tip physically confines the bead,
+so the fat segment's extra material backs up instead of spreading.
+**v4** (current): each type gets its own **bead height**, and the nozzle
+Z steps to it per segment. The fat segment's nozzle sitting a little
+higher (`fatHeight` 0.3 vs `thinHeight` 0.2) is what lets its extra volume
+spread into a genuinely wider bead. `speed` split into `thinSpeed` /
+`fatSpeed` (the wide fat bead wants a slower pass); `transE` dropped (the
+Z step marks boundaries on its own). See `troubleshooting.md` §14.
 
 | Parameter | Unit | Default | Notes |
 |---|---|---|---|
 | `thinLen` / `fatLen` | mm | 8.0 / 4.0 | Independent length of each segment type |
-| `thinWidth` / `fatWidth` | mm | 0.8 / 1.6 | Bead width (in-plane "thickness") of each type. E per segment = `eRate(width, LAYER_HEIGHT) · segLen` — the standard bead model, same as `freeformSolid` |
-| `z` | mm | 0.2 | Single layer. "Thickness" is width, NOT height — a taller fat segment would need a per-type layer count, not built |
-| `speed` | mm/min | 400 | Feedrate for all segment moves |
-| `flowMult` | — | 1.0 | Scales all segment E if the printed widths come out off |
-| `eprime` / `primedwellS` | mm / s | 1.6 / 1.0 | One-time start prime after `goto()` leaves the nozzle retracted. Dropped from v1's 4.0 (which blobbed against v2's much smaller per-segment E) to just over the `RETRACT_MM` (1.3mm) the goto pulled |
-| `retractMm` / `retractSpeed` | mm / mm·min⁻¹ | 4.0 / 1000 | The single final retract only. Distance/speed still the hardware-validated values, not the 1.3mm/900 global |
+| `thinWidth` / `fatWidth` | mm | 0.8 / 1.6 | Target in-plane bead width ("thickness") of each type |
+| `thinHeight` / `fatHeight` | mm | 0.2 / 0.3 | **(v4)** Bead height of each type — also the nozzle Z for that segment. The fat one being higher is the mechanism that lets the wider bead form instead of doming. E/mm = `eRate(width, height, flowMult)` (volume = width × height) |
+| `thinSpeed` / `fatSpeed` | mm/min | 130 / 60 | **(v4)** Per-type feedrate. The wide fat bead needs a slower pass to lay down cleanly |
+| `flowMult` | — | 1.4 | Scales all segment E on top of the width × height model. Raise/lower if the printed widths come out off |
+| `segDwellMs` | ms | 250 | Stationary dwell after the per-segment Z step, before the move, so pressure settles. 0 disables |
+| `eprime` / `primedwellS` | mm / s | 1.6 / 1.0 | One-time start prime after `goto()` leaves the nozzle retracted — just over the `RETRACT_MM` (1.3mm) the goto pulled |
+| `retractMm` / `retractSpeed` | mm / mm·min⁻¹ | 4.0 / 1000 | The single **final** retract only. Distance/speed the hardware-validated values |
 
-**Mechanism**: still uses `G91`/`G90` for the XY segment walk (the one
-part of v1 that was hardware-validated). E is relative (`M83`, file-wide).
-See `troubleshooting.md` §14 for the v1→v2 cone diagnosis and §4 for the
-G91 note.
+**Mechanism**: still uses `G91`/`G90` for the XY (and per-segment relative
+Z) segment walk — the one part of v1 that was hardware-validated. E is
+relative (`M83`, file-wide). See `troubleshooting.md` §14 for the v1→v4
+history and §4 for the G91 note.
 
 ### Variable thickness line — ✅ implemented
 `freeformVariableThickness(em, xFunc, yFunc, tStart, tEnd, {hMin = 0.16, hMax = 0.9, wavelength = 8.0, beadWidth = 0.8, zGap = 0.25, speed = 25, peakDwellMs = 300, step = 0.1})`

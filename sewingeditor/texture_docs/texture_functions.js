@@ -653,17 +653,37 @@ export function freeformHairyDotted(em, xFunc, yFunc, tStart, tEnd, {
  * Still uses G91 for the XY segment walk (unchanged -- the one part of
  * v1 that was hardware-validated; see troubleshooting.md SS4).
  *
- * Single layer at `z`. "Thickness" here is in-plane bead width, not
- * height -- a taller fat segment would need a per-type layer count,
- * which is not built. `flowMult` scales all segment E if the printed
- * widths come out off. */
+ * "Thickness" is in-plane bead WIDTH. Each segment is one bead; its
+ * cross-section is `width x height` (so E per mm = `eRate(width, height,
+ * flowMult)` -- volume follows from width x height, per the design
+ * intent), and the nozzle rides at `height` for that segment.
+ *
+ * v3 tried to get the width contrast with more flow at a FIXED nozzle Z
+ * (0.2mm) -- and it printed as a near-uniform line with clear boundary
+ * demarcation but no visible width difference. At a fixed low Z the
+ * nozzle tip physically confines the bead: the fat segment's extra
+ * material backs up / oozes instead of spreading sideways.
+ *
+ * v4 -- each segment type gets its own bead HEIGHT as well as width, and
+ * the nozzle Z steps to that height per segment. The fat segment's
+ * nozzle sitting a little higher (`fatHeight` > `thinHeight`) is what
+ * lets its extra volume spread into a genuinely wider bead instead of
+ * doming. Still "one layer" in spirit -- the two bead heights are close
+ * (e.g. 0.2 vs 0.3mm). Also splits `speed` into `thinSpeed` / `fatSpeed`
+ * (the fat, wide bead wants a slower pass to lay down cleanly), and
+ * drops v3's `transE` boundary nudge -- the per-segment Z step now marks
+ * the boundaries on its own.
+ *
+ * Still uses G91 for the XY (and per-segment relative Z) segment walk --
+ * the one part of v1 that was hardware-validated; see troubleshooting.md
+ * SS4. One prime at the start (`eprime` + `primedwellS`) and one retract
+ * at the very end; nothing between segments except the Z step + dwell. */
 export function freeformSegmented(em, xFunc, yFunc, tStart, tEnd, {
-  thinLen = 8.0, thinWidth = 0.8, fatLen = 4.0, fatWidth = 1.6,
-  z = 0.2, speed = 400, flowMult = 1.0,
-  // eprime: one-time prime after goto() leaves the nozzle retracted.
-  // v1 used 4.0mm to fight a faint start; with v2's much smaller
-  // per-segment E (~0.5mm) that blobs, so it drops to just over the
-  // RETRACT_MM (1.3mm) the goto pulled.
+  thinLen = 8.0, thinWidth = 0.8, thinHeight = 0.2, thinSpeed = 130,
+  fatLen = 4.0, fatWidth = 1.6, fatHeight = 0.3, fatSpeed = 60,
+  flowMult = 1.4, segDwellMs = 250,
+  // eprime: one-time prime after goto() leaves the nozzle retracted --
+  // just over the RETRACT_MM (1.3mm) the goto pulled.
   eprime = 1.6, primedwellS = 1.0, retractMm = 4.0, retractSpeed = 1000,
   step = 0.1,
 } = {}) {
@@ -672,7 +692,7 @@ export function freeformSegmented(em, xFunc, yFunc, tStart, tEnd, {
   em.newPattern();
 
   const first = pointAtArcLength(pts, 0);
-  em.goto(first[0], first[1], z);
+  em.goto(first[0], first[1], thinHeight);   // first segment is thin (i=0)
   em.a(`G1 E${eprime.toFixed(4)} F150`);
   em.eTotal += eprime;
   em.dwell(primedwellS * 1000);
@@ -680,18 +700,31 @@ export function freeformSegmented(em, xFunc, yFunc, tStart, tEnd, {
 
   em.a("G91");
   let [curX, curY] = first;
+  let curZ = thinHeight;
   let s = 0, i = 0;
   while (s < length - 1e-6) {
     const fat = i % 2 === 1;
     const segLen = fat ? fatLen : thinLen;
-    const width = fat ? fatWidth : thinWidth;
+    const width  = fat ? fatWidth  : thinWidth;
+    const height = fat ? fatHeight : thinHeight;
+    const spd    = fat ? fatSpeed  : thinSpeed;
     const s1 = Math.min(s + segLen, length);
     const [nx, ny] = pointAtArcLength(pts, s1);
     const dx = nx - curX, dy = ny - curY;
     const segDist = Math.hypot(dx, dy);
+
+    // step the nozzle to this segment's bead height (relative Z, G91),
+    // then let pressure settle before the move.
+    const dz = height - curZ;
+    if (Math.abs(dz) > 1e-6) {
+      em.a(`G1 Z${dz.toFixed(3)} F600`);
+      curZ = height;
+    }
+    if (segDwellMs > 0) em.dwell(segDwellMs);
+
     if (segDist > 1e-9) {
-      const eAmt = eRate(width, LAYER_HEIGHT, flowMult) * segDist;
-      em.a(`G1 X${dx.toFixed(3)} Y${dy.toFixed(3)} E${eAmt.toFixed(4)} F${speed}`);
+      const eAmt = eRate(width, height, flowMult) * segDist;
+      em.a(`G1 X${dx.toFixed(3)} Y${dy.toFixed(3)} E${eAmt.toFixed(4)} F${spd}`);
       em.eTotal += eAmt;
     }
     curX = nx; curY = ny;
@@ -700,7 +733,7 @@ export function freeformSegmented(em, xFunc, yFunc, tStart, tEnd, {
   em.a("G90");
   em.a(`G1 E${(-retractMm).toFixed(4)} F${retractSpeed}`);
   em.eTotal -= retractMm;
-  em.x = curX; em.y = curY; em.z = z;
+  em.x = curX; em.y = curY; em.z = curZ;
   em.retracted = true;
   return pts;
 }
