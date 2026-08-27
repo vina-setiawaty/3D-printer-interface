@@ -23,7 +23,7 @@ settings, and do not mix values between the two profiles.
 
 | Property | TPU (default) | PLA |
 |---|---|---|
-| Nozzle temperature | 232°C | 205°C |
+| Nozzle temperature | 220°C | 205°C |
 | Bed temperature | 50°C | 60°C |
 | Flow (M221) baseline | 180% | 100% |
 | Retraction amount (default) | 1.3mm | 1.3mm |
@@ -56,12 +56,24 @@ Every generated print MUST begin with `em.header()` and end with
 `em.footer()`. These emit the machine setup and shutdown commands — they
 are not optional, and no texture function emits them.
 
+**Extrusion mode is RELATIVE (`M83`), not absolute.** Every `G1 E<value>`
+anywhere in this file -- in the `Emitter` class and in every texture
+function -- is a DELTA: positive always means extrude, negative always
+means retract, independent of everything printed before it. This
+replaced an earlier absolute-E (`M82`) design where every E value was
+the cumulative position, which made two things worse: a line's meaning
+(extrude vs. retract) was only readable by diffing it against the
+previous line, and no function's G-code output was a genuinely
+independent, insertable unit -- combining two functions' output required
+first knowing the exact cumulative E baseline in effect at that point.
+See `troubleshooting.md` §11 for the full rationale and what changed.
+
 ### `em.header(options)` — emitted at the start of every print
 
 ```
 G21                  set units to millimetres
 G90                  absolute positioning (XYZ)
-M82                  absolute extrusion (E)
+M83                  RELATIVE extrusion (E) -- see note above
 M220 S100            feedrate override 100% (no global speed scaling)
 M221 S<flowPercent>  flow override -- 180 for TPU by default
 M104 S<nozzleTemp>   start heating nozzle (does not wait)
@@ -72,10 +84,16 @@ G28                  home all axes
 G92 E0               zero the extruder
 G1 Z5 F3000          lift to a safe height
                      ... prime line: two passes at x=10 / x=10.4,
-                     y=15..100, extruding E12 then E24 ...
+                     y=15..100, each pass extruding E12 (a relative
+                     delta -- NOT E12 then E24 as in the old absolute
+                     design; each pass is now independently 12mm) ...
 G92 E0               re-zero after priming
 G1 Z2.0 F3000        lift clear of the prime line
-G92 E<RETRACT_MM>    set the E baseline the Emitter expects
+G1 E-<RETRACT_MM> F<RETRACT_SPEED>   explicit retract, establishing the
+                     starting retracted state (replaces an earlier
+                     absolute-mode trick of baselining E via G92 to a
+                     nonzero value, which has no equivalent in relative
+                     mode)
 ```
 
 **Why the heat commands are ordered this way**: `M104`/`M140` start both
@@ -94,7 +112,7 @@ generated textures.
 **Configurable parameters** (all default to the constants in this file):
 
 ```js
-em.header({ nozzleTemp: 232, bedTemp: 50, flowPercent: 180 });
+em.header({ nozzleTemp: 220, bedTemp: 50, flowPercent: 180 });
 ```
 
 Passing nothing (`em.header()`) uses the TPU defaults. To print in PLA,
@@ -183,8 +201,11 @@ feature. Treat anything less as needing explicit justification.
 
 | Function | Retraction amount | Retraction speed | Why it differs |
 |---|---|---|---|
-| `freeformSegmented` | `retractMm: 4.0` | `retractSpeed: 1000` | Global 1.3mm/900 caused faint/failed prints; this combination is validated on real hardware |
+| `freeformSegmented` | `retractMm: 4.0` | `retractSpeed: 1000` | **(v2)** Now only ONE retract, at the very end of the line. v1 retracted this between every segment with no un-retract, which starved the start of each segment (`troubleshooting.md` §14) — the "faint/failed prints" this distance was once tuned against were that same artifact. Distance/speed kept at the validated values for the single end retract; the start prime is a separate `eprime` (1.6mm) |
 | `freeformHairy` | `retractMm: 1.3` per strand | 900 (global) | One retract/unretract PER strand — highest cycle count in the library, see `troubleshooting.md` §1 |
+| `blobDot` / `freeformBlobDotted` | `retractMm: 4.0` | 900 (global) | Anti-stringing change since v4 — larger distance only, speed left at global default per the TPU-damage caution in `troubleshooting.md` §1. Matches `freeformSegmented`'s own validated distance (different function, same number). The v4 print this shipped in was confirmed on real hardware to reduce stringing, but v4 also changed two other things at once, so this distance specifically is still not isolated — see `troubleshooting.md` §10 |
+| `hairyDot` / `freeformHairyDotted` | `retractMm: 4.0` | 900 (global) | Matches `blobDot`'s override (its root is a `blobDot`-style dome). One retract per dot — see `troubleshooting.md` §12 and the §1 caution before a dense `gap` |
+| `directionalBlobDot` / `freeformDirectionalBlobDotted` | `retractMm: 4.0` | 900 (global) | Same as `blobDot`. One retract per dot; the post-retract squish-then-drag shaping move carries no `E` (v2 removed the orbit; v3 split the drag into Z-down then lateral). See `troubleshooting.md` §13 |
 | Everything else | 1.3mm (global) | 900 (global) | No override needed |
 
 ## Change Log
@@ -198,3 +219,5 @@ feature. Treat anything less as needing explicit justification.
 | `freeformDashed` / `freeformSegmented` signatures changed: `segLen`/`gapLen` moved from positional parameters into the options object | They were the only two line styles with extra positional parameters, which silently broke them when used as `fill()` styles — see `troubleshooting.md` §8. All six styles now share one identical signature. |
 | Added `verifyLayout()` | Nothing previously checked whether separate textures overlapped; overlaps generated silently and would crash the nozzle mid-print. |
 | `verifyLayout()` `minGap` default 10mm → 0.5mm | 10mm (this project's own historical grid spacing) was too conservative as a general default — it warned on perfectly reasonable tight layouts. 0.5mm = one bead width, so it now warns only when regions are effectively touching. Overlap remains a hard error either way. |
+| Extrusion mode M82 (absolute) → M83 (relative) project-wide | Composability — each function's G-code output is now a self-contained, insertable unit with no dependency on a global cumulative E baseline. See `troubleshooting.md` §11. |
+| TPU default `NOZZLE_TEMP` 232°C → 220°C | Standardized after testing lower temperature as part of reducing TPU melt-pressure oozing (compressible-filament mechanism, see `troubleshooting.md` §10) — not yet confirmed in isolation from the other changes it shipped alongside, but adopted as the new default. |

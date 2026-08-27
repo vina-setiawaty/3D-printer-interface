@@ -16,7 +16,10 @@
 export const FILAMENT_DIA = 1.75;
 export const FIL_AREA = Math.PI * (FILAMENT_DIA / 2) ** 2;
 
-export const NOZZLE_TEMP = 232;   // TPU default -- see global_printing_parameters.md
+export const NOZZLE_TEMP = 220;   // TPU default -- lowered from 232 (see
+                                   // troubleshooting.md SS10) to reduce
+                                   // melt-pressure oozing; see
+                                   // global_printing_parameters.md
 export const BED_TEMP = 50;
 export const RETRACT_MM = 1.3;
 export const RETRACT_SPEED = 900; // 15mm/s -- slowed from 1500 (25mm/s); fast
@@ -50,11 +53,25 @@ export function dist(a, b) {
  * Tracks running state (E, Z, XY, retracted-ness) across the whole file
  * and provides the common hop/travel/settle/retract primitives so every
  * texture function can be written as a small, self-contained unit.
+ *
+ * RELATIVE EXTRUSION (M83), not absolute (M82): every `G1 E<value>` this
+ * class (and every texture function) emits is a DELTA -- positive always
+ * means extrude, negative always means retract, full stop, with no need
+ * to know what any earlier line's E value was. This replaced an earlier
+ * absolute-E design where every line carried the CUMULATIVE E position,
+ * which had two real costs: (1) a line's meaning (extrude vs. retract)
+ * was only readable by diffing it against the previous line, and (2) no
+ * function's G-code output was a truly independent, insertable unit --
+ * combining two functions' output, or a caller supplying its own
+ * hand-written G-code fragment, required first knowing (or recomputing)
+ * the exact cumulative E baseline in effect at that point in the file.
+ * `eTotal` is now kept ONLY for informational/debug totals (e.g. total
+ * filament used) -- it is never itself written into a G-code line.
  */
 export class Emitter {
   constructor() {
     this.lines = [];
-    this.eTotal = RETRACT_MM;
+    this.eTotal = 0;
     this.x = null;
     this.y = null;
     this.z = null;
@@ -78,7 +95,7 @@ export class Emitter {
 
   header({ nozzleTemp = NOZZLE_TEMP, bedTemp = BED_TEMP, flowPercent = FLOW_PERCENT } = {}) {
     const a = (s) => this.a(s);
-    a("G21"); a("G90"); a("M82");
+    a("G21"); a("G90"); a("M83");
     a("M220 S100");
     a(`M221 S${flowPercent}`);
     a(`M104 S${nozzleTemp}`);
@@ -91,11 +108,15 @@ export class Emitter {
     a("G1 X10 Y15 Z0.28 F5000");
     a("G1 X10 Y100 Z0.28 F1500 E12");
     a("G1 X10.4 Y100 Z0.28 F5000");
-    a("G1 X10.4 Y15 Z0.28 F1500 E24");
+    a("G1 X10.4 Y15 Z0.28 F1500 E12");
     a("G92 E0");
     a("G1 Z2.0 F3000");
-    a(`G92 E${RETRACT_MM.toFixed(3)}`);
-    this.eTotal = RETRACT_MM;
+    // explicit retract (a relative delta) to establish the starting
+    // retracted state -- replaces an earlier absolute-mode trick of
+    // baselining E via G92 to a nonzero value, which has no equivalent
+    // (or need) in relative mode
+    a(`G1 E${(-RETRACT_MM).toFixed(4)} F${RETRACT_SPEED}`);
+    this.eTotal = -RETRACT_MM;
     this.x = 10.4; this.y = 15.0; this.z = 2.0;
     this.retracted = true;
   }
@@ -105,6 +126,7 @@ export class Emitter {
     a("G91");
     if (!this.retracted) {
       a(`G1 E${(-RETRACT_MM).toFixed(3)} F${RETRACT_SPEED}`);
+      this.eTotal -= RETRACT_MM;
     }
     a("G1 Z10 F3000");
     a("G90");
@@ -117,8 +139,8 @@ export class Emitter {
     const hopZ = Math.max(z, this.z ?? 0) + Z_HOP;
     this.a(`G1 Z${hopZ.toFixed(3)} F3000`);
     if (!this.retracted) {
+      this.a(`G1 E${(-RETRACT_MM).toFixed(4)} F${RETRACT_SPEED}`);
       this.eTotal -= RETRACT_MM;
-      this.a(`G1 E${this.eTotal.toFixed(4)} F${RETRACT_SPEED}`);
       this.retracted = true;
     }
     this.a(`G0 X${x.toFixed(3)} Y${y.toFixed(3)} F${TRAVEL_SPEED}`);
@@ -130,16 +152,17 @@ export class Emitter {
     if (this.retracted) {
       const bonus = this.pendingPrimeBonus ? LINE_START_PRIME_MM : 0.0;
       this.pendingPrimeBonus = false;
-      this.eTotal += RETRACT_MM + bonus;
-      this.a(`G1 E${this.eTotal.toFixed(4)} F${RETRACT_SPEED}`);
+      const amt = RETRACT_MM + bonus;
+      this.a(`G1 E${amt.toFixed(4)} F${RETRACT_SPEED}`);
+      this.eTotal += amt;
       this.retracted = false;
     }
   }
 
   retract() {
     if (!this.retracted) {
+      this.a(`G1 E${(-RETRACT_MM).toFixed(4)} F${RETRACT_SPEED}`);
       this.eTotal -= RETRACT_MM;
-      this.a(`G1 E${this.eTotal.toFixed(4)} F${RETRACT_SPEED}`);
       this.retracted = true;
     }
   }
@@ -147,7 +170,7 @@ export class Emitter {
   printMove(x, y, eAdd, speed, z = null) {
     this.eTotal += eAdd;
     const zpart = z !== null ? ` Z${z.toFixed(3)}` : "";
-    this.a(`G1 X${x.toFixed(3)} Y${y.toFixed(3)}${zpart} E${this.eTotal.toFixed(4)} F${speed.toFixed(0)}`);
+    this.a(`G1 X${x.toFixed(3)} Y${y.toFixed(3)}${zpart} E${eAdd.toFixed(4)} F${speed.toFixed(0)}`);
     this.x = x; this.y = y;
     if (z !== null) this.z = z;
   }
@@ -409,9 +432,13 @@ export function freeformDotted(em, xFunc, yFunc, tStart, tEnd, {
  * signature (em, xFunc, yFunc, tStart, tEnd, options) so it is safely
  * interchangeable as a fill() style. */
 export function freeformBlobDotted(em, xFunc, yFunc, tStart, tEnd, {
-  gap = 10.0, diameter = 1.6, baseZ = 0.3, extrudeSpeed = 300, dwellMs = 400,
-  extrusionMultiplier = 1.0, liftZ = 2.0, liftSpeed = 600, liftDwellMs = 200,
-  pressDwellMs = 150, pressSpeed = 600, step = 0.1,
+  gap = 10.0, diameter = 1.6, baseZ = 0.2, buildSteps = 6, taperFactor = 0.7,
+  extrudeSpeed = 120, dwellMs = 2000, extrusionMultiplier = 1.3,
+  retractMm = 4.0, postRetractDwellMs = 2000, baseExtraMm = 0.3,
+  baseDwellMs = 1000, orbitRadius = null, orbitPts = 16, orbitSpeed = 600,
+  orbitLoops = 3, orbitDwellMs = 2000, blobClearanceMm = 0.3,
+  liftZ = 5.0, liftSpeed = 600, liftDwellMs = 1000, topOrbitLoops = 3,
+  step = 0.1,
 } = {}) {
   const pts = samplePath(xFunc, yFunc, tStart, tEnd, { step });
   const length = totalLength(pts);
@@ -420,10 +447,83 @@ export function freeformBlobDotted(em, xFunc, yFunc, tStart, tEnd, {
   while (s <= length + 1e-6) {
     const [cx, cy] = pointAtArcLength(pts, s);
     emitBlobDot(em, cx, cy, {
-      diameter, baseZ, extrudeSpeed, dwellMs, extrusionMultiplier,
-      liftZ, liftSpeed, liftDwellMs, pressDwellMs, pressSpeed,
+      diameter, baseZ, buildSteps, taperFactor, extrudeSpeed, dwellMs,
+      extrusionMultiplier, retractMm, postRetractDwellMs, baseExtraMm,
+      baseDwellMs, orbitRadius, orbitPts, orbitSpeed, orbitLoops,
+      orbitDwellMs, blobClearanceMm, liftZ, liftSpeed, liftDwellMs,
+      topOrbitLoops,
     });
     s += gap;
+  }
+  return pts;
+}
+
+/** `directionalBlobDot()`-mechanism dots (a `blobDot` dome sheared so it
+ * LEANS, plus a squish-then-drag shaping move) stamped at regular
+ * arc-length intervals along any path -- like `freeformBlobDotted` but
+ * directional.
+ *
+ * LEAN FOLLOWS THE PATH TANGENT: each dot leans along the direction the
+ * line is travelling AT THAT POINT, so a curved line produces blobs that
+ * each lean a different way (they all rake "downstream"). `azimuthDeg` is
+ * an OFFSET added to that local tangent, in degrees CCW -- 0 (default)
+ * leans exactly along the direction of travel, 90 leans to the left of
+ * it, 180 leans backward, etc. (This differs from the single-dot
+ * `directionalBlobDot()` / `emitDirectionalBlobDot()`, where `azimuthDeg`
+ * is an absolute compass direction -- a lone dot has no path to follow.)
+ *
+ * `gap` defaults to `null` = "one `diameter`" (v3), so adjacent dots'
+ * base circles just touch and the drags chain into a continuous raked
+ * ridge; pass a number to override. `stampOrder` (default "auto") works
+ * like `freeformHairyDotted`'s: if the (offset) lean at the path start
+ * points forward along the path, the line is stamped in reverse so each
+ * apex leans back over already-placed (cooled) dots rather than toward
+ * the fresh next one -- with the default offset 0 the lean always points
+ * forward, so "auto" reverses.
+ * SEPARATE from `freeformBlobDotted` -- the v17-confirmed blob dot is not
+ * touched. See emitDirectionalBlobDot() in SECTION 5 for the mechanism. */
+export function freeformDirectionalBlobDotted(em, xFunc, yFunc, tStart, tEnd, {
+  gap = null, diameter = 2.0, azimuthDeg = 0, baseZ = 0.2, buildSteps = 6,
+  taperFactor = 0.7, extrudeSpeed = 120, dwellMs = 2000,
+  extrusionMultiplier = 1.3, retractMm = 4.0, postRetractDwellMs = 2000,
+  baseExtraMm = 0.3, baseDwellMs = 1000, dragSpeed = 600,
+  stampOrder = "auto", step = 0.1,
+} = {}) {
+  const g = gap ?? diameter;
+  const pts = samplePath(xFunc, yFunc, tStart, tEnd, { step });
+  const length = totalLength(pts);
+
+  const stops = [];
+  for (let s = 0; s <= length + 1e-6; s += g) stops.push(s);
+
+  // Per-dot azimuth = local path-tangent heading + `azimuthDeg` offset.
+  // Sampled from points a short distance either side of the stop so a
+  // curve gives each dot its own lean.
+  const tanH = Math.max(step, Math.min(g * 0.5, 1.0));
+  const azAt = (s) => {
+    const a = pointAtArcLength(pts, Math.max(0, s - tanH));
+    const b = pointAtArcLength(pts, Math.min(length, s + tanH));
+    return (Math.atan2(b[1] - a[1], b[0] - a[0]) * 180) / Math.PI + azimuthDeg;
+  };
+
+  let reverse = stampOrder === "reverse";
+  if (stampOrder === "auto" && stops.length > 1) {
+    const azR = (azAt(0) * Math.PI) / 180;
+    const ax = Math.cos(azR), ay = Math.sin(azR);
+    const p0 = pointAtArcLength(pts, 0);
+    const p1 = pointAtArcLength(pts, Math.min(length, g));
+    reverse = ax * (p1[0] - p0[0]) + ay * (p1[1] - p0[1]) > 0;
+  }
+  if (reverse) stops.reverse();
+
+  em.newPattern();
+  for (const s of stops) {
+    const [cx, cy] = pointAtArcLength(pts, s);
+    emitDirectionalBlobDot(em, cx, cy, {
+      diameter, azimuthDeg: azAt(s), baseZ, buildSteps, taperFactor,
+      extrudeSpeed, dwellMs, extrusionMultiplier, retractMm,
+      postRetractDwellMs, baseExtraMm, baseDwellMs, dragSpeed,
+    });
   }
   return pts;
 }
@@ -445,8 +545,8 @@ export function freeformHairy(em, xFunc, yFunc, tStart, tEnd, {
   em.unretract();
   for (let i = 0; i < nRoots; i++) {
     const s = i * spacing;
+    em.a(`G1 E${esegmentMm.toFixed(4)} F500`);
     em.eTotal += esegmentMm;
-    em.a(`G1 E${em.eTotal.toFixed(4)} F500`);
     const z1 = baseZ + smallLift;
     em.a(`G0 Z${z1.toFixed(3)}`);
     em.z = z1;
@@ -454,8 +554,8 @@ export function freeformHairy(em, xFunc, yFunc, tStart, tEnd, {
     const z2 = z1 + bigLift;
     em.a(`G0 Z${z2.toFixed(3)} F600`);
     em.z = z2;
+    em.a(`G1 E${(-retractMm).toFixed(4)} F${RETRACT_SPEED}`);
     em.eTotal -= retractMm;
-    em.a(`G1 E${em.eTotal.toFixed(4)} F${RETRACT_SPEED}`);
     if (i < nRoots - 1) {
       const [nx, ny] = pointAtArcLength(pts, s + spacing);
       em.a(`G0 X${nx.toFixed(3)} Y${ny.toFixed(3)} F${speed}`);
@@ -463,59 +563,143 @@ export function freeformHairy(em, xFunc, yFunc, tStart, tEnd, {
     }
     em.a(`G0 Z${baseZ.toFixed(3)} F600`);
     em.z = baseZ;
-    em.eTotal += retractMm;
+    // no bookkeeping-only line needed here (an earlier absolute-E version
+    // had to pre-restore eTotal, with no G-code emitted, so the NEXT
+    // iteration's cumulative math came out right -- moot with relative E,
+    // since each iteration's extrude/retract are already independent deltas)
   }
   em.retracted = true;
   return pts;
 }
 
-/** Alternating normal/fat-rate segments following any path. Uses RELATIVE
- * mode (G91/M83) for the whole segmented run -- this specific mechanism is
- * validated against real hardware; see troubleshooting.md before changing it. */
-export function freeformSegmented(em, xFunc, yFunc, tStart, tEnd, {
-  segLen, z = 0.2, esegment = 0.5, multiplier = 4, retractMm = 4.0,
-  retractSpeed = 1000, fm = 400, eprime = 4.0, primedwellS = 1.0, step = 0.1,
+/** A line of discrete "hairy dots" (see emitHairyDot() in SECTION 5) at
+ * regular arc-length intervals -- each stamp is an anchor blob plus ONE
+ * pulled hair strand, not `freeformHairy`'s simpler point-stamp. Shares
+ * `freeformHairy`'s retraction-cycle-count caution (one retract/unretract
+ * PER strand) -- see troubleshooting.md SS1 before using dense `gap` over
+ * a long path. */
+export function freeformHairyDotted(em, xFunc, yFunc, tStart, tEnd, {
+  gap = 10.0, rootDiameter = 2.0, baseZ = 0.2, buildSteps = 6,
+  taperFactor = 0.7, extrudeSpeed = 120, baseExtraMm = 0.3,
+  baseDwellMs = 1000, dwellMs = 2000, extrusionMultiplier = 1.3,
+  hairThickness = null, hairLength = 10.0, pullExtrudeSpeed = 150,
+  beadFlowMult = 3.5, dryRiseFeedDrop = 10, retractMm = 4.0,
+  postRetractDwellMs = 500, hairDirection = "top",
+  hairAzimuthDeg = null, hairElevationDeg = null, stringMm = 2.0,
+  hairSpeed = 8000, clearanceZ = 0.5, clearanceSpeed = 600,
+  overtravelMm = 2.0, overtravelSpeed = 600,
+  stampOrder = "auto", step = 0.1,
 } = {}) {
-  if (typeof segLen !== "number") {
-    throw new TypeError(
-      "freeformSegmented requires a numeric segLen in its options object, " +
-      "e.g. {segLen: 10}. (This was a positional parameter in an earlier " +
-      "version -- moved into options so that ALL line styles share one " +
-      "identical signature and are genuinely interchangeable as fill() " +
-      "styles. See troubleshooting.md section 8.)"
-    );
-  }
   const pts = samplePath(xFunc, yFunc, tStart, tEnd, { step });
   const length = totalLength(pts);
-  const nSegments = Math.round(length / segLen);
+
+  const stops = [];
+  for (let s = 0; s <= length + 1e-6; s += gap) stops.push(s);
+
+  // stampOrder (v11): default "auto" -- if the hair's XY projection leans
+  // FORWARD along the path (toward the next dot), stamp the line in
+  // REVERSE so every strand trails behind its own dot, away from where
+  // the nozzle heads next. "forward"/"reverse" force it. A vertical hair
+  // (no XY component) leaves the order at forward.
+  let reverse = stampOrder === "reverse";
+  if (stampOrder === "auto" && stops.length > 1) {
+    const { dx: hx, dy: hy } = resolveHairDir(
+      hairDirection, hairAzimuthDeg, hairElevationDeg);
+    if (Math.hypot(hx, hy) > 1e-6) {
+      const p0 = pointAtArcLength(pts, 0);
+      const p1 = pointAtArcLength(pts, Math.min(length, gap));
+      const tx = p1[0] - p0[0], ty = p1[1] - p0[1];
+      reverse = (hx * tx + hy * ty) > 0;
+    }
+  }
+  if (reverse) stops.reverse();
+
+  em.newPattern();
+  for (const s of stops) {
+    const [cx, cy] = pointAtArcLength(pts, s);
+    emitHairyDot(em, cx, cy, {
+      rootDiameter, baseZ, buildSteps, taperFactor, extrudeSpeed,
+      baseExtraMm, baseDwellMs, dwellMs, extrusionMultiplier,
+      hairThickness, hairLength, pullExtrudeSpeed, beadFlowMult,
+      dryRiseFeedDrop, retractMm, postRetractDwellMs, hairDirection,
+      hairAzimuthDeg, hairElevationDeg, stringMm, hairSpeed,
+      clearanceZ, clearanceSpeed, overtravelMm, overtravelSpeed,
+    });
+  }
+  return pts;
+}
+
+/** Alternating thin/fat segments along any path -- a continuous, single-
+ * layer line that switches bead WIDTH between two segment types, each
+ * with its own LENGTH: `thinWidth` x `thinLen`, then `fatWidth` x
+ * `fatLen`, repeating to the end of the path.
+ *
+ * v2 (rewrite): v1 used one shared `segLen` and differentiated the fat
+ * segment only by an `esegment` x `multiplier` flow RATE -- and it
+ * retracted `retractMm` between every segment with NO matching
+ * un-retract. On real hardware that printed each segment as a CONE: a
+ * starved point at the start (the segment's E was refilling the 4mm
+ * retract before any pressure reached the nozzle) ramping up to full
+ * flow only near the end. v2:
+ *   - gives each segment type its own length AND width (the original
+ *     spec -- see texture_patterns.md);
+ *   - derives E from the standard `eRate(width, LAYER_HEIGHT)` bead model
+ *     every other line style here uses, not an arbitrary rate knob;
+ *   - REMOVES the inter-segment retract entirely. The line is
+ *     continuous; there is no travel move between segments for a retract
+ *     to protect against, and the retract was the direct cause of the
+ *     cone. One prime at the start (`eprime` + `primedwellS` dwell) and
+ *     one retract at the very end, nothing in between.
+ * Still uses G91 for the XY segment walk (unchanged -- the one part of
+ * v1 that was hardware-validated; see troubleshooting.md SS4).
+ *
+ * Single layer at `z`. "Thickness" here is in-plane bead width, not
+ * height -- a taller fat segment would need a per-type layer count,
+ * which is not built. `flowMult` scales all segment E if the printed
+ * widths come out off. */
+export function freeformSegmented(em, xFunc, yFunc, tStart, tEnd, {
+  thinLen = 8.0, thinWidth = 0.8, fatLen = 4.0, fatWidth = 1.6,
+  z = 0.2, speed = 400, flowMult = 1.0,
+  // eprime: one-time prime after goto() leaves the nozzle retracted.
+  // v1 used 4.0mm to fight a faint start; with v2's much smaller
+  // per-segment E (~0.5mm) that blobs, so it drops to just over the
+  // RETRACT_MM (1.3mm) the goto pulled.
+  eprime = 1.6, primedwellS = 1.0, retractMm = 4.0, retractSpeed = 1000,
+  step = 0.1,
+} = {}) {
+  const pts = samplePath(xFunc, yFunc, tStart, tEnd, { step });
+  const length = totalLength(pts);
   em.newPattern();
 
   const first = pointAtArcLength(pts, 0);
   em.goto(first[0], first[1], z);
+  em.a(`G1 E${eprime.toFixed(4)} F150`);
   em.eTotal += eprime;
-  em.a(`G1 E${em.eTotal.toFixed(4)} F150`);
   em.dwell(primedwellS * 1000);
   em.retracted = false;
 
   em.a("G91");
-  em.a("M83");
   let [curX, curY] = first;
-  for (let i = 0; i < nSegments; i++) {
-    const s1 = Math.min((i + 1) * segLen, length);
+  let s = 0, i = 0;
+  while (s < length - 1e-6) {
+    const fat = i % 2 === 1;
+    const segLen = fat ? fatLen : thinLen;
+    const width = fat ? fatWidth : thinWidth;
+    const s1 = Math.min(s + segLen, length);
     const [nx, ny] = pointAtArcLength(pts, s1);
     const dx = nx - curX, dy = ny - curY;
     const segDist = Math.hypot(dx, dy);
-    const mult = (i % 2 === 1) ? multiplier : 1;
-    const eAmt = segDist * esegment * mult;
-    em.a(`G1 X${dx.toFixed(3)} Y${dy.toFixed(3)} E${eAmt.toFixed(4)} F${fm}`);
-    curX = nx; curY = ny;
-    if (i < nSegments - 1) {
-      em.a(`G1 E${(-retractMm).toFixed(4)} F${retractSpeed}`);
+    if (segDist > 1e-9) {
+      const eAmt = eRate(width, LAYER_HEIGHT, flowMult) * segDist;
+      em.a(`G1 X${dx.toFixed(3)} Y${dy.toFixed(3)} E${eAmt.toFixed(4)} F${speed}`);
+      em.eTotal += eAmt;
     }
+    curX = nx; curY = ny;
+    s = s1; i++;
   }
-  em.a(`G1 E${(-retractMm).toFixed(4)} F${retractSpeed}`);
   em.a("G90");
-  em.a("M82");
+  em.a(`G1 E${(-retractMm).toFixed(4)} F${retractSpeed}`);
+  em.eTotal -= retractMm;
   em.x = curX; em.y = curY; em.z = z;
   em.retracted = true;
   return pts;
@@ -769,64 +953,229 @@ export function fill(em, region, style, options = {}) {
  */
 
 /** Shared point-extrusion mechanism for blobDot() / freeformBlobDotted():
- * extrude in place (no XY movement) to form a small dome, dwell, retract,
- * lift-press-lift to shed stringing, then (via the caller's next goto())
- * travel to the next spot. `diameter` is the primary user-facing sizing
- * knob; filament amount is DERIVED from it, not passed directly.
+ * builds a small dome by extruding WHILE rising in Z (no XY movement),
+ * dwell, retract, orbit around the dome at its own height, lift, dwell,
+ * then (via the caller's next goto()) travel to the next spot.
+ * `diameter` is the primary user-facing sizing knob; filament amount is
+ * DERIVED from it, not passed directly. Diameter/volume conversion
+ * CONFIRMED accurate on real hardware (see troubleshooting.md SS10, v2
+ * result) -- do not re-derive that math without a new reason.
  *
- * Volume model: `baseZ` (the nozzle standoff height during extrusion) is
- * physically part of this -- material must first fill the gap between the
- * nozzle tip and the bed (a cylinder of the target diameter and height
- * `baseZ`) before it can dome up above the tip (approximated as a
- * hemisphere on top of that cylinder). So:
+ * Deposition method (see `troubleshooting.md` SS10 for the full
+ * version history): rises from `baseZ` to `baseZ + domeHeight` in
+ * `buildSteps` small increments, extruding at each step -- heaviest at
+ * the bottom, tapering toward the top by `taperFactor` (default 0.7,
+ * i.e. the last step lays down only 30% of the first step's rate --
+ * deliberate "coasting": residual nozzle pressure finishes the tip
+ * instead of a hard stop). Confirmed on hardware to REDUCE stringing vs.
+ * the original single-shot version.
+ *
+ * Volume model: `baseZ` (the nozzle standoff height at the start of the
+ * rise) is physically part of this -- material must first fill the gap
+ * between the nozzle tip and the bed (a cylinder of the target diameter
+ * and height `baseZ`) before it can dome up above the tip (approximated
+ * as a hemisphere of height `domeHeight = diameter/2`). So:
  *   volume = pi*r^2*baseZ (standoff cylinder) + (2/3)*pi*r^3 (dome bulge)
  * converted to filament length via FIL_AREA (same conversion used for
  * bead E-rates elsewhere in this file), then scaled by
- * `extrusionMultiplier` -- an explicit manual dial for empirical tuning
- * against real hardware, independent of the geometry model. Default 1.0;
- * raise it if prints still look under-extruded after accounting for
- * `baseZ`. There is no separate height parameter: the resulting dome
- * height is ~diameter/2 above the standoff, which clears the 0.4mm Relief
+ * `extrusionMultiplier` -- an explicit manual dial for empirical tuning,
+ * independent of the geometry model. That total is then split across the
+ * `buildSteps` rise steps by the taper weights, so changing
+ * `extrusionMultiplier` or `taperFactor` doesn't require re-deriving
+ * anything by hand. There is no separate height parameter: dome height
+ * is ~diameter/2 above the standoff, which clears the 0.4mm Relief
  * Height Floor (global_printing_parameters.md) for any diameter >= 0.8mm.
  *
- * Anti-stringing: a straight retract-then-lift can leave a thin strand of
- * TPU stretched between the blob apex and the nozzle, which then gets
- * dragged sideways on travel. After the first lift, this presses back
- * down to `baseZ` with NO extrusion (lays the strand flat against the
- * already-deposited blob) before lifting again for the actual travel-safe
- * clearance -- see `troubleshooting.md` (stringing note under blobDot()).
- * `liftZ` should clear the tallest feature nearby before traveling to the
- * next spot -- see troubleshooting.md SS2 (nozzle collision) if these are
- * ever packed closer together than their own height. */
+ * Retraction: `retractMm` (default 4.0mm) is dot-specific, LARGER than
+ * the shared global default (`RETRACT_MM` = 1.3mm) -- see the
+ * "Retraction Is Not Uniform" table in global_printing_parameters.md.
+ * 4.0mm matches `freeformSegmented`'s own dot/line-specific override,
+ * which IS validated on real hardware (a different function, but the
+ * same underlying distance). Speed is intentionally left at the global
+ * `RETRACT_SPEED` (900mm/min); only the distance is increased, per the
+ * TPU filament-damage caution in troubleshooting.md SS1. The priming
+ * restoration and the retract below both use exactly `retractMm`, kept
+ * symmetric within this one function call -- with relative E (see
+ * Emitter docstring) this is now a purely local property of this
+ * function, not something that can drift out of sync with global state
+ * the way it could under the earlier absolute-E design.
+ *
+ * No stationary extrusion, ever: the priming restoration above is NOT
+ * emitted as its own standalone `G1 E...` line while stationary -- that
+ * would be exactly the kind of instantaneous pressure dump the tapered
+ * build below is designed to avoid. Instead it's added into the FIRST
+ * build step's E value, so the very first upward Z movement already
+ * carries it; extrusion and motion are never separated anywhere in this
+ * function.
+ *
+ * Dwell: `dwellMs` (default 2000ms -- merged from two separate 500ms
+ * dwells in an earlier version) after the dome is built, before retract.
+ * `postRetractDwellMs` (default 2000ms) is a second, separate dwell
+ * right after the retract, before the orbit begins.
+ *
+ * Base anchor: the first build step also carries `baseExtraMm` (default
+ * 0.3mm), on top of its normal taper share -- a deliberately bigger
+ * first-contact blob meant to spread and stick to the bed before the
+ * rest of the dome piles on top of it -- followed by its own
+ * `baseDwellMs` (default 1000ms) dwell, letting that anchor settle
+ * before continuing to rise. `baseZ` default also lowered 0.3 -> 0.2mm
+ * for the same reason (a lower standoff squashes the initial deposit
+ * flatter/wider against the bed). `extrudeSpeed` default lowered
+ * 200 -> 120mm/min -- a gentler build means less pressure builds up in
+ * the (compressible, TPU) filament column in the first place, rather
+ * than relying entirely on dwells to wait out pressure that already
+ * built up. Nozzle temperature is NOT a parameter here (it is a
+ * print-wide `em.header()` setting) -- a lower nozzle temp was tested
+ * alongside these changes at the generation-script level for the same
+ * pressure/ooze reason; see troubleshooting.md SS10.
+ *
+ * Anti-stringing -- two orbits, dome height then lifted (v16, current):
+ * earlier versions tried squishing the string down with vertical
+ * lift/drop moves (both a pre-retract drop and a post-retract
+ * lift-drop-lift, REMOVED). v15 briefly also removed the ORIGINAL orbit
+ * (the one confirmed on real hardware to reduce stringing) by mistake
+ * while trying to replace `postLiftBounces` -- v16 restores it. Current
+ * design: after retract and `postRetractDwellMs`, trace the ORIGINAL
+ * orbit (`orbitRadius`, default the dot's own radius, `orbitPts`
+ * segments), repeated `orbitLoops` times (default 3), around (cx, cy) AT
+ * THE DOME'S OWN TOP HEIGHT -- no extrusion, sweeping right at the
+ * height where any residual string is actually attached. Then re-centers
+ * (hovering at `z + blobClearanceMm`, not touching the dome, before
+ * moving XY back to center -- the orbit's last point ends `orbitRadius`
+ * away from center) and dwells (`orbitDwellMs`). Only THEN lifts to
+ * `liftZ` above the dome and dwells (`liftDwellMs`) -- clearing the blob
+ * entirely -- and finally traces a SECOND pass of the same circle,
+ * `topOrbitLoops` times (default 3), at that lifted height, clearly
+ * higher than the dome so nothing here can touch it either. This second,
+ * higher orbit REPLACES the old `postLiftBounces` down/up cycles and the
+ * v14 second wider/lower orbit, both removed. `liftZ` should clear the
+ * tallest feature nearby -- see troubleshooting.md SS2 (nozzle collision)
+ * if these are ever packed closer together than their own height. Pass
+ * `orbitRadius: 0` to disable both orbits at once.
+ *
+ * `extrusionMultiplier` default raised 1.0 -> 1.3 -- reported
+ * under-extruded relative to target diameter on real hardware. */
 function emitBlobDot(em, cx, cy, {
-  diameter = 1.6, baseZ = 0.3, extrudeSpeed = 300, dwellMs = 400,
-  extrusionMultiplier = 1.0, liftZ = 2.0, liftSpeed = 600,
-  liftDwellMs = 200, pressDwellMs = 150, pressSpeed = 600,
+  diameter = 1.6, baseZ = 0.2, buildSteps = 6, taperFactor = 0.7,
+  extrudeSpeed = 120, dwellMs = 2000, extrusionMultiplier = 1.3,
+  retractMm = 4.0, postRetractDwellMs = 2000, baseExtraMm = 0.3,
+  baseDwellMs = 1000, orbitRadius = null, orbitPts = 16, orbitSpeed = 600,
+  orbitLoops = 3, orbitDwellMs = 2000, blobClearanceMm = 0.3,
+  liftZ = 5.0, liftSpeed = 600, liftDwellMs = 1000, topOrbitLoops = 3,
 } = {}) {
   const radius = diameter / 2.0;
+  const domeHeight = radius;
   const standoffVolume = Math.PI * radius * radius * baseZ;
   const domeVolume = (2 / 3) * Math.PI * radius ** 3;
-  const eAmt = ((standoffVolume + domeVolume) / FIL_AREA) * extrusionMultiplier;
+  const totalE = ((standoffVolume + domeVolume) / FIL_AREA) * extrusionMultiplier;
 
   em.goto(cx, cy, baseZ);
-  em.unretract();
-  em.eTotal += eAmt;
-  em.a(`G1 E${em.eTotal.toFixed(4)} F${extrudeSpeed}`);
-  em.dwell(dwellMs);
-  em.retract();
 
-  const zLift = baseZ + liftZ;
+  // priming restoration matching THIS function's own retractMm (not the
+  // global RETRACT_MM) -- see retraction note above. NOT emitted as its
+  // own stationary E-only line: folded into the FIRST build step below,
+  // so extrusion never happens without accompanying movement, not even
+  // for this restoration.
+  const bonus = em.pendingPrimeBonus ? LINE_START_PRIME_MM : 0.0;
+  em.pendingPrimeBonus = false;
+  const primeE = retractMm + bonus;
+  em.retracted = false;
+
+  // build the dome by rising in Z while extruding a tapering share of
+  // totalE per step, instead of one instantaneous point stamp. The first
+  // step also carries primeE (the priming restoration above) AND
+  // baseExtraMm (an extra anchor deposit, on top of its normal taper
+  // share) -- a deliberately bigger first-contact blob meant to spread
+  // and stick to the bed before the rest of the dome piles on top of it.
+  const nSteps = Math.max(1, Math.round(buildSteps));
+  const zStep = domeHeight / nSteps;
+  const weights = [];
+  for (let i = 0; i < nSteps; i++) {
+    weights.push(1 - taperFactor * (nSteps > 1 ? i / (nSteps - 1) : 0));
+  }
+  const weightSum = weights.reduce((a, b) => a + b, 0);
+
+  let z = baseZ;
+  for (let i = 0; i < nSteps; i++) {
+    z += zStep;
+    const stepE = totalE * (weights[i] / weightSum) + (i === 0 ? primeE + baseExtraMm : 0);
+    em.a(`G1 Z${z.toFixed(3)} E${stepE.toFixed(4)} F${extrudeSpeed}`);
+    em.eTotal += stepE;
+    if (i === 0) em.dwell(baseDwellMs);
+  }
+  em.z = z;
+
+  em.dwell(dwellMs);
+
+  em.a(`G1 E${(-retractMm).toFixed(4)} F${RETRACT_SPEED}`);
+  em.eTotal -= retractMm;
+  em.retracted = true;
+
+  em.dwell(postRetractDwellMs);
+
+  // ORIGINAL orbit, restored in v16 -- right at the dome's own top
+  // height (not lifted), no extrusion. Defaults to the dot's own radius;
+  // pass orbitRadius: 0 to disable both orbits (this one and the lifted
+  // one below). Repeated orbitLoops times in a row. Confirmed on real
+  // hardware to reduce stringing -- v15 mistakenly removed this.
+  const actualOrbitRadius = orbitRadius ?? radius;
+  const nOrbit = Math.max(3, Math.round(orbitPts));
+  if (actualOrbitRadius > 0) {
+    const nLoops = Math.max(1, Math.round(orbitLoops));
+    for (let loop = 0; loop < nLoops; loop++) {
+      for (let i = 0; i <= nOrbit; i++) {
+        const theta = (i / nOrbit) * 2 * Math.PI;
+        const ox = cx + actualOrbitRadius * Math.cos(theta);
+        const oy = cy + actualOrbitRadius * Math.sin(theta);
+        em.a(`G0 X${ox.toFixed(3)} Y${oy.toFixed(3)} F${orbitSpeed}`);
+        em.x = ox; em.y = oy;
+      }
+    }
+  }
+
+  // Steps 6-10 (recenter, dwell, lift, dwell, second orbit) TEMPORARILY
+  // DISABLED for testing, per request: "after the fifth step, try to
+  // move to the next dot straight away." The nozzle now goes directly
+  // from the first (dome-height) orbit above to the next dot's goto(),
+  // which itself lifts to travel height before the XY move -- so this
+  // still departs safely, just without the recenter/second-orbit dance.
+  // Uncomment to restore v16 behavior.
+  /*
+  // recenter, hovering just above the dome (blobClearanceMm) so the
+  // return-to-center move doesn't touch/drag the just-printed blob --
+  // the orbit's last point ends actualOrbitRadius away from center.
+  const zHover = z + blobClearanceMm;
+  em.a(`G1 Z${zHover.toFixed(3)} F${orbitSpeed}`);
+  em.z = zHover;
+  em.a(`G0 X${cx.toFixed(3)} Y${cy.toFixed(3)} F${orbitSpeed}`);
+  em.x = cx; em.y = cy;
+  em.dwell(orbitDwellMs);
+
+  // lift clear to travel height and dwell
+  const zLift = z + liftZ;
   em.a(`G1 Z${zLift.toFixed(3)} F${liftSpeed}`);
   em.z = zLift;
   em.dwell(liftDwellMs);
 
-  // press any stretched strand back down onto the blob, no extrusion
-  em.a(`G1 Z${baseZ.toFixed(3)} F${pressSpeed}`);
-  em.z = baseZ;
-  em.dwell(pressDwellMs);
-
-  em.a(`G1 Z${zLift.toFixed(3)} F${liftSpeed}`);
-  em.z = zLift;
+  // SECOND orbit (v16) -- same circle, traced again at this lifted
+  // height (clearly higher than the dome top, unlike the first orbit
+  // above), topOrbitLoops times. Replaces the old postLiftBounces
+  // down/up cycles and the v14 second wider/lower orbit. No recenter
+  // needed afterward: the caller's next goto() for the next dot handles
+  // repositioning regardless of where this orbit's last point lands.
+  if (actualOrbitRadius > 0) {
+    const nTopLoops = Math.max(1, Math.round(topOrbitLoops));
+    for (let loop = 0; loop < nTopLoops; loop++) {
+      for (let i = 0; i <= nOrbit; i++) {
+        const theta = (i / nOrbit) * 2 * Math.PI;
+        const ox = cx + actualOrbitRadius * Math.cos(theta);
+        const oy = cy + actualOrbitRadius * Math.sin(theta);
+        em.a(`G0 X${ox.toFixed(3)} Y${oy.toFixed(3)} F${orbitSpeed}`);
+        em.x = ox; em.y = oy;
+      }
+    }
+  }
+  */
 }
 
 /** The DEFAULT dot texture (see texture_patterns.md) -- a single-point
@@ -838,6 +1187,107 @@ function emitBlobDot(em, cx, cy, {
 export function blobDot(em, cx, cy, options = {}) {
   em.newPattern();
   emitBlobDot(em, cx, cy, options);
+}
+
+/**
+ * "Directional" blob dot -- a `blobDot`-family dome that LEANS in a
+ * chosen compass direction, for a raked/combed-looking tactile bump.
+ * Reuses `blobDot`'s volume model (standoff cylinder + hemispherical
+ * dome, /FIL_AREA, x extrusionMultiplier), with two `azimuthDeg`-driven
+ * changes:
+ *  1. SHEARED BUILD -- the nozzle travels `radius` (= diameter/2) in the
+ *     azimuth direction as it rises through `buildSteps` to the dome top,
+ *     while extruding, so the apex ends at
+ *     (cx + radius*cos(az), cy + radius*sin(az), domeTop).
+ *  2. SQUISH-THEN-DRAG (v3) -- after build -> dwell -> retract -> dwell,
+ *     the nozzle (still sitting at the leaning apex) does TWO straight
+ *     NO-EXTRUSION moves: (a) straight DOWN in Z to bed level (`baseZ`),
+ *     squishing the leaning blob onto the bed; then (b) a lateral drag
+ *     -azimuth (against the lean) by `diameter` in XY, ending at the
+ *     trailing edge of the base circle (cx - radius*cos az,
+ *     cy - radius*sin az). Drags the nozzle tip back across the whole
+ *     blob to shape it AND (like `blobDot`'s orbit) sweep near any
+ *     residual string. v2 did this as ONE diagonal move; v3 splits it
+ *     into Z-first then XY (per request).
+ * Net sequence: build -> dwell(dwellMs) -> retract -> dwell
+ * (postRetractDwellMs) -> squish down -> lateral drag -> next dot. **v2
+ * removed the dome-height orbit + recenter** v1 had; v3 splits the drag.
+ * SEPARATE from `blobDot` on purpose: `blobDot` v17 is the
+ * hardware-confirmed default and is not touched by this. `azimuthDeg` is
+ * CCW from +X (same convention as `hairyDot`).
+ */
+function emitDirectionalBlobDot(em, cx, cy, {
+  diameter = 2.0, azimuthDeg = 0, baseZ = 0.2, buildSteps = 6,
+  taperFactor = 0.7, extrudeSpeed = 120, dwellMs = 2000,
+  extrusionMultiplier = 1.3, retractMm = 4.0, postRetractDwellMs = 2000,
+  baseExtraMm = 0.3, baseDwellMs = 1000, dragSpeed = 600,
+} = {}) {
+  const radius = diameter / 2.0;
+  const domeHeight = radius;
+  const standoffVolume = Math.PI * radius * radius * baseZ;
+  const domeVolume = (2 / 3) * Math.PI * radius ** 3;
+  const totalE = ((standoffVolume + domeVolume) / FIL_AREA) * extrusionMultiplier;
+
+  const azR = (azimuthDeg * Math.PI) / 180;
+  const ax = Math.cos(azR), ay = Math.sin(azR);
+
+  em.goto(cx, cy, baseZ);
+
+  const bonus = em.pendingPrimeBonus ? LINE_START_PRIME_MM : 0.0;
+  em.pendingPrimeBonus = false;
+  const primeE = retractMm + bonus;
+  em.retracted = false;
+
+  // sheared build: rise to the dome top while also travelling `radius` in
+  // the azimuth direction (spread across the steps), extruding a tapering
+  // share of totalE per step. First step carries primeE + baseExtraMm,
+  // same as blobDot.
+  const nSteps = Math.max(1, Math.round(buildSteps));
+  const zStep = domeHeight / nSteps;
+  const xStep = (ax * radius) / nSteps, yStep = (ay * radius) / nSteps;
+  const weights = [];
+  for (let i = 0; i < nSteps; i++) {
+    weights.push(1 - taperFactor * (nSteps > 1 ? i / (nSteps - 1) : 0));
+  }
+  const weightSum = weights.reduce((a, b) => a + b, 0);
+
+  let z = baseZ, bx = cx, by = cy;
+  for (let i = 0; i < nSteps; i++) {
+    z += zStep; bx += xStep; by += yStep;
+    const stepE = totalE * (weights[i] / weightSum) + (i === 0 ? primeE + baseExtraMm : 0);
+    em.a(`G1 X${bx.toFixed(3)} Y${by.toFixed(3)} Z${z.toFixed(3)} E${stepE.toFixed(4)} F${extrudeSpeed}`);
+    em.eTotal += stepE;
+    if (i === 0) em.dwell(baseDwellMs);
+  }
+  em.x = bx; em.y = by; em.z = z;
+  const apexX = bx, apexY = by;
+
+  em.dwell(dwellMs);
+
+  em.a(`G1 E${(-retractMm).toFixed(4)} F${RETRACT_SPEED}`);
+  em.eTotal -= retractMm;
+  em.retracted = true;
+  em.dwell(postRetractDwellMs);
+
+  // v3 squish-then-drag, from the leaning apex (where the build ended and
+  // the nozzle still sits), NO extrusion:
+  //  (a) straight DOWN in Z to bed level -- squishes the leaning blob;
+  //  (b) lateral drag -azimuth by `diameter`, ending at the trailing
+  //      edge of the base circle (cx - radius*ax, cy - radius*ay).
+  em.a(`G1 Z${baseZ.toFixed(3)} F${dragSpeed}`);
+  em.z = baseZ;
+  const endX = apexX - ax * diameter, endY = apexY - ay * diameter;
+  em.a(`G1 X${endX.toFixed(3)} Y${endY.toFixed(3)} F${dragSpeed}`);
+  em.x = endX; em.y = endY;
+}
+
+/** The directional (leaning) blob dot -- see emitDirectionalBlobDot()
+ * above. SEPARATE from blobDot() (the hardware-confirmed default);
+ * `azimuthDeg` (CCW from +X) sets the lean direction. For a line of
+ * these use freeformDirectionalBlobDotted(). */
+export function directionalBlobDot(em, cx, cy, options = {}) {
+  em.newPattern();
+  emitDirectionalBlobDot(em, cx, cy, options);
 }
 
 /** A single solid circular dot, built by spiraling a fill path outward --
@@ -854,8 +1304,327 @@ export function circularDot(em, cx, cy, { diameter = 1.6, height = 0.4, speed = 
   emitStroke(em, pts, nLayers, 0.42, speed);
 }
 
-// NOTE: "hairy dot" (a single circular dot with one hair strand pulled
-// from its center) is NOT implemented -- known gap, see texture_patterns.md.
+// The 4 named hair directions, as (azimuth, elevation) degree pairs --
+// shortcuts for the general polar form added in v11. Elevation is measured
+// from the bed plane (0 = flat, 90 = straight up); azimuth is CCW from +X.
+const HAIR_PRESET = {
+  top:    { azDeg: 0,   elDeg: 90 },
+  right:  { azDeg: 0,   elDeg: 0 },
+  left:   { azDeg: 180, elDeg: 0 },
+  bottom: { azDeg: 270, elDeg: 0 },
+};
+
+/**
+ * Resolve a hair pull direction (v11) to azimuth/elevation degrees plus a
+ * unit vector (dx,dy,dz). Explicit `azimuthDeg` / `elevationDeg` (either
+ * one non-null) win over the `hairDirection` string preset; an unset
+ * explicit angle defaults (azimuth 0 = +X, elevation 90 = straight up).
+ * Elevation is from the bed plane (0 = flat along the bed, 90 = up);
+ * azimuth is CCW from +X. So the presets are: top = el 90; right = az 0
+ * el 0; left = az 180 el 0; bottom = az 270 el 0.
+ */
+function resolveHairDir(hairDirection, azimuthDeg, elevationDeg) {
+  let azDeg, elDeg;
+  if (azimuthDeg != null || elevationDeg != null) {
+    azDeg = azimuthDeg ?? 0;
+    elDeg = elevationDeg ?? 90;
+  } else {
+    if (!(hairDirection in HAIR_PRESET)) {
+      throw new Error(
+        `hairyDot: hairDirection must be "top", "left", "right", or ` +
+        `"bottom" (got "${hairDirection}"), or pass hairAzimuthDeg / ` +
+        `hairElevationDeg for an arbitrary polar direction`
+      );
+    }
+    ({ azDeg, elDeg } = HAIR_PRESET[hairDirection]);
+  }
+  const DEG = Math.PI / 180;
+  const elR = elDeg * DEG, azR = azDeg * DEG;
+  const dxy = Math.cos(elR);
+  return {
+    azDeg, elDeg,
+    dx: Math.cos(azR) * dxy,
+    dy: Math.sin(azR) * dxy,
+    dz: Math.sin(elR),
+  };
+}
+
+/**
+ * A single dot with ONE hair strand pulled from its center -- closes the
+ * "hairy dot" gap noted in texture_patterns.md. Builds a real ROOT DOME
+ * first -- literally reusing `emitBlobDot`'s own tapered-rise build
+ * mechanism and volume model (v3, unchanged since) -- then pulls a hair
+ * out of that dome's own melt. Originally adapted the Two-Step Suspend
+ * Printing mechanism from Wang et al., "X-Hair: 3D Printing Hair-like
+ * Structures with Multi-form, Multi-property and Multi-function" (UIST
+ * '24, https://doi.org/10.1145/3654777.3676360); v6 departs from their
+ * mechanism in one deliberate way -- see below and `troubleshooting.md`
+ * SS12 for the full reading notes and version history.
+ *
+ * v4 change (real EXTRUDE-then-STRING, not deposit-then-stretch): v1-v3
+ * deposited ALL the hair's material stationary (or, in v3, all of the
+ * ROOT's material) and pulled with zero extrusion the whole way. v4
+ * introduced X-Hair's two-part pull instead: an EXTRUDE segment (move
+ * AND extrude normally, laying a real bead) followed by a STRING segment
+ * (move FAST with ZERO extrusion). v5 moved the retract to fire
+ * IMMEDIATELY after the extrude segment rather than at the very end
+ * (confirmed on hardware to fix whole-pull stringing caused by this
+ * function's pressurized `blobDot`-style root -- see troubleshooting.md
+ * SS12 for the full explanation).
+ *
+ * v6 change (`hairLength` now defines the EXTRUDE distance, not the
+ * total pull): X-Hair's own paper (PLA) has the STRING segment define
+ * most of the perceived hair length/fineness, with EXTRUDE just a short
+ * lead-in. On real TPU hardware, the opposite was observed: the extrude
+ * segment turned out to be more efficient at defining the actual hair
+ * length, since the string segment's own material reads as too soft to
+ * register as part of the hairy texture on TPU. So v6 makes `hairLength`
+ * the EXTRUDE segment's own length directly (a real bead the full
+ * target length, at `pullExtrudeSpeed`), retracts immediately after
+ * (v5's fix, unchanged), dwells (`postRetractDwellMs`), then does a
+ * separate, small, independent `stringMm` fast zero-extrusion pull
+ * (X-Hair's STRING step, kept as a finishing touch rather than the main
+ * length-definer) before `overtravelMm` provides final clearance. This
+ * is a deliberate departure from X-Hair's own ratio-driven design (their
+ * Extrusion Length Ratio no longer applies the same way here) -- TPU's
+ * own behavior, not the paper, drives this one.
+ *
+ * v7 change (thickness derived from length; base diameter promoted to a
+ * first-class feel knob): `hairThickness` defaults to `null`, meaning
+ * "derive it from `hairLength`" -- a longer strand flops under its own
+ * weight at a thickness that held a short one. No sequence change; only
+ * the extrude segment's bead cross-section moves with length now.
+ * `rootDiameter` is unchanged mechanically but is now a real tuning
+ * parameter for how soft/tough the finished hair feels (user obs:
+ * smaller base = softer, bigger base = tougher), not a "fixed for now"
+ * value -- and it is kept OUT of the thickness derivation on purpose so
+ * the two effects can be characterised separately.
+ *
+ * v8 change (thicker bead by default): the step-3 extruded bead was
+ * still laying too little material and the hair flopped, so a new
+ * `beadFlowMult` multiplies the bead's E on top of `extrusionMultiplier`
+ * -- ONLY the step-3 bead, not the root dome. Effective bead flow is
+ * `extrusionMultiplier * beadFlowMult`. Lower it toward 1.0 if the hair
+ * comes out too fat/blobby; the root dome is untouched by it.
+ *
+ * v9 change (slower, fatter bead): `beadFlowMult` default 2.0 -> 3.5
+ * (effective bead flow 1.3 * 3.5 = 4.55x the geometric `eRate`) and
+ * `pullExtrudeSpeed` default 1000 -> 500mm/min -- a slower Z-rise while
+ * extruding lays a denser, better-formed bead. Both are still plain
+ * per-call overrides.
+ *
+ * v10 change (matched feedrate + dry rise): `pullExtrudeSpeed` default
+ * 500 -> 150mm/min, and the EXTRUDE segment is now split in two:
+ *   1. rise by exactly `eA` mm (the filament amount) while extruding
+ *      `eA` mm, so the Z feedrate and the ACTUAL filament feedrate are
+ *      BOTH `pullExtrudeSpeed` (in a `G1 Z.. E.. F..` move F is the Z
+ *      rate and E is slaved to it -- equal distances make equal rates);
+ *   2. a no-extrusion DRY RISE finishing the climb to the full
+ *      `hairLength` height, slightly slower (`dryRiseFeedDrop` mm/min,
+ *      default 10, below `pullExtrudeSpeed`), so the bead is fully laid
+ *      down before the tip is stretched up to height.
+ * If `eA >= hairLength` the split collapses to one move (can't match
+ * rates and still reach height) -- lower `beadFlowMult` or raise
+ * `hairLength` if that matters.
+ *
+ * v11 change (arbitrary polar pull direction): the hair pull is now ONE
+ * straight 3D line from the dome top along a unit vector set by two
+ * angles -- `hairElevationDeg` (from the bed plane: 0 = flat, 90 =
+ * straight up) and `hairAzimuthDeg` (CCW from +X). Explicit angles win
+ * over the `hairDirection` string, which is now just a shortcut
+ * (top = el 90; right = az 0/el 0; left = az 180/el 0; bottom =
+ * az 270/el 0). The two pre-v11 code branches (pure Z / pure XY) are
+ * gone -- the emitted G-code for those presets is unchanged (only the
+ * axes that move are written). The `clearanceZ` hop now fires only for
+ * near-horizontal pulls (`hairElevationDeg` < 30). The extrude/string/
+ * overtravel moves all run along the same vector. NOTE: an angled hair
+ * has real XY reach (`(hairLength+stringMm+overtravelMm)*cos(elevation)`
+ * in the azimuth direction) -- the caller's `verifyLayout` region must
+ * include it. `freeformHairyDotted` also gains `stampOrder` (default
+ * "auto"): stamp the dot line in whichever direction leaves each strand
+ * trailing behind its dot, away from the next dot.
+ *
+ * `hairThickness` drives the extrude segment's bead cross-section (via
+ * the shared `eRate()` helper, same one line-style functions use for
+ * width/height -> E-per-mm), not pull speed -- unlike v1-v3, which had
+ * `hairSpeed` derive from thickness. **(v7)** It defaults to `null` =
+ * derive from `hairLength`: `0.5 * (hairLength / 4.0)`, clamped
+ * 0.4-2.0mm (0.5mm anchored at a 4mm hair, the one known-good point).
+ * Pass a number to override. `hairSpeed` (the STRING segment's
+ * speed) still defaults to X-Hair's validated 8000mm/min, though its
+ * role is now secondary (a short finishing pull, not the main hair
+ * length) -- PLA-validated, not TPU-validated. `pullExtrudeSpeed`
+ * (default 150mm/min, v10 -- was 500 in v9, 1000 before) is the
+ * extrude-while-rising sub-move's feed, and also the actual filament
+ * feed there (v10's matched-rate split). `dryRiseFeedDrop` (default 10)
+ * is how much slower, in mm/min, the no-extrusion dry-rise sub-move goes.
+ *
+ * `hairDirection` (pre-v11: exactly 4 strings; v11: shortcuts for the
+ * polar form) -- "top" = straight up; "left"/"right"/"bottom" =
+ * horizontal in that compass direction. For anything else pass
+ * `hairElevationDeg` (0 = flat, 90 = up) and `hairAzimuthDeg` (CCW from
+ * +X); either one non-null overrides the string. `clearanceZ`'s hop
+ * (between the retract+dwell and the string segment, so the fast pull
+ * doesn't drag across the just-laid bead) fires only when the pull is
+ * near-horizontal (`hairElevationDeg` < 30, which covers the old
+ * left/right/bottom and excludes "top").
+ *
+ * `overtravelMm` (default 2.0mm) is EXTRA distance walked past the
+ * string segment, same direction, still no extrusion, purely so the
+ * strand's actual tip ends up clear of wherever the caller's NEXT dot
+ * happens to be.
+ *
+ * CAUTION: like `freeformHairy`, this is one retract/unretract cycle PER
+ * dot -- see troubleshooting.md SS1 (TPU filament damage) before using a
+ * dense `gap` in `freeformHairyDotted` over a long path.
+ */
+function emitHairyDot(em, cx, cy, {
+  rootDiameter = 2.0, baseZ = 0.2, buildSteps = 6, taperFactor = 0.7,
+  extrudeSpeed = 120, baseExtraMm = 0.3, baseDwellMs = 1000,
+  dwellMs = 2000, extrusionMultiplier = 1.3, hairThickness = null,
+  hairLength = 10.0, pullExtrudeSpeed = 150, beadFlowMult = 3.5,
+  dryRiseFeedDrop = 10, retractMm = 4.0,
+  postRetractDwellMs = 500, hairDirection = "top",
+  hairAzimuthDeg = null, hairElevationDeg = null, stringMm = 2.0,
+  hairSpeed = 8000, clearanceZ = 0.5, clearanceSpeed = 600,
+  overtravelMm = 2.0, overtravelSpeed = 600,
+} = {}) {
+  // v11: pull direction is a full polar vector. `hairDirection` string is
+  // a shortcut; hairAzimuthDeg / hairElevationDeg override it. Throws on a
+  // bad string (only reached when no explicit angle is given).
+  const { elDeg, dx, dy, dz } = resolveHairDir(
+    hairDirection, hairAzimuthDeg, hairElevationDeg);
+
+  // root dome build -- IDENTICAL formulas/loop to emitBlobDot's own
+  // build (see that function for the full rationale of each piece).
+  const radius = rootDiameter / 2.0;
+  const domeHeight = radius;
+  const standoffVolume = Math.PI * radius * radius * baseZ;
+  const domeVolume = (2 / 3) * Math.PI * radius ** 3;
+  const totalE = ((standoffVolume + domeVolume) / FIL_AREA) * extrusionMultiplier;
+
+  // hairThickness, when not given (null), scales with hairLength: a
+  // longer strand needs a thicker bead or it flops under its own weight
+  // (hardware obs -- ~0.5mm held a 4-5mm hair, but a 10mm one flopped a
+  // lot more). Anchored at the one known-good point (0.5mm at 4mm),
+  // scaled proportionally, clamped to a sane range. This is a
+  // starting-point formula, NOT hardware-calibrated across its range.
+  // `rootDiameter` (which the user observes changes how soft/tough the
+  // finished hair feels -- smaller base = softer, bigger = tougher) is
+  // deliberately NOT folded in here, so base-size and strand-thickness
+  // stay independently tunable while both are still being characterised.
+  // See troubleshooting.md SS12 (v7).
+  const HAIR_T_REF = 0.5, HAIR_L_REF = 4.0;
+  const effThickness = hairThickness ??
+    Math.min(2.0, Math.max(0.4, HAIR_T_REF * (hairLength / HAIR_L_REF)));
+
+  // bead cross-section for the extrude segment, same eRate() convention
+  // used by every width/height-based bead elsewhere in this file.
+  // beadFlowMult (default 3.5, v9 -- was 2.0 in v8) is an EXTRA flow
+  // multiplier applied ONLY to this step-3 bead, on top of
+  // extrusionMultiplier -- raised as a default so the hair lays down more
+  // material and comes out thicker/stiffer (it was flopping). Kept
+  // separate from extrusionMultiplier, which also scales the root dome's
+  // volume model (hardware-confirmed accurate -- not to disturb here).
+  const pullERate = eRate(effThickness, effThickness, extrusionMultiplier * beadFlowMult);
+
+  em.goto(cx, cy, baseZ);
+
+  const bonus = em.pendingPrimeBonus ? LINE_START_PRIME_MM : 0.0;
+  em.pendingPrimeBonus = false;
+  const primeE = retractMm + bonus;
+  em.retracted = false;
+
+  const nSteps = Math.max(1, Math.round(buildSteps));
+  const zStep = domeHeight / nSteps;
+  const weights = [];
+  for (let i = 0; i < nSteps; i++) {
+    weights.push(1 - taperFactor * (nSteps > 1 ? i / (nSteps - 1) : 0));
+  }
+  const weightSum = weights.reduce((a, b) => a + b, 0);
+
+  let z = baseZ;
+  for (let i = 0; i < nSteps; i++) {
+    z += zStep;
+    const stepE = totalE * (weights[i] / weightSum) + (i === 0 ? primeE + baseExtraMm : 0);
+    em.a(`G1 Z${z.toFixed(3)} E${stepE.toFixed(4)} F${extrudeSpeed}`);
+    em.eTotal += stepE;
+    if (i === 0) em.dwell(baseDwellMs);
+  }
+  em.z = z;
+  const domeTop = z;
+
+  em.dwell(dwellMs);
+
+  // (a) HAIR PULL -- one straight 3D line from the dome top, along the
+  // unit vector (dx,dy,dz) resolved above (v11 -- was two branches, pure
+  // Z vs pure XY, before). v10's extrude split is preserved:
+  //   a1. EXTRUDE-WHILE-MOVING -- travel exactly `eA` mm along the pull
+  //       vector (numerically the same as the filament amount) while
+  //       extruding `eA` mm, so the along-path feedrate and the ACTUAL
+  //       filament feedrate are BOTH `pullExtrudeSpeed`. (F is the
+  //       Cartesian rate and E is slaved to it; equal path-distance and
+  //       E-amount make the two rates equal.)
+  //   a2. DRY MOVE -- finish the length to the full `hairLength` with NO
+  //       extrusion, `dryRiseFeedDrop` mm/min slower, so the bead is
+  //       fully laid down before the tip is stretched out.
+  // If `eA >= hairLength` the split collapses to a1 alone (can't match
+  // rates and still stop at length). Then retract IMMEDIATELY (v5),
+  // dwell, an optional clearance hop for near-horizontal pulls only, then
+  // the STRING segment and overtravel (both fast, zero extrusion).
+  const dryF = Math.max(1, pullExtrudeSpeed - dryRiseFeedDrop);
+  const eA = pullERate * hairLength;
+  const dExtrude = Math.min(eA, hairLength);
+
+  // emit a straight move `d` mm along the pull vector from the current
+  // head position. `e` null -> no extrusion; `rapid` -> G0. Only the axes
+  // that actually change are written (so a pure-Z or pure-XY pull emits
+  // the same line it did before v11).
+  const HORIZ = Math.abs(dx) > 1e-9 || Math.abs(dy) > 1e-9;
+  const VERT = Math.abs(dz) > 1e-9;
+  const pull = (d, e, f, rapid) => {
+    const nx = em.x + dx * d, ny = em.y + dy * d, nz = em.z + dz * d;
+    let s = rapid ? "G0" : "G1";
+    if (HORIZ) s += ` X${nx.toFixed(3)} Y${ny.toFixed(3)}`;
+    if (VERT) s += ` Z${nz.toFixed(3)}`;
+    if (e != null) { s += ` E${e.toFixed(4)}`; em.eTotal += e; }
+    s += ` F${f}`;
+    em.a(s);
+    em.x = nx; em.y = ny; em.z = nz;
+  };
+
+  pull(dExtrude, eA, pullExtrudeSpeed, false);
+  if (hairLength > dExtrude + 1e-6) pull(hairLength - dExtrude, null, dryF, false);
+
+  em.a(`G1 E${(-retractMm).toFixed(4)} F${RETRACT_SPEED}`);
+  em.eTotal -= retractMm;
+  em.retracted = true;
+  em.dwell(postRetractDwellMs);
+
+  // clearance hop -- only for near-horizontal pulls (a strand already
+  // climbing doesn't need it). Straight up in Z, not along the pull
+  // vector. elDeg < 30 covers the old left/right/bottom presets (el 0)
+  // and excludes "top" (el 90), matching pre-v11 behaviour.
+  const HAIR_CLEARANCE_MAX_EL_DEG = 30;
+  if (elDeg < HAIR_CLEARANCE_MAX_EL_DEG && clearanceZ > 0) {
+    em.a(`G0 Z${(em.z + clearanceZ).toFixed(3)} F${clearanceSpeed}`);
+    em.z += clearanceZ;
+  }
+
+  if (stringMm > 0) pull(stringMm, null, hairSpeed, true);
+  pull(overtravelMm, null, overtravelSpeed, true);
+}
+
+/** The dot form of the hairy texture -- see emitHairyDot() above for the
+ * full mechanism, volume model, and direction table. Do NOT improvise a
+ * single hairy dot by calling `freeformHairy` with a zero-length path --
+ * that function's strand-placement logic assumes a path with real
+ * extent and has never been validated for a degenerate zero-length
+ * case. */
+export function hairyDot(em, cx, cy, options = {}) {
+  em.newPattern();
+  emitHairyDot(em, cx, cy, options);
+}
 
 /**
  * ============================================================================
