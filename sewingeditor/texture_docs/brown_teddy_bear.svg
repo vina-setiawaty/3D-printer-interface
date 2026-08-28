@@ -1,0 +1,26 @@
+<svg width="680" height="600" viewBox="0 0 680 600" xmlns="http://www.w3.org/2000/svg" role="img">
+<title>A brown teddy bear</title>
+<desc>An illustration of a cute brown teddy bear sitting, with round ears, a lighter muzzle, button eyes, a stitched nose and mouth, and a belly patch.</desc>
+<ellipse cx="340" cy="560" rx="150" ry="20" fill="#e8dfd3"/>
+<ellipse cx="255" cy="185" rx="55" ry="55" fill="#8a5a34"/>
+<ellipse cx="425" cy="185" rx="55" ry="55" fill="#8a5a34"/>
+<ellipse cx="255" cy="185" rx="26" ry="26" fill="#c99a6c"/>
+<ellipse cx="425" cy="185" rx="26" ry="26" fill="#c99a6c"/>
+<ellipse cx="230" cy="430" rx="70" ry="90" fill="#8a5a34"/>
+<ellipse cx="450" cy="430" rx="70" ry="90" fill="#8a5a34"/>
+<ellipse cx="200" cy="500" rx="34" ry="26" fill="#c99a6c"/>
+<ellipse cx="480" cy="500" rx="34" ry="26" fill="#c99a6c"/>
+<ellipse cx="255" cy="500" rx="90" ry="80" fill="#8a5a34"/>
+<ellipse cx="425" cy="500" rx="90" ry="80" fill="#8a5a34"/>
+<ellipse cx="255" cy="565" rx="42" ry="30" fill="#c99a6c"/>
+<ellipse cx="425" cy="565" rx="42" ry="30" fill="#c99a6c"/>
+<ellipse cx="340" cy="380" rx="150" ry="140" fill="#9c6a3f"/>
+<ellipse cx="340" cy="410" rx="80" ry="75" fill="#c99a6c"/>
+<circle cx="340" cy="240" r="105" fill="#9c6a3f"/>
+<ellipse cx="340" cy="270" rx="60" ry="45" fill="#c99a6c"/>
+<circle cx="300" cy="215" r="9" fill="#3d2b1f"/>
+<circle cx="380" cy="215" r="9" fill="#3d2b1f"/>
+<ellipse cx="340" cy="255" rx="14" ry="10" fill="#3d2b1f"/>
+<path d="M340 265 Q340 280 325 285" fill="none" stroke="#3d2b1f" stroke-width="3" stroke-linecap="round"/>
+<path d="M340 265 Q340 280 355 285" fill="none" stroke="#3d2b1f" stroke-width="3" stroke-linecap="round"/>
+</svg>
