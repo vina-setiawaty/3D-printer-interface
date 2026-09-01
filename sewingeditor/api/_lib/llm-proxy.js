@@ -9,7 +9,7 @@ export const ALLOWED_MODELS = {
 
 export const ALLOWED_EFFORTS = ["low", "medium", "high"];
 
-async function callOpenAI(apiKey, model, systemPrompt, userMessage, schema, schemaName, maxOutputTokens, effort) {
+async function callOpenAI(apiKey, model, systemPrompt, messages, schema, schemaName, maxOutputTokens, effort) {
   return fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
@@ -19,7 +19,17 @@ async function callOpenAI(apiKey, model, systemPrompt, userMessage, schema, sche
     body: JSON.stringify({
       model,
       instructions: systemPrompt,
-      input: userMessage,
+      // A lone user turn (the single-turn flows) is passed as a bare string,
+      // exactly as before. A real transcript (the multi-turn parametric
+      // flow) is passed as Responses `input` items with typed content parts
+      // — `input_text` for user turns, `output_text` for replayed assistant
+      // turns.
+      input: (messages.length === 1 && messages[0].role === "user")
+        ? messages[0].content
+        : messages.map(m => ({
+            role: m.role,
+            content: [{ type: m.role === "assistant" ? "output_text" : "input_text", text: m.content }],
+          })),
       max_output_tokens: maxOutputTokens,
       reasoning: { effort },
       text: {
@@ -34,7 +44,7 @@ async function callOpenAI(apiKey, model, systemPrompt, userMessage, schema, sche
   });
 }
 
-async function callAnthropic(apiKey, model, systemPrompt, userMessage, schema, maxOutputTokens, effort, thinking) {
+async function callAnthropic(apiKey, model, systemPrompt, messages, schema, maxOutputTokens, effort, thinking) {
   return fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -51,7 +61,7 @@ async function callAnthropic(apiKey, model, systemPrompt, userMessage, schema, m
         format: { type: "json_schema", schema },
       },
       system: systemPrompt,
-      messages: [{ role: "user", content: userMessage }],
+      messages,
     }),
   });
 }
@@ -85,7 +95,7 @@ export async function handleGenerateRequest(req, res, schema, schemaName, option
     return;
   }
 
-  const { provider, model, systemPrompt, userMessage, effort: requestedEffort, thinking: requestedThinking } = req.body || {};
+  const { provider, model, systemPrompt, userMessage, messages: requestedMessages, effort: requestedEffort, thinking: requestedThinking } = req.body || {};
   if (provider !== "openai" && provider !== "anthropic") {
     res.status(400).json({ error: "provider must be 'openai' or 'anthropic'" });
     return;
@@ -111,8 +121,31 @@ export async function handleGenerateRequest(req, res, schema, schemaName, option
   // endpoint that never asked for it (e.g. generate.js) shouldn't have a
   // client be able to turn it on.
   const thinking = thinkingCapable && (requestedThinking !== undefined ? requestedThinking : effort === "high");
-  if (typeof systemPrompt !== "string" || typeof userMessage !== "string" || !userMessage.trim()) {
-    res.status(400).json({ error: "systemPrompt and userMessage are required strings" });
+  if (typeof systemPrompt !== "string") {
+    res.status(400).json({ error: "systemPrompt is a required string" });
+    return;
+  }
+
+  // A caller supplies EITHER a `userMessage` string (single-turn flows) or a
+  // `messages` array of {role, content} turns (multi-turn flows). Normalize
+  // both to the array the provider callers now expect.
+  let messages;
+  if (Array.isArray(requestedMessages)) {
+    const roleOk = (r) => r === "user" || r === "assistant";
+    if (requestedMessages.length === 0 ||
+        !requestedMessages.every(m => m && roleOk(m.role) && typeof m.content === "string" && m.content.trim())) {
+      res.status(400).json({ error: "messages must be a non-empty array of {role: 'user'|'assistant', content: non-empty string}" });
+      return;
+    }
+    if (requestedMessages[requestedMessages.length - 1].role !== "user") {
+      res.status(400).json({ error: "the last message must have role 'user'" });
+      return;
+    }
+    messages = requestedMessages.map(m => ({ role: m.role, content: m.content }));
+  } else if (typeof userMessage === "string" && userMessage.trim()) {
+    messages = [{ role: "user", content: userMessage }];
+  } else {
+    res.status(400).json({ error: "either userMessage (string) or messages (array) is required" });
     return;
   }
 
@@ -126,8 +159,8 @@ export async function handleGenerateRequest(req, res, schema, schemaName, option
   let upstreamResponse;
   try {
     upstreamResponse = provider === "openai"
-      ? await callOpenAI(apiKey, model, systemPrompt, userMessage, schema, schemaName, maxOutputTokens, effort)
-      : await callAnthropic(apiKey, model, systemPrompt, userMessage, schema, maxOutputTokens, effort, thinking);
+      ? await callOpenAI(apiKey, model, systemPrompt, messages, schema, schemaName, maxOutputTokens, effort)
+      : await callAnthropic(apiKey, model, systemPrompt, messages, schema, maxOutputTokens, effort, thinking);
   } catch (e) {
     res.status(502).json({ error: `could not reach ${provider}: ${e.message}` });
     return;

@@ -1,22 +1,27 @@
 # LLM API Data Flow
 
-> **Keep this current:** whenever a system prompt (`buildSystemPrompt()` in `llm.js`, `buildGcodeSystemPrompt()` in `llm-gcode.js`, or `buildGcodeSessionSystemPrompt()` in `gcode-session.js`) or an endpoint's generation settings change, update the matching section here and in the linked system-prompt doc in the same change.
+> **Keep this current:** whenever a system prompt (`buildSystemPrompt()` in `llm.js`, `buildGcodeSystemPrompt()` in `llm-gcode.js`, `buildGcodeSessionSystemPrompt()` in `gcode-session.js`, or `buildParametricSystemPrompt()` in `parametric.js`) or an endpoint's generation settings change, update the matching section here and in the linked system-prompt doc in the same change.
 
-There are three independent generation flows in the app, each a click on its own "generate with AI" button. All follow the same two-hop shape — browser → proxy → LLM provider — via shared proxy logic, but each has its own frontend and system prompt (the first two also have their own endpoint/schema; the third reuses the raw-gcode endpoint/schema unchanged):
+There are **four** independent generation flows in the app, each a click on its own "generate"/"send" button. All follow the same two-hop shape — browser → proxy → LLM provider — via shared proxy logic, but each has its own frontend and system prompt:
 
 | Flow | Frontend | Endpoint | Schema | System prompt |
 |---|---|---|---|---|
 | Action generation | `llm.js`, action editor's LLM panel | `POST /api/generate` | `ACTION_SCHEMA` in `api/generate.js` | [llm-system-prompt.md](llm-system-prompt.md) |
 | Raw gcode generation | `llm-gcode.js`, "Raw gcode" panel (`index.html`) | `POST /api/generate-gcode` | `GCODE_SCHEMA` in `api/generate-gcode.js` | [gcode-system-prompt.md](gcode-system-prompt.md) |
-| Raw gcode, multi-turn session | `gcode-session.js`, "Raw gcode — printing session" panel (`gcode-session.html`) | `POST /api/generate-gcode` (same endpoint/schema as above — no backend changes for this flow) | `GCODE_SCHEMA` in `api/generate-gcode.js` | [gcode-session-system-prompt.md](gcode-session-system-prompt.md) |
+| Raw gcode, multi-turn session | `gcode-session.js`, "Raw gcode — printing session" panel (`gcode-session.html`) | `POST /api/generate-gcode` (same endpoint/schema as above) | `GCODE_SCHEMA` in `api/generate-gcode.js` | [gcode-session-system-prompt.md](gcode-session-system-prompt.md) |
+| Parametric tactile graphic | `parametric.js`, 3-column page (`parametric.html`) | `POST /api/generate-parametric` | `PARAMETRIC_SCHEMA` in `api/generate-parametric.js` | [../parametric_docs/system-prompt.md](../parametric_docs/system-prompt.md) (concatenated with `catalog.md` / `path-spec.md` / `hardware.md` / `PARAMETER_CONSTRAINTS.md`) |
 
-Both endpoints call into the same `handleGenerateRequest()` in `api/_lib/llm-proxy.js` (app-secret gate, input validation, calling the chosen provider, relaying the response) — each just supplies its own schema and generation settings:
+**The parametric flow is structurally different from the other three:**
+- It is **multi-turn**: the request body carries `messages` (a `{role, content}[]` transcript) instead of a single `userMessage`. `handleGenerateRequest()` accepts either — a `userMessage` string is wrapped as a one-element array; a `messages` array is validated (roles `user`/`assistant`, non-empty string content, last turn must be `user`) and passed through. `callOpenAI()` maps it to Responses `input` items (`input_text` for user turns, `output_text` for assistant turns); `callAnthropic()` passes it straight to `messages`.
+- The model returns **no G-code** — it returns `{ chat, calls[] }`, where each call names a `texture_functions.js` function plus a JSON-string `geometry` and `options`. `parametric-catalog.js` executes the call list locally against `parametric_docs/texture_functions.js` (a pinned copy) to produce the G-code; editing a parameter in column 2 re-runs that locally with no API call.
 
-| Setting | Action generation | Raw gcode generation | Why they differ |
-|---|---|---|---|
-| `max_output_tokens` / `max_tokens` | 8192 | 32768 | A tactile graphic can expand into hundreds/thousands of gcode lines; an action macro is a handful of lines. |
-| `reasoning.effort` / `output_config.effort` | `medium` | `high` | Gcode generation involves real extrusion-math/spatial reasoning per stroke; actions are short parameterized templates. |
-| Anthropic `thinking` | `disabled` | `adaptive` | Same reasoning-load difference as above. |
+All endpoints call into the same `handleGenerateRequest()` in `api/_lib/llm-proxy.js` (app-secret gate, input validation, `userMessage`-or-`messages` normalization, calling the chosen provider, relaying the response) — each just supplies its own schema and generation settings:
+
+| Setting | Action generation | Raw gcode generation | Parametric graphic | Why they differ |
+|---|---|---|---|---|
+| `max_output_tokens` / `max_tokens` | 8192 | 32768 | 32768 | A tactile graphic can expand into hundreds/thousands of gcode lines / many calls; an action macro is a handful of lines. |
+| `reasoning.effort` / `output_config.effort` | `medium` | `medium` (client-selectable) | `medium` (client-selectable) | Gcode/graphic generation involves real spatial reasoning; actions are short parameterized templates. |
+| Anthropic `thinking` | `disabled` | `adaptive` (gated on the client toggle) | `adaptive` (gated on the client toggle) | Same reasoning-load difference as above. |
 
 ## Hop 1: Browser → proxy
 
@@ -128,3 +133,17 @@ Auth: `x-api-key: <ANTHROPIC_API_KEY>` + `anthropic-version: 2023-06-01`.
 No `name`/`description`/`variables` — raw gcode has no action-style templating. `validateGeneratedGcode()` checks `gcode` (including flagging any accidental `__`/`{}` syntax, which isn't supported here), `applyResultToGcodeBox()` writes `gcode` into `#raw-gcode-textarea`, and `explanation` is rendered into `#gcode-llm-explanation`.
 
 **Raw gcode, multi-turn session** — same `GCODE_SCHEMA` shape, `{gcode: string[], explanation: string}` (a fresh-turn `gcode` is a full job; a continuation-turn `gcode` is only that turn's new lines, per the SESSION CONTINUITY branch used — see [gcode-session-system-prompt.md](gcode-session-system-prompt.md)). `validateGeneratedSessionGcode()` runs the same checks as the single-turn flow. `applyResultToSessionGcodeBox()` writes `gcode` into `#raw-gcode-textarea` and stashes the result as `pendingTurn` (not yet committed to session history). Only clicking `#run-gcode-btn` — which both streams the gcode to the printer *and* triggers `commitPendingTurnIfMatches()` — appends `pendingTurn` to `gcodeSession.turns` and renders it into the Session History panel; a Generate that's never run leaves history untouched.
+
+**Parametric tactile graphic** — `PARAMETRIC_SCHEMA` constrains both providers to:
+```ts
+{
+  chat: string,          // conversational reply, appended to the column-1 transcript
+  calls: {
+    fn: string,          // allowlisted texture_functions.js name
+    geometry: string,    // JSON string: {"path": <spec>} | {"at": [x,y]} | {"region": {...}, "fillStyle": "..."}
+    options: string,     // JSON string: { optionName: value }
+    label: string,
+  }[]
+}
+```
+`parametric.js` `applyModelResult()` parses each `geometry`/`options` string to an object, replaces `pstate.calls`, and persists to `localStorage["parametricSessionState"]` (transcript + calls + material). `parametric-catalog.js` `runCalls()` then executes the list against the pinned `parametric_docs/texture_functions.js`: builds `xFunc`/`yFunc` from each path spec (a `polyline` is expanded to one library call per segment, since the sampler rejects sharp turns), wraps the whole list in `em.header()`/`em.footer()`, and runs verification (bed bounds with G90/G91 tracking, `verifyLayout` — bbox overlap downgraded to a warning here — net-E tripwire, `verifyCheckerboard` after any `DIAMOND` fill, `PathTooSteepError` surfaced per call). The G-code goes into the shared `#raw-gcode-textarea`; run/save reuse `script.js`. Editing any field in column 2 re-runs `runCalls()` locally — no API call. Enforced limits live in `parametric-catalog.js`'s `CONSTRAINTS`, mirroring `parametric_docs/PARAMETER_CONSTRAINTS.md` (currently placeholder numbers pending hardware calibration).
