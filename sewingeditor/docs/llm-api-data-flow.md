@@ -6,10 +6,10 @@ There are **four** independent generation flows in the app, each a click on its 
 
 | Flow | Frontend | Endpoint | Schema | System prompt |
 |---|---|---|---|---|
-| Action generation | `llm.js`, action editor's LLM panel | `POST /api/generate` | `ACTION_SCHEMA` in `api/generate.js` | [llm-system-prompt.md](llm-system-prompt.md) |
-| Raw gcode generation | `llm-gcode.js`, "Raw gcode" panel (`index.html`) | `POST /api/generate-gcode` | `GCODE_SCHEMA` in `api/generate-gcode.js` | [gcode-system-prompt.md](gcode-system-prompt.md) |
-| Raw gcode, multi-turn session | `gcode-session.js`, "Raw gcode — printing session" panel (`gcode-session.html`) | `POST /api/generate-gcode` (same endpoint/schema as above) | `GCODE_SCHEMA` in `api/generate-gcode.js` | [gcode-session-system-prompt.md](gcode-session-system-prompt.md) |
-| Parametric tactile graphic | `parametric.js`, 3-column page (`parametric.html`) | `POST /api/generate-parametric` | `PARAMETRIC_SCHEMA` in `api/generate-parametric.js` | [../parametric_docs/system-prompt.md](../parametric_docs/system-prompt.md) (concatenated with `catalog.md` / `path-spec.md` / `hardware.md` / `PARAMETER_CONSTRAINTS.md`) |
+| Action generation | `llm.js`, action editor's LLM panel | `POST /api/generate` | `ACTION_SCHEMA` in `api/generate.js` | [llm-system-prompt.md](../main/llm-system-prompt.md) |
+| Raw gcode generation | `llm-gcode.js`, "Raw gcode" panel (`index.html`) | `POST /api/generate-gcode` | `GCODE_SCHEMA` in `api/generate-gcode.js` | [gcode-system-prompt.md](../main/gcode-system-prompt.md) |
+| Raw gcode, multi-turn session | `gcode-session.js`, "Raw gcode — printing session" panel (`gcode-session.html`) | `POST /api/generate-gcode` (same endpoint/schema as above) | `GCODE_SCHEMA` in `api/generate-gcode.js` | [gcode-session-system-prompt.md](../gcode-session/gcode-session-system-prompt.md) |
+| Parametric tactile graphic | `parametric.js`, 3-column page (`parametric.html`) | `POST /api/generate-parametric` | `PARAMETRIC_SCHEMA` in `api/generate-parametric.js` | [../parametric/parametric_docs/system-prompt.md](../parametric/parametric_docs/system-prompt.md) (concatenated with `catalog.md` / `path-spec.md` / `hardware.md` / `PARAMETER_CONSTRAINTS.md`) |
 
 **The parametric flow is structurally different from the other three:**
 - It is **multi-turn**: the request body carries `messages` (a `{role, content}[]` transcript) instead of a single `userMessage`. `handleGenerateRequest()` accepts either — a `userMessage` string is wrapped as a one-element array; a `messages` array is validated (roles `user`/`assistant`, non-empty string content, last turn must be `user`) and passed through. `callOpenAI()` maps it to Responses `input` items (`input_text` for user turns, `output_text` for assistant turns); `callAnthropic()` passes it straight to `messages`.
@@ -31,7 +31,7 @@ All endpoints call into the same `handleGenerateRequest()` in `api/_lib/llm-prox
 |---|---|---|
 | `provider` | `string` | `"openai"` or `"anthropic"` |
 | `model` | `string` | e.g. `"gpt-5.6-terra"` or `"claude-sonnet-5"` |
-| `systemPrompt` | `string` | `buildSystemPrompt()` — full text in [llm-system-prompt.md](llm-system-prompt.md) |
+| `systemPrompt` | `string` | `buildSystemPrompt()` — full text in [llm-system-prompt.md](../main/llm-system-prompt.md) |
 | `userMessage` | `string` | `buildUserMessage()` — a stringified JSON snapshot of the current Manual-tab form, followed by the typed instruction |
 
 The `userMessage` string embeds this object (from `collectManualFormState()`):
@@ -48,7 +48,7 @@ The `userMessage` string embeds this object (from `collectManualFormState()`):
 
 | Field | Type | Content |
 |---|---|---|
-| `systemPrompt` | `string` | `buildGcodeSystemPrompt()` — full text in [gcode-system-prompt.md](gcode-system-prompt.md) |
+| `systemPrompt` | `string` | `buildGcodeSystemPrompt()` — full text in [gcode-system-prompt.md](../main/gcode-system-prompt.md) |
 | `userMessage` | `string` | `buildGcodeUserMessage()` — a stringified JSON snapshot of the current raw-gcode box, followed by the typed instruction |
 
 The `userMessage` string embeds this object (from `collectGcodeBoxState()`):
@@ -58,7 +58,7 @@ The `userMessage` string embeds this object (from `collectGcodeBoxState()`):
 }
 ```
 
-**Raw gcode, multi-turn session** (`POST /api/generate-gcode`, same endpoint as above) — request built by `buildGcodeSessionRequestBody()` in `gcode-session.js`. The wire shape sent to the proxy is **identical** to plain raw-gcode generation (`provider`/`model`/`effort`/`thinking`/`systemPrompt`/`userMessage`, all strings) — no backend change was needed for this flow. `userMessage` itself is also the same shape as above (current textarea content + typed instruction, via `collectGcodeSessionBoxState()`). All of the session-specific context — filament, print temp, Z-start offset, continuity mode, whether the substrate is fresh, the app-chosen prime coordinate for this turn, and a short summary of prior turns — lives entirely in `systemPrompt` instead, rebuilt fresh from client-side session state (`gcodeSession`, persisted to `localStorage["gcodeSessionState"]`) on every call. See [gcode-session-system-prompt.md](gcode-session-system-prompt.md) for how that state shapes the prompt.
+**Raw gcode, multi-turn session** (`POST /api/generate-gcode`, same endpoint as above) — request built by `buildGcodeSessionRequestBody()` in `gcode-session.js`. The wire shape sent to the proxy is **identical** to plain raw-gcode generation (`provider`/`model`/`effort`/`thinking`/`systemPrompt`/`userMessage`, all strings) — no backend change was needed for this flow. `userMessage` itself is also the same shape as above (current textarea content + typed instruction, via `collectGcodeSessionBoxState()`). All of the session-specific context — filament, print temp, Z-start offset, continuity mode, whether the substrate is fresh, the app-chosen prime coordinate for this turn, and a short summary of prior turns — lives entirely in `systemPrompt` instead, rebuilt fresh from client-side session state (`gcodeSession`, persisted to `localStorage["gcodeSessionState"]`) on every call. See [gcode-session-system-prompt.md](../gcode-session/gcode-session-system-prompt.md) for how that state shapes the prompt.
 
 Both endpoints require header `x-app-secret: <app password>`, and on success relay the *entire raw upstream response* back verbatim (`res.status(200).json(data)`) — so what the browser gets is literally whatever OpenAI or Anthropic returned (see Hop 2's output below). On failure, both return `{ error: string }` with a matching HTTP status.
 
@@ -132,7 +132,7 @@ Auth: `x-api-key: <ANTHROPIC_API_KEY>` + `anthropic-version: 2023-06-01`.
 ```
 No `name`/`description`/`variables` — raw gcode has no action-style templating. `validateGeneratedGcode()` checks `gcode` (including flagging any accidental `__`/`{}` syntax, which isn't supported here), `applyResultToGcodeBox()` writes `gcode` into `#raw-gcode-textarea`, and `explanation` is rendered into `#gcode-llm-explanation`.
 
-**Raw gcode, multi-turn session** — same `GCODE_SCHEMA` shape, `{gcode: string[], explanation: string}` (a fresh-turn `gcode` is a full job; a continuation-turn `gcode` is only that turn's new lines, per the SESSION CONTINUITY branch used — see [gcode-session-system-prompt.md](gcode-session-system-prompt.md)). `validateGeneratedSessionGcode()` runs the same checks as the single-turn flow. `applyResultToSessionGcodeBox()` writes `gcode` into `#raw-gcode-textarea` and stashes the result as `pendingTurn` (not yet committed to session history). Only clicking `#run-gcode-btn` — which both streams the gcode to the printer *and* triggers `commitPendingTurnIfMatches()` — appends `pendingTurn` to `gcodeSession.turns` and renders it into the Session History panel; a Generate that's never run leaves history untouched.
+**Raw gcode, multi-turn session** — same `GCODE_SCHEMA` shape, `{gcode: string[], explanation: string}` (a fresh-turn `gcode` is a full job; a continuation-turn `gcode` is only that turn's new lines, per the SESSION CONTINUITY branch used — see [gcode-session-system-prompt.md](../gcode-session/gcode-session-system-prompt.md)). `validateGeneratedSessionGcode()` runs the same checks as the single-turn flow. `applyResultToSessionGcodeBox()` writes `gcode` into `#raw-gcode-textarea` and stashes the result as `pendingTurn` (not yet committed to session history). Only clicking `#run-gcode-btn` — which both streams the gcode to the printer *and* triggers `commitPendingTurnIfMatches()` — appends `pendingTurn` to `gcodeSession.turns` and renders it into the Session History panel; a Generate that's never run leaves history untouched.
 
 **Parametric tactile graphic** — `PARAMETRIC_SCHEMA` constrains both providers to:
 ```ts

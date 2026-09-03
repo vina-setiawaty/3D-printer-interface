@@ -2,7 +2,7 @@
 
 Trimmed reference for the parametric tactile-graphic page. This folder is a
 **pinned prototype snapshot**; the live tuning history lives in
-`../texture_docs/`. If a number here disagrees with
+`../../texture_docs/`. If a number here disagrees with
 `parametric_docs/texture_functions.js`, the code wins.
 
 ## Machine

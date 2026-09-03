@@ -2,7 +2,7 @@
 
 > **This file is a form. Edit the `Value` and `Status` columns and send it
 > back.** Every number below is a **PLACEHOLDER** — my best guess from the
-> function defaults and the TPU cautions in `../texture_docs/`, not a
+> function defaults and the TPU cautions in `../../texture_docs/`, not a
 > hardware-tested limit. Nothing here has been printed to confirm it.
 >
 > How to use it:

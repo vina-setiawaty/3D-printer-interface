@@ -1,6 +1,6 @@
 # Raw Gcode Session System Prompt
 
-> **Keep this current:** update this file (and the settings table in [llm-api-data-flow.md](llm-api-data-flow.md)) in the same change whenever `buildGcodeSessionSystemPrompt()` changes.
+> **Keep this current:** update this file (and the settings table in [llm-api-data-flow.md](../docs/llm-api-data-flow.md)) in the same change whenever `buildGcodeSessionSystemPrompt()` changes.
 
 The `systemPrompt` string sent as `instructions` (OpenAI) / `system` (Anthropic) on every `/api/generate-gcode` call made from `gcode-session.html`. Built by `buildGcodeSessionSystemPrompt(config, primeLocation, fresh, turns)` in `sewingeditor/gcode-session.js`. It is a parallel, diverging copy of [gcode-system-prompt.md](gcode-system-prompt.md)'s single-turn prompt (`buildGcodeSystemPrompt()` in `llm-gcode.js`) — not shared code, since this flow's "current state" is a whole multi-turn physical print session rather than just the textarea, and it asks for different output on a continuation turn (only the new incremental gcode, not a full restatement).
 

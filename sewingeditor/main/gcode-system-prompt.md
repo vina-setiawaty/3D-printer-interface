@@ -1,8 +1,8 @@
 # Raw Gcode System Prompt
 
-> **Keep this current:** update this file (and the settings table in [llm-api-data-flow.md](llm-api-data-flow.md)) in the same change whenever `buildGcodeSystemPrompt()` changes.
+> **Keep this current:** update this file (and the settings table in [llm-api-data-flow.md](../docs/llm-api-data-flow.md)) in the same change whenever `buildGcodeSystemPrompt()` changes.
 
-The exact `systemPrompt` string sent as `instructions` (OpenAI) / `system` (Anthropic) on every `/api/generate-gcode` call — see [llm-api-data-flow.md](llm-api-data-flow.md). Built by `buildGcodeSystemPrompt()` in `sewingeditor/llm-gcode.js`; the `${whitelist}` line is filled in at request time from the `gcodeCheck` array in `sewingeditor/script.js` (the same G/M/T-code whitelist `checkGcode()` validates against everywhere else in the app), so it isn't duplicated here — it changes automatically if that array changes.
+The exact `systemPrompt` string sent as `instructions` (OpenAI) / `system` (Anthropic) on every `/api/generate-gcode` call — see [llm-api-data-flow.md](../docs/llm-api-data-flow.md). Built by `buildGcodeSystemPrompt()` in `sewingeditor/main/llm-gcode.js`; the `${whitelist}` line is filled in at request time from the `gcodeCheck` array in `sewingeditor/script.js` (the same G/M/T-code whitelist `checkGcode()` validates against everywhere else in the app), so it isn't duplicated here — it changes automatically if that array changes.
 
 Unlike the action-generation prompt ([llm-system-prompt.md](llm-system-prompt.md)), this one targets a specific machine/material combination and a specific output style — tactile graphics (touch-readable diagrams built from raised extruded texture) rather than short parameterized motion macros. The hardware numbers, extrusion math, and technique list below came out of an earlier hands-on tuning session on this exact printer (Ender 3 V2 + Creality Sprite direct-drive extruder, PLA, 0.4mm nozzle) — see `tests/260811/gcode_action_system_prompt.md` and the two `generate_circle_*.py` reference scripts in that same folder for the full reasoning and worked Python implementations behind each rule.
 

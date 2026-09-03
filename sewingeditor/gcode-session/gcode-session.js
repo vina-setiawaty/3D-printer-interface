@@ -96,7 +96,7 @@ function buildHardwareProfileSection(config) {
 - Retraction: TPU is a flexible filament and behaves very differently from PLA in a direct-drive feed path — use MUCH shorter retraction than PLA, 0-1.5mm at a slower 1200-1800 mm/min, or skip retraction entirely for short travels. Aggressive retraction on a flexible filament is more likely to buckle in the hobbed-gear feed path than to actually pull the filament back cleanly.
 - Z-hop for travel between features: ~0.4mm. Travel feed: 1500-2400 mm/min (slower than PLA — TPU's elasticity means fast travel moves risk the filament compressing/buckling in the feed path before the hot end). Print feed: 150-250 mm/min for small/curved features (dots, arcs), 200-350 mm/min for straight lines — notably slower than PLA to give the flexible filament time to feed consistently.
 - Bed size 220x220mm.
-CAVEAT: these TPU numbers are best-effort defaults, not hands-on tuned on this specific hardware (unlike the PLA profile below, which came from a real tuning session on this exact printer — see docs/gcode-session-system-prompt.md). Treat them cautiously and flag anything that looks like it's underperforming (stringing, under-extrusion, grinding) in the explanation field.`;
+CAVEAT: these TPU numbers are best-effort defaults, not hands-on tuned on this specific hardware (unlike the PLA profile below, which came from a real tuning session on this exact printer — see gcode-session-system-prompt.md). Treat them cautiously and flag anything that looks like it's underperforming (stringing, under-extrusion, grinding) in the explanation field.`;
   }
 
   return `HARDWARE PROFILE (Ender 3 V2 + Creality Sprite direct-drive extruder, PLA, 0.4mm nozzle — do not deviate without being told to)

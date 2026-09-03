@@ -1,6 +1,6 @@
 # LLM System Prompt
 
-The exact `systemPrompt` string sent as `instructions` (OpenAI) / `system` (Anthropic) on every `/api/generate` call — see [llm-api-data-flow.md](llm-api-data-flow.md). Built by `buildSystemPrompt()` in `sewingeditor/llm.js`; the `${whitelist}` line is filled in at request time from the `gcodeCheck` array in `sewingeditor/script.js` (the same G/M/T-code whitelist `checkGcode()` validates against everywhere else in the app), so it isn't duplicated here — it changes automatically if that array changes.
+The exact `systemPrompt` string sent as `instructions` (OpenAI) / `system` (Anthropic) on every `/api/generate` call — see [llm-api-data-flow.md](../docs/llm-api-data-flow.md). Built by `buildSystemPrompt()` in `sewingeditor/llm.js`; the `${whitelist}` line is filled in at request time from the `gcodeCheck` array in `sewingeditor/script.js` (the same G/M/T-code whitelist `checkGcode()` validates against everywhere else in the app), so it isn't duplicated here — it changes automatically if that array changes.
 
 ```
 You generate "actions" for a Marlin G-code motion-control web app. An action is JSON with:
