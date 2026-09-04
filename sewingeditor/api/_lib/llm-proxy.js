@@ -79,7 +79,7 @@ export async function handleGenerateRequest(req, res, schema, schemaName, option
     maxOutputTokens = 8192,
     effort: defaultEffort = "medium",
     thinking: thinkingCapable = false,
-    codeExecution = false,
+    codeExecution: codeExecutionCapable = false,
   } = options;
 
   if (req.method !== "POST") {
@@ -97,7 +97,7 @@ export async function handleGenerateRequest(req, res, schema, schemaName, option
     return;
   }
 
-  const { provider, model, systemPrompt, userMessage, messages: requestedMessages, effort: requestedEffort, thinking: requestedThinking } = req.body || {};
+  const { provider, model, systemPrompt, userMessage, messages: requestedMessages, effort: requestedEffort, thinking: requestedThinking, codeExecution: requestedCodeExecution } = req.body || {};
   if (provider !== "openai" && provider !== "anthropic") {
     res.status(400).json({ error: "provider must be 'openai' or 'anthropic'" });
     return;
@@ -114,6 +114,10 @@ export async function handleGenerateRequest(req, res, schema, schemaName, option
     res.status(400).json({ error: "thinking must be a boolean" });
     return;
   }
+  if (requestedCodeExecution !== undefined && typeof requestedCodeExecution !== "boolean") {
+    res.status(400).json({ error: "codeExecution must be a boolean" });
+    return;
+  }
   const effort = requestedEffort || defaultEffort;
   // Extended thinking is the largest single latency cost on a slow endpoint
   // like generate-gcode. A caller that exposes its own thinking toggle sends
@@ -123,6 +127,13 @@ export async function handleGenerateRequest(req, res, schema, schemaName, option
   // endpoint that never asked for it (e.g. generate.js) shouldn't have a
   // client be able to turn it on.
   const thinking = thinkingCapable && (requestedThinking !== undefined ? requestedThinking : effort === "high");
+  // Same on/off-toggle shape as thinking above, gated on codeExecutionCapable.
+  // Defaults to ON when the endpoint supports it and the client doesn't say
+  // otherwise (preserves prior behavior) — but the tool-execution self-check
+  // adds real latency on top of an already-slow endpoint, close to Vercel's
+  // maxDuration ceiling, so a caller needs a way to turn it off per request
+  // rather than only at deploy time.
+  const codeExecution = codeExecutionCapable && (requestedCodeExecution !== undefined ? requestedCodeExecution : true);
   if (typeof systemPrompt !== "string") {
     res.status(400).json({ error: "systemPrompt is a required string" });
     return;

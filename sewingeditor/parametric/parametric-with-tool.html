@@ -340,6 +340,13 @@
               <option value="on">on (slower, Claude only)</option>
             </select>
           </div>
+          <div class="ui-group">
+            <span class="label">Tool execution</span>
+            <select id="pg-code-execution">
+              <option value="on" selected>on (verifies geometry, slower — Claude only)</option>
+              <option value="off">off (faster — turn off if you hit FUNCTION_INVOCATION_TIMEOUT)</option>
+            </select>
+          </div>
         </details>
 
         <div id="pg-transcript"></div>

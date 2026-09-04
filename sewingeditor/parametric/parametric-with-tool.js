@@ -149,7 +149,11 @@ async function loadParametricDeps() {
     const sys = parts[0];
     const fenced = sys.match(/```([\s\S]*?)```/);
     parts[0] = fenced ? fenced[1].trim() : sys;
-    promptText = parts.join("\n\n---\n\n") + PATH_MODEL_NOTE + CODE_EXECUTION_INSTRUCTIONS;
+    // CODE_EXECUTION_INSTRUCTIONS is appended per-request in
+    // buildParametricSystemPrompt() instead of baked in here, since the
+    // "Tool execution" toggle can turn it off per send -- no point
+    // instructing the model to use a tool it wasn't actually given.
+    promptText = parts.join("\n\n---\n\n") + PATH_MODEL_NOTE;
   } catch (e) {
     status.textContent = "";
     document.querySelector("#pg-messages").innerHTML =
@@ -165,9 +169,9 @@ async function loadParametricDeps() {
 
 // -------------------------------------------------------------- system prompt --
 
-function buildParametricSystemPrompt() {
+function buildParametricSystemPrompt(codeExecution) {
   const mat = pstate.config.material || "TPU";
-  return `${promptText}\n\n---\n\nSESSION: the user has selected material = ${mat}. ` +
+  return `${promptText}${codeExecution ? CODE_EXECUTION_INSTRUCTIONS : ""}\n\n---\n\nSESSION: the user has selected material = ${mat}. ` +
     (mat === "PLA"
       ? "Use PLA numbers from hardware.md; the page will emit a PLA start sequence."
       : "Use TPU numbers (the library defaults).");
@@ -206,6 +210,7 @@ async function onParametricSend() {
   const model = document.querySelector("#pg-model").value;
   const effort = document.querySelector("#pg-effort").value;
   const thinking = document.querySelector("#pg-thinking").value === "on";
+  const codeExecution = document.querySelector("#pg-code-execution").value === "on";
 
   messages.innerHTML = "";
   if (!parametricReady) { messages.innerHTML = "<li>still loading — try again in a moment</li>"; return; }
@@ -226,8 +231,8 @@ async function onParametricSend() {
       method: "POST",
       headers: { "content-type": "application/json", "x-app-secret": secret },
       body: JSON.stringify({
-        provider, model, effort, thinking,
-        systemPrompt: buildParametricSystemPrompt(),
+        provider, model, effort, thinking, codeExecution,
+        systemPrompt: buildParametricSystemPrompt(codeExecution),
         messages: buildMessagesForRequest(instruction),
       }),
     });
