@@ -44,7 +44,7 @@ async function callOpenAI(apiKey, model, systemPrompt, messages, schema, schemaN
   });
 }
 
-async function callAnthropic(apiKey, model, systemPrompt, messages, schema, maxOutputTokens, effort, thinking) {
+async function callAnthropic(apiKey, model, systemPrompt, messages, schema, maxOutputTokens, effort, thinking, codeExecution) {
   return fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -62,6 +62,7 @@ async function callAnthropic(apiKey, model, systemPrompt, messages, schema, maxO
       },
       system: systemPrompt,
       messages,
+      ...(codeExecution ? { tools: [{ type: "code_execution_20260120", name: "code_execution" }] } : {}),
     }),
   });
 }
@@ -78,6 +79,7 @@ export async function handleGenerateRequest(req, res, schema, schemaName, option
     maxOutputTokens = 8192,
     effort: defaultEffort = "medium",
     thinking: thinkingCapable = false,
+    codeExecution = false,
   } = options;
 
   if (req.method !== "POST") {
@@ -160,7 +162,7 @@ export async function handleGenerateRequest(req, res, schema, schemaName, option
   try {
     upstreamResponse = provider === "openai"
       ? await callOpenAI(apiKey, model, systemPrompt, messages, schema, schemaName, maxOutputTokens, effort)
-      : await callAnthropic(apiKey, model, systemPrompt, messages, schema, maxOutputTokens, effort, thinking);
+      : await callAnthropic(apiKey, model, systemPrompt, messages, schema, maxOutputTokens, effort, thinking, codeExecution);
   } catch (e) {
     res.status(502).json({ error: `could not reach ${provider}: ${e.message}` });
     return;
@@ -177,6 +179,16 @@ export async function handleGenerateRequest(req, res, schema, schemaName, option
   if (!upstreamResponse.ok) {
     const detail = (data && data.error && data.error.message) ? data.error.message : `HTTP ${upstreamResponse.status}`;
     res.status(upstreamResponse.status).json({ error: detail });
+    return;
+  }
+
+  // Server-side tool loops (code_execution) cap at 10 internal iterations
+  // before pausing; resuming means another full round trip, which this
+  // endpoint's maxDuration budget almost certainly can't absorb on top of
+  // what already ran. Fail clearly instead of relaying a response with no
+  // finished answer in it.
+  if (provider === "anthropic" && data.stop_reason === "pause_turn") {
+    res.status(502).json({ error: "verification step didn't finish in time — try a simpler request" });
     return;
   }
 

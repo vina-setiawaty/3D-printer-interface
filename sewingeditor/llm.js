@@ -270,7 +270,12 @@ function extractResponseOutput(data, provider) {
     if (data.stop_reason === "refusal") {
       return { text: null, refusal: "the model declined this request" };
     }
-    const textBlock = (data.content || []).find(b => b.type === "text");
+    // Take the LAST text block, not the first: a server-side tool
+    // (code_execution) can make Claude emit narration text before the tool
+    // call, with the actual schema-constrained answer only in the final
+    // text block after the tool result comes back.
+    const textBlocks = (data.content || []).filter(b => b.type === "text");
+    const textBlock = textBlocks[textBlocks.length - 1];
     return { text: textBlock ? textBlock.text : null, refusal: null };
   }
 
