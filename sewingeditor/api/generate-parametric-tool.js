@@ -42,11 +42,11 @@ const PARAMETRIC_SCHEMA = {
         properties: {
           fn: {
             type: "string",
-            description: "an allowlisted texture_functions.js name from catalog.md (a freeform* line style, a *Dot, or 'fill')",
+            description: "an allowlisted texture_functions.js name from reference-distilled.md (a freeform* line style, a *Dot, or 'fill')",
           },
           geometry: {
             type: "string",
-            description: "JSON string. Line style: {\"path\": <path spec>}. Dot: {\"at\": [cx,cy]}. Fill: {\"region\": {x0,y0,w,h}, \"fillStyle\": \"<name>\"}.",
+            description: "JSON string. Line style: {\"path\": {\"x\": \"<expr in t>\", \"y\": \"<expr in t>\", \"tEnd\": <number>}} -- x(t)/y(t) over t in [0,tEnd]. Dot: {\"at\": [cx,cy]}. Fill: {\"region\": {x0,y0,w,h}, \"fillStyle\": \"<name>\"} OR {\"boundary\": {\"x\":..., \"y\":..., \"tEnd\":...} (must be a CLOSED curve), \"fillStyle\": \"<name>\"} (DIAMOND requires \"region\", not \"boundary\").",
           },
           options: {
             type: "string",

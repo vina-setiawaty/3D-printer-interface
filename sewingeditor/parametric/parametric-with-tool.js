@@ -22,13 +22,34 @@
 // saveAppSecretFrom/loadAppSecretInto, renderCostTracker).
 
 const PARAMETRIC_STORAGE_KEY = "parametricWithToolSessionState";
+// A distilled single reference doc replaces catalog.md/path-spec.md/
+// hardware.md/PARAMETER_CONSTRAINTS.md for this page only — same facts,
+// with human-maintainer-only workflow notes (e.g. PARAMETER_CONSTRAINTS.md's
+// "this is a fill-in form" preamble) and repeated option lists trimmed out.
+// parametric.html keeps using the original 5-doc set unchanged.
 const PROMPT_DOCS = [
   "parametric_docs/system-prompt.md",
-  "parametric_docs/catalog.md",
-  "parametric_docs/path-spec.md",
-  "parametric_docs/hardware.md",
-  "parametric_docs/PARAMETER_CONSTRAINTS.md",
+  "parametric_docs/reference-distilled.md",
 ];
+
+// system-prompt.md is shared with parametric.html and stays unchanged (see
+// PROMPT_DOCS above), but its "a multi-segment stroke is ONE call with a
+// polyline path" rule no longer applies here -- this page has no path
+// "kind" at all, just an x(t)/y(t) formula, which can't express a sharp
+// corner. This note overrides that stale rule for this page only.
+const PATH_MODEL_NOTE = `
+---
+
+PATH MODEL ON THIS PAGE (overrides the polyline guidance above): every line
+path and fill boundary is a literal parametric formula --
+{"x": "<expr in t>", "y": "<expr in t>", "tEnd": <number>} -- evaluated over
+t in [0, tEnd]. There is no "segment"/"polyline"/"arc"/"sine" kind anymore.
+A single smooth formula cannot express a sharp corner, so a multi-segment
+stroke (a rectangle border, an L-shape, a zigzag) now needs ONE LINE CALL
+PER STRAIGHT OR CURVED RUN, not one polyline call. A fill can also use
+geometry.boundary (a CLOSED formula curve, i.e. x(tEnd)~=x(0) and
+y(tEnd)~=y(0)) instead of geometry.region, for a non-rectangular area --
+except DIAMOND fill, which still requires a rectangular geometry.region.`;
 
 // Appended to the base system prompt. code_execution is a server-side tool —
 // Claude runs Python in Anthropic's sandbox and reads back stdout only; it
@@ -45,13 +66,11 @@ proportions), use the code_execution tool to check your planned calls
 before writing your final answer. This is a judgment check, not just a
 number check:
 
-- Reconstruct each path's actual (x, y) geometry from its path spec, using
-  the same math path-spec.md describes: segment/polyline — linear
-  interpolation between the given points; arc — x = cx + r*cos(a),
-  y = cy + r*sin(a) with a swept linearly from startDeg to endDeg; sine —
-  the straight baseline from "from" to "to" plus a perpendicular offset of
-  amplitude*sin(2*pi*t/wavelength). Dot centers and fill regions come
-  directly from geometry.at / geometry.region.
+- Reconstruct each path's/boundary's actual (x, y) geometry by evaluating
+  its own x(t)/y(t) formulas directly over t in [0, tEnd] (they're already
+  literal functions of t — no separate reconstruction math needed). Dot
+  centers come directly from geometry.at; a rectangle fill from
+  geometry.region.
 - From that reconstruction, judge whether the graphic is an APPROPRIATE
   representation of what was asked — not just whether one number matches
   exactly: does it read as the right kind of chart/shape, are relative
@@ -63,8 +82,8 @@ number check:
   doesn't read as intended — fix the calls and re-check before writing your
   final JSON.
 - Skip this for purely decorative textures with no quantitative/structural
-  intent. This is not a substitute for the printability limits in
-  PARAMETER_CONSTRAINTS.md, which are already enforced separately
+  intent. This is not a substitute for the printability limits in the
+  constraints reference, which are already enforced separately
   (client-side, after generation).`;
 
 let TF = null;                 // texture_functions.js module, loaded async
@@ -108,11 +127,14 @@ async function loadParametricDeps() {
   const status = document.querySelector("#pg-status");
   status.textContent = "loading texture library…";
   try {
-    TF = await import("./parametric_docs/texture_functions.js");
+    // Prototype fork with the internal dedup refactor (see
+    // texture_functions-with-tool.js's own header comment) -- same public
+    // behavior as the pinned copy parametric.js uses.
+    TF = await import("./parametric_docs/texture_functions-with-tool.js");
   } catch (e) {
     status.textContent = "";
     document.querySelector("#pg-messages").innerHTML =
-      `<li>could not load parametric_docs/texture_functions.js: ${escapeHtml(String(e.message || e))}</li>`;
+      `<li>could not load parametric_docs/texture_functions-with-tool.js: ${escapeHtml(String(e.message || e))}</li>`;
     return;
   }
   try {
@@ -127,7 +149,7 @@ async function loadParametricDeps() {
     const sys = parts[0];
     const fenced = sys.match(/```([\s\S]*?)```/);
     parts[0] = fenced ? fenced[1].trim() : sys;
-    promptText = parts.join("\n\n---\n\n") + CODE_EXECUTION_INSTRUCTIONS;
+    promptText = parts.join("\n\n---\n\n") + PATH_MODEL_NOTE + CODE_EXECUTION_INSTRUCTIONS;
   } catch (e) {
     status.textContent = "";
     document.querySelector("#pg-messages").innerHTML =
@@ -413,8 +435,30 @@ function renderGeometryFields(call, idx) {
     wrap.appendChild(numField("cx", g.at[0], (v) => { g.at[0] = v; commit(); }));
     wrap.appendChild(numField("cy", g.at[1], (v) => { g.at[1] = v; commit(); }));
   } else if (kind === "fill") {
-    g.region = g.region || { x0: 40, y0: 40, w: 40, h: 30 };
-    ["x0", "y0", "w", "h"].forEach((k) => wrap.appendChild(numField(k, g.region[k], (v) => { g.region[k] = v; commit(); })));
+    const shapeSel = document.createElement("label");
+    shapeSel.className = "pg-field";
+    shapeSel.innerHTML = `<span>region shape</span>`;
+    const shapeChoice = document.createElement("select");
+    ["rectangle", "boundary"].forEach((s) => {
+      const o = document.createElement("option"); o.value = s; o.textContent = s;
+      if ((g.region ? "rectangle" : "boundary") === s) o.selected = true;
+      shapeChoice.appendChild(o);
+    });
+    shapeChoice.onchange = () => {
+      if (shapeChoice.value === "rectangle") { delete g.boundary; g.region = g.region || { x0: 40, y0: 40, w: 40, h: 30 }; }
+      else { delete g.region; g.boundary = g.boundary || defaultFormulaSpec(true); }
+      commit(); renderParamPanel();
+    };
+    shapeSel.appendChild(shapeChoice);
+    wrap.appendChild(shapeSel);
+
+    if (g.region) {
+      ["x0", "y0", "w", "h"].forEach((k) => wrap.appendChild(numField(k, g.region[k], (v) => { g.region[k] = v; commit(); })));
+    } else {
+      g.boundary = g.boundary || defaultFormulaSpec(true);
+      renderFormulaFields(wrap, g.boundary, commit);
+    }
+
     const styleSel = document.createElement("label");
     styleSel.className = "pg-field";
     styleSel.innerHTML = `<span>fillStyle</span>`;
@@ -428,62 +472,44 @@ function renderGeometryFields(call, idx) {
     styleSel.appendChild(sel);
     wrap.appendChild(styleSel);
   } else if (kind === "line") {
-    g.path = g.path || { kind: "segment", from: [40, 110], to: [100, 110] };
-    const kindSel = document.createElement("label");
-    kindSel.className = "pg-field";
-    kindSel.innerHTML = `<span>path</span>`;
-    const sel = document.createElement("select");
-    ["segment", "polyline", "arc", "sine"].forEach((k) => {
-      const o = document.createElement("option"); o.value = k; o.textContent = k;
-      if (g.path.kind === k) o.selected = true;
-      sel.appendChild(o);
-    });
-    sel.onchange = () => { g.path = defaultPathFor(sel.value); commit(); renderParamPanel(); };
-    kindSel.appendChild(sel);
-    wrap.appendChild(kindSel);
-    renderPathFields(wrap, g.path, commit);
+    g.path = g.path && typeof g.path.x === "string" ? g.path : defaultFormulaSpec(false);
+    renderFormulaFields(wrap, g.path, commit);
   }
   return wrap;
 }
 
-function defaultPathFor(kind) {
-  if (kind === "segment") return { kind, from: [40, 110], to: [100, 110] };
-  if (kind === "polyline") return { kind, points: [[40, 110], [70, 130], [100, 110]] };
-  if (kind === "arc") return { kind, center: [110, 110], radius: 25, startDeg: 0, endDeg: 180 };
-  if (kind === "sine") return { kind, from: [40, 110], to: [120, 110], amplitude: 4, wavelength: 20 };
-  return { kind: "segment", from: [40, 110], to: [100, 110] };
+// A line path can't have a sharp corner (a single smooth x(t)/y(t)
+// formula is non-differentiable at a corner) -- default to a plain
+// straight line. A fill boundary must be CLOSED (x(tEnd),y(tEnd) ~=
+// x(0),y(0)); a circle is the simplest formula that's exactly closed.
+function defaultFormulaSpec(closed) {
+  return closed
+    ? { x: "110 + 30*cos(t)", y: "110 + 30*sin(t)", tEnd: 2 * Math.PI }
+    : { x: "40 + t", y: "110", tEnd: 60 };
 }
 
-function renderPathFields(wrap, path, commit) {
-  if (path.kind === "segment" || path.kind === "sine") {
-    wrap.appendChild(numField("from x", path.from[0], (v) => { path.from[0] = v; commit(); }));
-    wrap.appendChild(numField("from y", path.from[1], (v) => { path.from[1] = v; commit(); }));
-    wrap.appendChild(numField("to x", path.to[0], (v) => { path.to[0] = v; commit(); }));
-    wrap.appendChild(numField("to y", path.to[1], (v) => { path.to[1] = v; commit(); }));
-    if (path.kind === "sine") {
-      wrap.appendChild(numField("amplitude", path.amplitude, (v) => { path.amplitude = v; commit(); }));
-      wrap.appendChild(numField("wavelength", path.wavelength, (v) => { path.wavelength = v; commit(); }));
-    }
-  } else if (path.kind === "arc") {
-    wrap.appendChild(numField("center x", path.center[0], (v) => { path.center[0] = v; commit(); }));
-    wrap.appendChild(numField("center y", path.center[1], (v) => { path.center[1] = v; commit(); }));
-    wrap.appendChild(numField("radius", path.radius, (v) => { path.radius = v; commit(); }));
-    wrap.appendChild(numField("startDeg", path.startDeg, (v) => { path.startDeg = v; commit(); }));
-    wrap.appendChild(numField("endDeg", path.endDeg, (v) => { path.endDeg = v; commit(); }));
-  } else if (path.kind === "polyline") {
-    const lbl = document.createElement("label");
-    lbl.className = "pg-field pg-field-wide";
-    lbl.innerHTML = `<span>points (x,y ; x,y ; …)</span>`;
-    const inp = document.createElement("input");
-    inp.type = "text";
-    inp.value = (path.points || []).map((p) => `${p[0]},${p[1]}`).join(" ; ");
-    inp.onchange = () => {
-      const pts = inp.value.split(";").map((s) => s.trim().split(",").map(Number)).filter((p) => p.length === 2 && p.every((n) => !isNaN(n)));
-      if (pts.length >= 2) { path.points = pts; commit(); }
-    };
-    lbl.appendChild(inp);
-    wrap.appendChild(lbl);
-  }
+function renderFormulaFields(wrap, spec, commit) {
+  const xLbl = document.createElement("label");
+  xLbl.className = "pg-field pg-field-wide";
+  xLbl.innerHTML = `<span>x(t)</span>`;
+  const xInp = document.createElement("input");
+  xInp.type = "text";
+  xInp.value = spec.x ?? "";
+  xInp.onchange = () => { spec.x = xInp.value; commit(); };
+  xLbl.appendChild(xInp);
+  wrap.appendChild(xLbl);
+
+  const yLbl = document.createElement("label");
+  yLbl.className = "pg-field pg-field-wide";
+  yLbl.innerHTML = `<span>y(t)</span>`;
+  const yInp = document.createElement("input");
+  yInp.type = "text";
+  yInp.value = spec.y ?? "";
+  yInp.onchange = () => { spec.y = yInp.value; commit(); };
+  yLbl.appendChild(yInp);
+  wrap.appendChild(yLbl);
+
+  wrap.appendChild(numField("tEnd", spec.tEnd, (v) => { spec.tEnd = v; commit(); }));
 }
 
 function numField(label, value, onChange) {
