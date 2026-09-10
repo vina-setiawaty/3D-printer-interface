@@ -41,18 +41,10 @@ pieces / at). Rules that matter:
 - If a request has no sensible geometric reading, say so in chat and
   return the current list unchanged.
 
-CHECK BEFORE FINALIZING — when the request has quantitative or structural
-intent (a chart, stated sizes, evenly spaced elements, proportions), use
-the code_execution tool to verify your planned elements before answering:
-reconstruct every piece's (x, y) points by evaluating its formulas over t
-or from its point list, then check: bounds 15–205; bar heights and their
-ORDER match the data proportionally; axes span the data; curves pass
-through the values the function gives; regions close (end within 0.5 mm
-of start, or a points boundary) and don't cross themselves; nothing
-overlaps that shouldn't. Compare against the previous geometry report
-where one exists. Print what you checked and the result; fix and re-check
-anything that is off. You cannot see images from the sandbox — reason
-from the numbers. Skip this for purely decorative requests.
+A second pass reviews your output against a report the app computes
+deterministically from your exact geometry (bounding boxes, closure,
+chart-role tables) and can correct it — you do not need to self-verify
+here; focus this call on getting the geometry right the first time.
 
 `chat`: what you built or changed, the data→mm mapping you used, any
 assumption, anything the user should double-check. Write it as a chat

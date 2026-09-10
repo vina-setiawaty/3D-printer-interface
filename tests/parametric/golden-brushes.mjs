@@ -145,7 +145,11 @@ for (const c of cases) {
   const file = join(GOLDEN_DIR, `${c.name}.gcode`);
   if (update) { writeFileSync(file, text); written++; continue; }
   if (!existsSync(file)) { console.log(`FAIL ${c.name}: no golden file (run with --update)`); failures++; continue; }
-  const golden = readFileSync(file, "utf8");
+  // Normalize line endings: a Windows checkout (core.autocrlf=true) can
+  // rewrite the committed LF fixtures to CRLF regardless of .gitattributes
+  // until the next fresh clone, and that's a checkout artifact, not a
+  // library regression -- compare content, not line-ending style.
+  const golden = readFileSync(file, "utf8").replace(/\r\n/g, "\n");
   if (golden !== text) {
     const a = golden.split("\n"), b = text.split("\n");
     let k = 0; while (k < a.length && k < b.length && a[k] === b[k]) k++;

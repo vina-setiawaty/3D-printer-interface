@@ -1,14 +1,31 @@
-// The four-stage endpoint for parametric-with-tool.html (replaces
-// generate-parametric-tool.js). The browser orchestrates the chain and
-// calls this once per stage with `stage` in the body; each stage gets its
+// The LLM-call endpoint for parametric-with-tool.html (replaces
+// generate-parametric-tool.js). The browser orchestrates the pipeline and
+// calls this once per call with `stage` in the body; each stage gets its
 // own JSON schema and generation settings, and its own 60s function budget:
 //
-//   route       cheap intent classifier: which stage(s) to run, a
-//               self-contained instruction, target element ids
-//   geometry    element definitions (line x(t)/y(t) or point list, region
-//               boundary pieces, points) -- code_execution self-check ON
-//   texture     per element slot: brush/stamp + fill pattern
-//   parameters  option values + parameter abstractions
+//   route            cheap intent classifier: which stage(s) to run, a
+//                    self-contained instruction, target element ids
+//   geometry         element definitions (line x(t)/y(t) or point list,
+//                    region boundary pieces, points) -- plain generation
+//   geometry-check   reviews a just-generated element list against a
+//                    DETERMINISTIC report the app computed from that exact
+//                    geometry (bbox, closure, chart-role tables); returns
+//                    ok, or a patch of just the elements that need fixing
+//   texture          per element slot: brush/stamp + fill pattern
+//   texture-check    same idea for a free-form fill pattern (stamps/
+//                    strokes/curves/family), against the app's stroke/
+//                    stamp counts for the compiled pattern
+//   parameters       option values + parameter abstractions
+//
+// The *-check stages replace an earlier design that asked the generation
+// call itself to self-verify with Anthropic's server-side code_execution
+// tool: that tool loop competes with the JSON answer for the same token
+// and time budget, so a long element list could truncate mid-object
+// (invalid JSON) or blow the 60s maxDuration. Splitting generation from
+// review into two plain (non-tool) calls fixes both: generation gets its
+// full budget, and the review call is handed the app's own exact numbers
+// instead of asking the model to reconstruct them in a sandbox -- cheaper,
+// faster, and provider-agnostic (no Anthropic-only tool).
 //
 // Nested variable shapes (geometry, pattern, options, targets) travel as
 // JSON *strings* and are parsed + validated client-side against
@@ -23,6 +40,35 @@ export const config = {
 };
 
 const chat = (what) => ({ type: "string", description: `conversational reply: ${what}` });
+
+// Shared by "geometry" (the full ordered list) and "geometry-check" (a
+// patch of just the elements that need fixing) -- same per-element shape.
+const GEOMETRY_ELEMENT_ITEM = {
+  type: "object",
+  properties: {
+    id: { type: "string", description: "el_N; reuse the existing id for an element you keep, modify, or fix, empty for a brand-new one" },
+    label: { type: "string", description: "short human label, e.g. 'x axis', 'bar 2', 'shaded area'" },
+    kind: { type: "string", enum: ["line", "region", "point"] },
+    role: { type: "string", description: "chart role for the report: axis | tick | curve | bar | marker | label | other" },
+    geometry: { type: "string", description: "JSON string. line: {\"path\": <piece>}. region: {\"boundary\": [<piece>, ...]} concatenated in order and closed. point: {\"at\": [x, y]}. A piece is {\"x\": \"<expr in t>\", \"y\": \"<expr in t>\", \"tEnd\": n} OR {\"points\": [[x,y], ...]} OR {\"ref\": \"<line element id>\", \"tFrom\": n, \"tTo\": n, \"reverse\": bool}." },
+  },
+  required: ["id", "label", "kind", "role", "geometry"],
+  additionalProperties: false,
+};
+
+// Shared by "texture" (one entry per slot set/cleared) and "texture-check"
+// (a patch of just the slots that need fixing).
+const TEXTURE_ITEM = {
+  type: "object",
+  properties: {
+    elementId: { type: "string" },
+    slot: { type: "string", enum: ["brush", "outline", "fill"], description: "line/point: brush. region: outline (a line brush along the boundary) and/or fill (a pattern + brush)" },
+    fn: { type: "string", description: "brush or stamp name from the reference; empty string clears the slot" },
+    pattern: { type: "string", description: "fill slot only: JSON string of the pattern spec, e.g. {\"kind\": \"hatch\", \"angleDeg\": 45, \"gap\": 4}; empty otherwise" },
+  },
+  required: ["elementId", "slot", "fn", "pattern"],
+  additionalProperties: false,
+};
 
 const STAGES = {
   route: {
@@ -49,25 +95,32 @@ const STAGES = {
         elements: {
           type: "array",
           description: "the FULL ordered element list (print order), not a diff; keep ids of unchanged elements",
-          items: {
-            type: "object",
-            properties: {
-              id: { type: "string", description: "el_N; reuse the existing id for an element you keep or modify, empty for a new one" },
-              label: { type: "string", description: "short human label, e.g. 'x axis', 'bar 2', 'shaded area'" },
-              kind: { type: "string", enum: ["line", "region", "point"] },
-              role: { type: "string", description: "chart role for the report: axis | tick | curve | bar | marker | label | other" },
-              geometry: { type: "string", description: "JSON string. line: {\"path\": <piece>}. region: {\"boundary\": [<piece>, ...]} concatenated in order and closed. point: {\"at\": [x, y]}. A piece is {\"x\": \"<expr in t>\", \"y\": \"<expr in t>\", \"tEnd\": n} OR {\"points\": [[x,y], ...]} OR {\"ref\": \"<line element id>\", \"tFrom\": n, \"tTo\": n, \"reverse\": bool}." },
-            },
-            required: ["id", "label", "kind", "role", "geometry"],
-            additionalProperties: false,
-          },
+          items: GEOMETRY_ELEMENT_ITEM,
         },
         transform: { type: "string", description: "JSON string {\"scale\": n, \"origin\": [x, y] | null} to change the global placement, or empty to leave it" },
       },
       required: ["chat", "elements", "transform"],
       additionalProperties: false,
     },
-    maxOutputTokens: 32768, effort: "medium", thinking: true, codeExecution: true,
+    maxOutputTokens: 32768, effort: "medium", thinking: true, codeExecution: false,
+  },
+  "geometry-check": {
+    schemaName: "parametric_geometry_check",
+    schema: {
+      type: "object",
+      properties: {
+        chat: chat("what you checked, and what (if anything) you fixed"),
+        ok: { type: "boolean", description: "true if the proposed elements are correct and printable as given" },
+        elements: {
+          type: "array",
+          description: "ONLY the elements that need a fix, each a full corrected replacement (same id) -- empty array when ok is true",
+          items: GEOMETRY_ELEMENT_ITEM,
+        },
+      },
+      required: ["chat", "ok", "elements"],
+      additionalProperties: false,
+    },
+    maxOutputTokens: 8192, effort: "low", thinking: false, codeExecution: false,
   },
   texture: {
     schemaName: "parametric_texture",
@@ -78,23 +131,31 @@ const STAGES = {
         textures: {
           type: "array",
           description: "one entry per element slot you set or clear; omit slots you leave as they are",
-          items: {
-            type: "object",
-            properties: {
-              elementId: { type: "string" },
-              slot: { type: "string", enum: ["brush", "outline", "fill"], description: "line/point: brush. region: outline (a line brush along the boundary) and/or fill (a pattern + brush)" },
-              fn: { type: "string", description: "brush or stamp name from the reference; empty string clears the slot" },
-              pattern: { type: "string", description: "fill slot only: JSON string of the pattern spec, e.g. {\"kind\": \"hatch\", \"angleDeg\": 45, \"gap\": 4}; empty otherwise" },
-            },
-            required: ["elementId", "slot", "fn", "pattern"],
-            additionalProperties: false,
-          },
+          items: TEXTURE_ITEM,
         },
       },
       required: ["chat", "textures"],
       additionalProperties: false,
     },
-    maxOutputTokens: 16384, effort: "medium", thinking: true, codeExecution: true,
+    maxOutputTokens: 16384, effort: "medium", thinking: true, codeExecution: false,
+  },
+  "texture-check": {
+    schemaName: "parametric_texture_check",
+    schema: {
+      type: "object",
+      properties: {
+        chat: chat("what you checked, and what (if anything) you fixed"),
+        ok: { type: "boolean", description: "true if every free-form fill actually covers its region as intended" },
+        textures: {
+          type: "array",
+          description: "ONLY the slots that need a fix, each a full corrected replacement -- empty array when ok is true",
+          items: TEXTURE_ITEM,
+        },
+      },
+      required: ["chat", "ok", "textures"],
+      additionalProperties: false,
+    },
+    maxOutputTokens: 6144, effort: "low", thinking: false, codeExecution: false,
   },
   parameters: {
     schemaName: "parametric_parameters",

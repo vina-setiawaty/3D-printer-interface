@@ -27,11 +27,22 @@ const STORAGE_KEY = "parametricWithToolSessionState";
 const STAGE_DOCS = {
   route: ["parametric_docs/stage-route.md"],
   geometry: ["parametric_docs/stage-geometry.md", "parametric_docs/reference-machine.md"],
+  "geometry-check": ["parametric_docs/stage-geometry-check.md", "parametric_docs/reference-machine.md"],
   texture: ["parametric_docs/stage-texture.md", "parametric_docs/reference-machine.md", "parametric_docs/reference-brushes.md"],
+  "texture-check": ["parametric_docs/stage-texture-check.md", "parametric_docs/reference-machine.md", "parametric_docs/reference-brushes.md"],
   parameters: ["parametric_docs/stage-parameters.md", "parametric_docs/reference-brushes.md"],
 };
 const CHAIN = { geometry: ["geometry", "texture", "parameters"], texture: ["texture", "parameters"], parameters: ["parameters"], chat: [] };
 const STAGE_LABEL = { route: "routing", geometry: "geometry", texture: "texture", parameters: "parameters" };
+// A *-check call reuses the "geometry"/"texture" output validator (same
+// per-item shape -- see api/parametric-stage.js's shared item schemas);
+// only the top-level `ok` boolean is read separately, straight off the
+// raw parsed JSON, since it has no nested-JSON field that needs parsing.
+const VALIDATOR_FOR_STAGE = { route: "route", geometry: "geometry", "geometry-check": "geometry", texture: "texture", "texture-check": "texture", parameters: "parameters" };
+// Fill pattern kinds whose coordinates the model writes itself -- these
+// are the only ones worth a texture-check pass; hatch/grid/diamond are
+// recomputed deterministically from the region and can't be "wrong".
+const FREEFORM_PATTERN_KINDS = ["stamps", "strokes", "curves", "family"];
 
 let C = null;              // parametric-catalog-with-tool.js module
 let docs = {};             // path -> text
@@ -144,20 +155,22 @@ function stageUserMessage(stage, instruction, targets) {
   return parts.join("\n\n");
 }
 
-async function callStage(stage, messages) {
+// `contextScene` defaults to the live scene; a *-check call passes a
+// draft scene-like object instead, since its response's elementIds may
+// reference elements the real scene hasn't merged yet.
+async function callStage(stage, messages, contextScene = scene) {
   const secret = $("#pg-app-secret").value;
   const provider = $("#pg-provider").value;
   const model = $("#pg-model").value;
   const effort = $("#pg-effort").value;
   const thinking = $("#pg-thinking").value === "on";
-  const codeExecution = $("#pg-code-execution").value === "on";
 
   let response;
   try {
     response = await fetch("/api/parametric-stage", {
       method: "POST",
       headers: { "content-type": "application/json", "x-app-secret": secret },
-      body: JSON.stringify({ stage, provider, model, effort, thinking, codeExecution, systemPrompt: systemPromptFor(stage), messages }),
+      body: JSON.stringify({ stage, provider, model, effort, thinking, systemPrompt: systemPromptFor(stage), messages }),
     });
   } catch (e) {
     throw new Error(`could not reach the LLM proxy: ${e.message || e}`);
@@ -179,8 +192,9 @@ async function callStage(stage, messages) {
     throw new Error(`could not parse the model output as JSON: ${e.message}`);
   }
   if (data.usage) recordCost(data.usage, model);
-  const v = C.validateStageOutput(stage, json, scene);
+  const v = C.validateStageOutput(VALIDATOR_FOR_STAGE[stage], json, contextScene);
   if (v.errors.length) throw new Error(`${stage} output rejected: ${v.errors.join("; ")}`);
+  if (stage.endsWith("-check")) v.value.ok = !!json.ok;
   return v.value;
 }
 
@@ -230,7 +244,8 @@ async function onSend() {
     setBusy(false);
     return;
   }
-  pending = { instruction: route.instruction || instruction, targets: route.targets, remaining: CHAIN[route.route].slice() };
+  const chain = CHAIN[route.route].slice();
+  pending = { instruction: route.instruction || instruction, targets: route.targets, remaining: chain, total: chain.length };
   await runChain();
 }
 
@@ -238,11 +253,103 @@ function retryLink(kind, p) {
   return `<span class="pg-retry" data-kind="${kind}">retry</span>`;
 }
 
+function selfCheckEnabled() { return $("#pg-self-check").value === "on"; }
+
+// After the geometry stage returns a proposed element list, compile it
+// (elements only, no textures -- resolveScene/compileScene don't need
+// them for bbox/closure/chart-role reporting) to get the app's own exact
+// numbers, then -- if there's anything worth checking and self-check is
+// on -- ask the geometry-check stage to review against those numbers and
+// patch anything wrong. Returns the (possibly patched) elements and a
+// chat note to show, or null if nothing changed.
+async function checkGeometry(step, total, instruction, elements, transform) {
+  const draft = { elements, textures: {}, transform, config: scene.config, abstractions: [] };
+  let compiled;
+  try { compiled = C.compileScene(draft); } catch (e) { return { elements, note: null }; }
+  const worthChecking = compiled.errors.length > 0 || compiled.warnings.length > 0 ||
+    elements.some((e) => ["bar", "axis", "curve", "tick"].includes(e.role));
+  if (!selfCheckEnabled() || !worthChecking) return { elements, note: null };
+
+  setBusy(true, `checking geometry… (step ${step} of ${total})`);
+  const parts = [
+    `INSTRUCTION:\n${instruction}`,
+    `PROPOSED ELEMENTS (JSON):\n${jsonLines(C.elementsJson(draft))}`,
+    `DETERMINISTIC REPORT (computed by the app from this exact geometry -- trust these numbers):\n${C.reportText(compiled.report)}`,
+  ];
+  if (compiled.errors.length) parts.push(`HARD ERRORS (must be fixed):\n${compiled.errors.join("\n")}`);
+  if (compiled.warnings.length) parts.push(`WARNINGS:\n${compiled.warnings.join("\n")}`);
+
+  let out;
+  try {
+    out = await callStage("geometry-check", [{ role: "user", content: parts.join("\n\n") }], draft);
+  } catch (e) {
+    showMessages([`geometry check failed (kept the unverified draft): ${escapeHtml(String(e.message || e))}`]);
+    return { elements, note: null };
+  }
+  if (out.ok || !out.elements.length) return { elements, note: null };
+  const byId = new Map(elements.map((e, i) => [e.id, i]));
+  for (const fix of out.elements) {
+    const i = byId.get(fix.id);
+    if (i != null) elements[i] = fix; else elements.push(fix);
+  }
+  return { elements, note: out.chat };
+}
+
+// Same idea for the texture stage, but only worth doing when at least one
+// proposed fill uses a free-form (hand-written-coordinates) pattern.
+async function checkTexture(step, total, instruction, textures) {
+  const worthChecking = textures.some((t) => t.slot === "fill" && t.pattern && FREEFORM_PATTERN_KINDS.includes(t.pattern.kind));
+  if (!selfCheckEnabled() || !worthChecking) return { textures, note: null };
+
+  const draft = { elements: scene.elements, textures: structuredClone(scene.textures), transform: scene.transform, config: scene.config, abstractions: structuredClone(scene.abstractions) };
+  C.mergeTextures(draft, { textures });
+  let compiled;
+  try { compiled = C.compileScene(draft); } catch (e) { return { textures, note: null }; }
+
+  setBusy(true, `checking texture… (step ${step} of ${total})`);
+  const parts = [
+    `INSTRUCTION:\n${instruction}`,
+    `PROPOSED TEXTURES (JSON):\n${jsonLines(textures)}`,
+    `DETERMINISTIC REPORT (compiled fill stats -- trust these numbers):\n${C.reportText(compiled.report)}`,
+  ];
+  if (compiled.errors.length) parts.push(`HARD ERRORS (must be fixed):\n${compiled.errors.join("\n")}`);
+  if (compiled.warnings.length) parts.push(`WARNINGS:\n${compiled.warnings.join("\n")}`);
+
+  let out;
+  try {
+    out = await callStage("texture-check", [{ role: "user", content: parts.join("\n\n") }], draft);
+  } catch (e) {
+    showMessages([`texture check failed (kept the unverified draft): ${escapeHtml(String(e.message || e))}`]);
+    return { textures, note: null };
+  }
+  if (out.ok || !out.textures.length) return { textures, note: null };
+  const key = (t) => `${t.elementId} ${t.slot}`;
+  const byKey = new Map(textures.map((t, i) => [key(t), i]));
+  for (const fix of out.textures) {
+    const i = byKey.get(key(fix));
+    if (i != null) textures[i] = fix; else textures.push(fix);
+  }
+  return { textures, note: out.chat };
+}
+
+// The transform a proposed geometry change implies, for the check pass's
+// report -- value.transform is already parsed (object or null) by
+// validateStageOutput.
+function previewTransform(value) {
+  if (!value.transform) return scene.transform;
+  const t = value.transform;
+  return {
+    scale: Number(t.scale) > 0 ? Number(t.scale) : scene.transform.scale,
+    origin: Array.isArray(t.origin) ? t.origin.map(Number) : (t.origin === null ? null : scene.transform.origin),
+  };
+}
+
 async function runChain() {
   if (!pending || !pending.remaining) return;
   while (pending.remaining.length) {
     const stage = pending.remaining[0];
-    setBusy(true, `${chainProgress(stage)}…`);
+    const step = pending.total - pending.remaining.length + 1;
+    setBusy(true, `generating ${STAGE_LABEL[stage]}… (step ${step} of ${pending.total})`);
     let value;
     try {
       value = await callStage(stage, [{ role: "user", content: stageUserMessage(stage, pending.instruction, pending.targets) }]);
@@ -251,23 +358,28 @@ async function runChain() {
       showMessages([`${STAGE_LABEL[stage]} stage failed: ${escapeHtml(String(e.message || e))}`, retryLink("chain")]);
       return;
     }
+    pushMessage("assistant", value.chat || "(no message)", stage);
+
+    if (stage === "geometry") {
+      const checked = await checkGeometry(step, pending.total, pending.instruction, value.elements, previewTransform(value));
+      value.elements = checked.elements;
+      if (checked.note) pushMessage("assistant", checked.note, "geometry-check");
+    } else if (stage === "texture") {
+      const checked = await checkTexture(step, pending.total, pending.instruction, value.textures);
+      value.textures = checked.textures;
+      if (checked.note) pushMessage("assistant", checked.note, "texture-check");
+    }
+
     let dropped = [];
     if (stage === "geometry") dropped = C.mergeGeometry(scene, value);
     else if (stage === "texture") dropped = C.mergeTextures(scene, value);
     else if (stage === "parameters") C.mergeParameters(scene, value);
-    pushMessage("assistant", value.chat || "(no message)", stage);
     pending.remaining.shift();
     rerenderAll();
     if (dropped.length) showMessages([`dropped abstraction targets that no longer apply: ${escapeHtml(dropped.join(", "))}`]);
   }
   pending = null;
   setBusy(false);
-}
-
-function chainProgress(current) {
-  const all = ["geometry", "texture", "parameters"];
-  const idx = all.indexOf(current);
-  return all.map((s, i) => (i < idx ? `✓ ${s}` : i === idx ? `▶ ${s}` : s)).join("  →  ");
 }
 
 async function onRetry(kind) {

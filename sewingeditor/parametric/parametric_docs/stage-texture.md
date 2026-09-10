@@ -38,12 +38,10 @@ Choosing textures:
   strokes, curves, family) take a line brush; stamp patterns (grid,
   stamps) take a stamp. diamond always uses `solid`.
 
-CHECK BEFORE FINALIZING — for any fill you write with your own
-coordinates (stamps, strokes, curves, family), use the code_execution tool
-to evaluate the points/curves you wrote and confirm they actually lie
-inside the region's bbox from the report, cover it as intended (not all
-bunched in a corner, not mostly outside), and are spaced sensibly for the
-brush you chose. Print what you checked. Skip this for hatch/grid/diamond.
+For any fill using your own coordinates (stamps, strokes, curves, family),
+a second pass reviews the compiled stroke/stamp count against the region
+and can correct it — you do not need to self-verify here; just place the
+coordinates carefully in the region's own coordinate space.
 
 `chat`: which texture each changed element got and why it will feel
 distinct. Write it as a chat message.

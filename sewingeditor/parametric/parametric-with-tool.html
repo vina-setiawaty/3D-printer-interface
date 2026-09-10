@@ -365,10 +365,10 @@
             </select>
           </div>
           <div class="ui-group">
-            <span class="label">Tool execution</span>
-            <select id="pg-code-execution">
-              <option value="on" selected>on (geometry + texture stages self-check, slower — Claude only)</option>
-              <option value="off">off (faster — turn off if you hit FUNCTION_INVOCATION_TIMEOUT)</option>
+            <span class="label">Self-check</span>
+            <select id="pg-self-check">
+              <option value="on" selected>on (a follow-up call reviews geometry/texture against the app's own numbers, slower)</option>
+              <option value="off">off (faster — skip the review pass)</option>
             </select>
           </div>
         </details>
