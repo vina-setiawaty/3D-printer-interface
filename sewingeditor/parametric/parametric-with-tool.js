@@ -700,27 +700,15 @@ function renderGeometryEditor(el) {
       commitGeometry(); renderPanel();
     }));
     if (isGroup) {
-      const list = document.createElement("div");
-      el.paths.forEach((piece, i) => {
-        const pw = document.createElement("div");
-        pw.className = "pg-piece";
-        const head = document.createElement("div");
-        head.className = "pg-fields-title";
-        head.textContent = `stroke ${i + 1}`;
-        const rm = document.createElement("span");
-        rm.className = "pg-call-del";
-        rm.textContent = "remove stroke";
-        rm.onclick = () => { el.paths.splice(i, 1); commitGeometry(); renderPanel(); };
-        head.appendChild(rm);
-        pw.appendChild(head);
-        pw.appendChild(renderPieceEditor(piece, (p) => { el.paths[i] = p; commitGeometry(); renderPanel(); }, false));
-        list.appendChild(pw);
-      });
-      wrap.appendChild(list);
-      const row = document.createElement("div");
-      row.className = "pg-btn-row";
-      row.appendChild(smallBtn("+ stroke", () => { el.paths.push({ points: [[40, 40], [60, 40]] }); commitGeometry(); renderPanel(); }));
-      wrap.appendChild(row);
+      // A group is ONE element sharing ONE texture -- edit it as one
+      // compact block (like a point group's point list), not as N
+      // expanded per-stroke editors that read as N separate elements.
+      // Each entry is a piece object (usually {"points": [[x,y],[x,y]]}
+      // for a short straight stroke; a formula/ref piece object also
+      // works but is rarer for a group and edited as raw JSON here).
+      wrap.appendChild(jsonField(`strokes [{"points":[[x,y],[x,y]]}, …] -- one stroke per entry, all sharing this element's texture`, el.paths, (v) => {
+        if (Array.isArray(v) && v.length) { el.paths = v; commitGeometry(); }
+      }));
     } else {
       el.path = el.path && typeof el.path === "object" ? el.path : { x: "40 + t", y: "110", tEnd: 60 };
       wrap.appendChild(renderPieceEditor(el.path, (p) => { el.path = p; commitGeometry(); renderPanel(); }, false));
