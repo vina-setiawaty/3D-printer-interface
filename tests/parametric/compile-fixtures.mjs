@@ -225,6 +225,96 @@ test("abstraction rule: weights normalize, contributions sum, manual edit rebase
   assert.equal(C.driversOf(s, "h", "fill", "spacing").length, 2);
 });
 
+test("abstraction can target a fill PATTERN option, not just its brush (regression: reported production failure)", () => {
+  // A solid brush has no "gap" option -- "gap" here can only be the hatch
+  // PATTERN's own spacing. Before resolveTarget() this was rejected as
+  // "not a numeric option of solid".
+  const s = C.defaultScene();
+  s.elements = [{ id: "b", label: "bar", kind: "region", boundary: [rect(40, 40, 20, 20)] }];
+  s.textures = { b: { fill: { fn: "solid", options: {}, pattern: { kind: "hatch", angleDeg: 0, gap: 4 } } } };
+  assert.equal(C.resolveTarget(s, "b", "fill", "gap").location, "pattern");
+  assert.equal(C.resolveTarget(s, "b", "fill", "width").location, "options", "the brush's own option still resolves too");
+  assert.equal(C.resolveTarget(s, "b", "fill", "nonsense"), null);
+
+  s.abstractions = [{ id: "ab_1", name: "density", value: 0.5, v0: 0.5, targets: [{ elementId: "b", slot: "fill", option: "gap", weight: 1, direction: -1 }] }];
+  C.applyAbstractions(s);
+  assert.equal(s.textures.b.fill.pattern.gap, 4, "v0 reproduces the base");
+  s.abstractions[0].value = 1;
+  C.applyAbstractions(s);
+  assert.ok(s.textures.b.fill.pattern.gap < 4, "denser (higher knob) -> smaller gap");
+  assert.equal(s.textures.b.fill.options.gap, undefined, "never written to the brush's own options");
+
+  // manual edit of the pattern field rebases like a brush option would
+  C.rebaseOption(s, "b", "fill", "gap", 2);
+  C.applyAbstractions(s);
+  assert.equal(s.textures.b.fill.pattern.gap, 2);
+
+  // the parameters-stage validator now accepts "gap" for this fill slot,
+  // both as a direct option edit and as an abstraction target
+  const par = C.validateStageOutput("parameters", {
+    chat: "denser",
+    options: [{ elementId: "b", slot: "fill", options: JSON.stringify({ gap: 1.5 }) }],
+    abstractions: [{ id: "", name: "density", description: "d", value: 0.5, targets: JSON.stringify([{ elementId: "b", slot: "fill", option: "gap", weight: 1, direction: -1 }]) }],
+  }, s);
+  assert.deepEqual(par.errors, []);
+  assert.equal(par.value.options[0].patternOptions.gap, 1.5);
+  assert.deepEqual(par.value.options[0].options, {});
+  C.mergeParameters(s, par.value);
+  assert.equal(s.textures.b.fill.pattern.gap, 1.5);
+  assert.equal(C.compileScene(s).errors.length, 0);
+});
+
+test("line group (tick marks): one element, one texture, N stroke jobs", () => {
+  const s = C.defaultScene();
+  const ticks = [];
+  for (let x = 40; x <= 100; x += 10) ticks.push({ points: [[x, 40], [x, 43]] });
+  s.elements = [
+    { id: "el_1", label: "x axis", kind: "line", role: "axis", path: { points: [[40, 40], [100, 40]] } },
+    { id: "el_2", label: "x-axis ticks", kind: "line", role: "tick", paths: ticks },
+  ];
+  s.textures = { el_1: { brush: { fn: "solid", options: {} } }, el_2: { brush: { fn: "solid", options: { width: 0.3 } } } };
+  const r = C.compileScene(s);
+  assert.deepEqual(r.errors, []);
+  const tickJobs = r.jobs.filter((j) => j.elementId === "el_2");
+  assert.equal(tickJobs.length, ticks.length, "one brush job per tick");
+  assert.ok(tickJobs.every((j) => j.fn === "solid" && j.options.width === 0.3 && j.newPattern), "same texture, each a separate stroke");
+  const entry = r.report.elements.find((e) => e.id === "el_2");
+  assert.equal(entry.strokeCount, ticks.length);
+  assert.equal(entry.samples.length, ticks.length);
+  assert.ok(C.runJobs(r.jobs).ok);
+
+  // one texture assignment, one abstraction, drives the WHOLE group at once
+  s.abstractions = [{ id: "ab_1", name: "tick boldness", value: 1, v0: 0.5, targets: [{ elementId: "el_2", slot: "brush", option: "width", weight: 1, direction: 1 }] }];
+  C.applyAbstractions(s);
+  const r2 = C.compileScene(s);
+  assert.ok(r2.jobs.filter((j) => j.elementId === "el_2").every((j) => j.options.width === s.textures.el_2.brush.options.width), "every tick stroke picks up the same driven value");
+});
+
+test("point group (data markers): one element, one texture, N stamp jobs", () => {
+  const s = C.defaultScene();
+  const marks = [[45, 60], [55, 68], [65, 61], [75, 70]];
+  s.elements = [{ id: "el_1", label: "markers", kind: "point", role: "marker", at: marks }];
+  s.textures = { el_1: { brush: { fn: "blob", options: { diameter: 2 } } } };
+  const r = C.compileScene(s);
+  assert.deepEqual(r.errors, []);
+  assert.equal(r.jobs.length, marks.length);
+  assert.ok(r.jobs.every((j) => j.kind === "stamp" && j.fn === "blob" && j.options.diameter === 2));
+  const entry = r.report.elements.find((e) => e.id === "el_1");
+  assert.equal(entry.count, marks.length);
+  assert.equal(entry.at.length, marks.length);
+  assert.ok(C.runJobs(r.jobs).ok);
+});
+
+test("a ref cannot target a line GROUP (ambiguous which stroke)", () => {
+  const s = C.defaultScene();
+  s.elements = [
+    { id: "g", label: "ticks", kind: "line", role: "tick", paths: [{ points: [[40, 40], [40, 43]] }, { points: [[50, 40], [50, 43]] }] },
+    { id: "r", label: "bad ref", kind: "region", boundary: [{ ref: "g" }, { points: [[40, 60], [50, 60]] }] },
+  ];
+  const r = C.compileScene(s);
+  assert.ok(r.errors.some((e) => /repeated group/.test(e)));
+});
+
 test("stage validation + merge round trip", () => {
   const s = C.defaultScene();
   const geo = C.validateStageOutput("geometry", {
@@ -233,12 +323,15 @@ test("stage validation + merge round trip", () => {
       { id: "el_1", label: "axis", kind: "line", role: "axis", geometry: JSON.stringify({ path: { points: [[40, 40], [100, 40]] } }) },
       { id: "", label: "bar", kind: "region", role: "bar", geometry: JSON.stringify({ boundary: [rect(50, 40, 10, 20)] }) },
       { id: "el_1", label: "dup id", kind: "point", role: "", geometry: JSON.stringify({ at: [60, 70] }) },
+      { id: "", label: "ticks", kind: "line", role: "tick", geometry: JSON.stringify({ paths: [{ points: [[40, 40], [40, 43]] }, { points: [[50, 40], [50, 43]] }] }) },
     ],
   }, s);
   assert.deepEqual(geo.errors, []);
-  assert.deepEqual(geo.value.elements.map((e) => e.id), ["el_1", "el_2", "el_3"]);
+  assert.deepEqual(geo.value.elements.map((e) => e.id), ["el_1", "el_2", "el_3", "el_4"]);
+  assert.deepEqual(geo.value.elements[3].paths.map((p) => p.points[0]), [[40, 40], [50, 40]]);
   C.mergeGeometry(s, geo.value);
-  assert.equal(s.elements.length, 3);
+  assert.equal(s.elements.length, 4);
+  assert.deepEqual(C.elementsJson(s, ["el_4"])[0].geometry, { paths: geo.value.elements[3].paths });
 
   const tex = C.validateStageOutput("texture", {
     chat: "textured",

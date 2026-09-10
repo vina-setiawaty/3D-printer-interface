@@ -515,6 +515,7 @@ function resolvePiece(piece, scene, what, depth = 0) {
     const target = scene.elements.find((e) => e.id === piece.ref);
     if (!target) throw new Error(`${what}: ref "${piece.ref}" is not an element id`);
     if (target.kind !== "line") throw new Error(`${what}: ref "${piece.ref}" must be a line element`);
+    if (Array.isArray(target.paths)) throw new Error(`${what}: ref "${piece.ref}" is a repeated group (multiple strokes) -- ref only targets a single-stroke line`);
     let pts;
     if (Array.isArray(target.path?.points)) pts = checkPointList(target.path.points, what);
     else pts = sampleFormula(target.path || {}, `${what} (ref ${piece.ref})`, piece.tFrom ?? 0, piece.tTo ?? target.path?.tEnd);
@@ -533,14 +534,33 @@ export function resolveScene(scene) {
     const what = `"${el.label || el.id}"`;
     try {
       if (el.kind === "point") {
-        if (!Array.isArray(el.at) || el.at.length !== 2 || !el.at.every(Number.isFinite)) throw new Error(`${what}: point needs at = [x, y]`);
-        resolved[el.id] = { kind: "point", at: [el.at[0], el.at[1]] };
-        bbox = mergeBbox(bbox, bboxOf([el.at]));
+        // A point's `at` is either one pair [x,y] (a single stamp) or an
+        // array of pairs (a GROUP: many stamps -- repeated markers, data
+        // points along an axis -- sharing this one element's texture).
+        const many = Array.isArray(el.at) && Array.isArray(el.at[0]);
+        const atList = many ? el.at : [el.at];
+        atList.forEach((p, i) => {
+          if (!Array.isArray(p) || p.length !== 2 || !p.every(Number.isFinite)) {
+            throw new Error(`${what}${many ? ` point ${i + 1}` : ""}: point needs at = [x, y]${many ? " (each entry of the group)" : ""}`);
+          }
+        });
+        resolved[el.id] = { kind: "point", atList: atList.map((p) => [p[0], p[1]]) };
+        bbox = mergeBbox(bbox, bboxOf(atList));
       } else if (el.kind === "line") {
-        const pts = dedupeConsecutive(resolvePiece(el.path, scene, what));
-        if (pts.length < 2) throw new Error(`${what}: path has no length`);
-        resolved[el.id] = { kind: "line", points: pts, dense: !Array.isArray(el.path?.points) };
-        bbox = mergeBbox(bbox, bboxOf(pts));
+        // A line's geometry is either `path` (ONE continuous stroke) or
+        // `paths` (a GROUP: several independent, disconnected strokes --
+        // axis ticks, gridlines, a row of short marks -- sharing this one
+        // element's texture; each piece is resolved on its own, never
+        // concatenated into one path).
+        const pieces = Array.isArray(el.paths) ? el.paths : [el.path];
+        if (!pieces.length) throw new Error(`${what}: line needs "path" or a non-empty "paths"`);
+        const strokes = pieces.map((piece, i) => {
+          const pts = dedupeConsecutive(resolvePiece(piece, scene, pieces.length > 1 ? `${what} stroke ${i + 1}` : what));
+          if (pts.length < 2) throw new Error(`${what}${pieces.length > 1 ? ` stroke ${i + 1}` : ""}: path has no length`);
+          return pts;
+        });
+        resolved[el.id] = { kind: "line", strokes, dense: pieces.every((p) => !Array.isArray(p.points)) };
+        for (const pts of strokes) bbox = mergeBbox(bbox, bboxOf(pts));
       } else if (el.kind === "region") {
         if (!Array.isArray(el.boundary) || !el.boundary.length) throw new Error(`${what}: region needs a boundary piece list`);
         let poly = [];
@@ -757,24 +777,42 @@ export function compileScene(scene) {
 
     try {
       if (r.kind === "point") {
-        const at = tf.map(r.at);
-        entry.at = at.map(rnd);
-        bedBbox = mergeBbox(bedBbox, bboxOf([at]));
-        if (outOfSafe([at])) errors.push(`"${label}": point is outside the safe area (${CONSTRAINTS.safeMin}-${CONSTRAINTS.safeMax}mm).`);
-        if (tex.brush?.fn) addStampJob("brush", tex.brush.fn, tex.brush.options, at);
+        // atList has one entry for a plain point, several for a GROUP
+        // (repeated markers sharing this element's one texture) -- each
+        // gets its own stamp job, same fn/options.
+        const pts = r.atList.map(tf.map);
+        entry.at = pts.length === 1 ? pts[0].map(rnd) : pts.map((p) => p.map(rnd));
+        entry.count = pts.length;
+        bedBbox = mergeBbox(bedBbox, bboxOf(pts));
+        if (pts.some((p) => outOfSafe([p]))) errors.push(`"${label}": a point is outside the safe area (${CONSTRAINTS.safeMin}-${CONSTRAINTS.safeMax}mm).`);
+        if (tex.brush?.fn) for (const p of pts) addStampJob("brush", tex.brush.fn, tex.brush.options, p);
       } else if (r.kind === "line") {
-        const pts = r.points.map(tf.map);
-        const bb = bboxOf(pts);
-        entry.bbox = rndBox(bb); entry.length = rnd(polylineLength(pts));
-        entry.start = pts[0].map(rnd); entry.end = pts[pts.length - 1].map(rnd);
-        if (r.dense && pts.length > 5) {
-          const n = 5;
-          entry.samples = [];
-          for (let i = 0; i < n; i++) entry.samples.push(pts[Math.round(((pts.length - 1) * i) / (n - 1))].map(rnd));
+        // strokes has one entry for a plain line, several for a GROUP
+        // (repeated disconnected strokes -- axis ticks, gridlines --
+        // sharing this element's one texture); each stroke is its own
+        // brush job (own travel/newPattern), same fn/options.
+        const strokeSets = r.strokes.map((pts) => pts.map(tf.map));
+        let bb = null;
+        for (const pts of strokeSets) bb = mergeBbox(bb, bboxOf(pts));
+        entry.bbox = rndBox(bb);
+        entry.length = rnd(strokeSets.reduce((s, pts) => s + polylineLength(pts), 0));
+        entry.strokeCount = strokeSets.length;
+        if (strokeSets.length === 1) {
+          const pts = strokeSets[0];
+          entry.start = pts[0].map(rnd); entry.end = pts[pts.length - 1].map(rnd);
+          if (r.dense && pts.length > 5) {
+            const n = 5;
+            entry.samples = [];
+            for (let i = 0; i < n; i++) entry.samples.push(pts[Math.round(((pts.length - 1) * i) / (n - 1))].map(rnd));
+          }
+        } else {
+          entry.samples = strokeSets.slice(0, 8).map((pts) => pts[0].map(rnd));
         }
         bedBbox = mergeBbox(bedBbox, bb);
-        if (outOfSafe(pts)) errors.push(`"${label}": path leaves the safe area (${CONSTRAINTS.safeMin}-${CONSTRAINTS.safeMax}mm).`);
-        if (tex.brush?.fn) addBrushJob("brush", tex.brush.fn, tex.brush.options, TF.polylineToPts(pts, r.dense ? null : SAMPLE_STEP));
+        if (strokeSets.some((pts) => outOfSafe(pts))) errors.push(`"${label}": path leaves the safe area (${CONSTRAINTS.safeMin}-${CONSTRAINTS.safeMax}mm).`);
+        if (tex.brush?.fn) {
+          for (const pts of strokeSets) addBrushJob("brush", tex.brush.fn, tex.brush.options, TF.polylineToPts(pts, r.dense ? null : SAMPLE_STEP));
+        }
       } else if (r.kind === "region") {
         const poly = r.polygon.map(tf.map);
         const bb = bboxOf(poly);
@@ -898,71 +936,99 @@ export function normalizedWeights(targets) {
   return w.map((x) => x / sum);
 }
 
-function optionSpan(fn, option) {
-  const spec = optionSpecFor(fn)[option];
-  if (!spec || spec.min == null || spec.max == null) return null;
-  return { min: spec.min, max: spec.max, span: spec.max - spec.min, isInt: spec.kind === "int" };
-}
-
 function slotObj(scene, elementId, slot) {
   const tex = scene.textures[elementId];
   return tex && tex[slot] && tex[slot].fn ? tex[slot] : null;
+}
+
+/** What an abstraction target ({elementId, slot, option}) actually names:
+ * the slot's own brush/stamp option, or -- fill slots only -- a numeric
+ * field of the fill's own PATTERN (hatch's gap/angleDeg, grid's dx/dy,
+ * diamond's diag/fillGap). A fill has two independently-named option
+ * spaces (its brush AND its pattern); the brush is checked first, so a
+ * name that happens to exist on both (there are none today, but a future
+ * brush/pattern pair could collide) resolves to the brush. Returns null
+ * if `option` isn't a recognized numeric field in either space. */
+export function resolveTarget(scene, elementId, slot, option) {
+  const s = slotObj(scene, elementId, slot);
+  if (!s) return null;
+  const brushSpec = optionSpecFor(s.fn)[option];
+  if (brushSpec && brushSpec.min != null && brushSpec.max != null) {
+    return { s, location: "options", spec: brushSpec, span: brushSpec.max - brushSpec.min, isInt: brushSpec.kind === "int" };
+  }
+  if (slot === "fill" && s.pattern) {
+    const patSpec = (PATTERN_OPTIONS[s.pattern.kind] || {})[option];
+    if (patSpec && patSpec.min != null && patSpec.max != null) {
+      return { s, location: "pattern", spec: patSpec, span: patSpec.max - patSpec.min, isInt: patSpec.kind === "int" };
+    }
+  }
+  return null;
+}
+
+/** Which named bag (`s.options`/`s.bases` or `s.pattern`/`s.patternBases`)
+ * a resolved target's value and rebase-base live in. */
+function targetBags(target) {
+  const { s, location } = target;
+  return location === "pattern"
+    ? { values: (s.pattern = s.pattern || {}), bases: (s.patternBases = s.patternBases || {}) }
+    : { values: (s.options = s.options || {}), bases: (s.bases = s.bases || {}) };
 }
 
 /** Sum over every abstraction of direction * weight * (value - v0) * span
  * for one option. */
 export function abstractionContribution(scene, elementId, slot, option) {
   let total = 0;
-  const s = slotObj(scene, elementId, slot);
-  if (!s) return 0;
-  const sp = optionSpan(s.fn, option);
-  if (!sp) return 0;
+  const target = resolveTarget(scene, elementId, slot, option);
+  if (!target) return 0;
   for (const a of scene.abstractions) {
     const targets = Array.isArray(a.targets) ? a.targets : [];
     const w = normalizedWeights(targets);
     targets.forEach((t, i) => {
       if (t.elementId !== elementId || t.slot !== slot || t.option !== option) return;
       const dir = Number(t.direction) < 0 ? -1 : 1;
-      total += dir * w[i] * ((Number(a.value) || 0) - (Number(a.v0) || 0)) * sp.span;
+      total += dir * w[i] * ((Number(a.value) || 0) - (Number(a.v0) || 0)) * target.span;
     });
   }
   return total;
 }
 
 /** The abstraction rule: option = clamp(base + contributions, min, max)
- * for every option some abstraction targets. `base` is stored per slot
- * in slot.bases (set from the parameters stage, or rebased by a manual
- * edit). Mutates slot.options in place. */
+ * for every option some abstraction targets -- the option may live on
+ * the slot's brush or (fill only) its pattern, see resolveTarget().
+ * `base` is stored alongside it (set from the parameters stage, or
+ * rebased by a manual edit). Mutates the scene in place. */
 export function applyAbstractions(scene) {
   const driven = new Set();
-  for (const a of scene.abstractions) for (const t of a.targets || []) driven.add(`${t.elementId} ${t.slot} ${t.option}`);
+  for (const a of scene.abstractions) for (const t of a.targets || []) driven.add(`${t.elementId} ${t.slot} ${t.option}`);
   for (const key of driven) {
-    const [elementId, slot, option] = key.split(" ");
-    const s = slotObj(scene, elementId, slot);
-    if (!s) continue;
-    const sp = optionSpan(s.fn, option);
-    if (!sp) continue;
-    s.bases = s.bases || {};
-    if (s.bases[option] == null) {
-      const cur = s.options?.[option];
-      s.bases[option] = Number.isFinite(Number(cur)) && cur !== null && cur !== "" ? Number(cur) : (optionSpecFor(s.fn)[option].def ?? sp.min);
+    const [elementId, slot, option] = key.split(" ");
+    const target = resolveTarget(scene, elementId, slot, option);
+    if (!target) continue;
+    const { values, bases } = targetBags(target);
+    if (bases[option] == null) {
+      const cur = values[option];
+      bases[option] = Number.isFinite(Number(cur)) && cur !== null && cur !== "" ? Number(cur) : (target.spec.def ?? target.spec.min);
     }
-    let v = s.bases[option] + abstractionContribution(scene, elementId, slot, option);
-    v = Math.min(sp.max, Math.max(sp.min, v));
-    if (sp.isInt) v = Math.round(v);
-    else v = +v.toFixed(3);
-    s.options = s.options || {};
-    s.options[option] = v;
+    let v = bases[option] + abstractionContribution(scene, elementId, slot, option);
+    v = Math.min(target.spec.max, Math.max(target.spec.min, v));
+    v = target.isInt ? Math.round(v) : +v.toFixed(3);
+    values[option] = v;
   }
 }
 
 /** A manual edit of a driven option keeps the sliders where they are:
  * base = edited - contributions. */
 export function rebaseOption(scene, elementId, slot, option, value) {
-  const s = slotObj(scene, elementId, slot);
-  if (!s) return;
-  s.bases = s.bases || {};
-  s.bases[option] = value - abstractionContribution(scene, elementId, slot, option);
+  const target = resolveTarget(scene, elementId, slot, option);
+  if (!target) return;
+  targetBags(target).bases[option] = value - abstractionContribution(scene, elementId, slot, option);
+}
+
+/** Which named bag ("options" or "pattern") an abstraction target's value
+ * lives in -- the UI needs this to read/write the right place. */
+export function targetLocation(scene, elementId, slot, option) {
+  const target = resolveTarget(scene, elementId, slot, option);
+  return target ? target.location : null;
 }
 
 /** Which abstractions drive a given option (for grouping in the UI). */
@@ -982,8 +1048,7 @@ export function pruneAbstractions(scene) {
   const dropped = [];
   for (const a of scene.abstractions) {
     a.targets = (a.targets || []).filter((t) => {
-      const s = slotObj(scene, t.elementId, t.slot);
-      const ok = s && t.option in optionSpecFor(s.fn);
+      const ok = !!resolveTarget(scene, t.elementId, t.slot, t.option);
       if (!ok) dropped.push(`${a.name}: ${t.elementId}.${t.slot}.${t.option}`);
       return ok;
     });
@@ -1005,7 +1070,9 @@ export function sceneSummary(scene) {
       const s = tex[slot];
       if (s?.fn) parts.push(`${slot}=${s.fn}${slot === "fill" && s.pattern ? `/${s.pattern.kind}` : ""}`);
     }
-    lines.push(`${el.id} "${el.label || ""}" ${el.kind}${el.role ? ` role=${el.role}` : ""}${parts.length ? ` [${parts.join(", ")}]` : " [no texture]"}`);
+    const groupCount = el.kind === "point" && Array.isArray(el.at) && Array.isArray(el.at[0]) ? el.at.length
+      : el.kind === "line" && Array.isArray(el.paths) ? el.paths.length : null;
+    lines.push(`${el.id} "${el.label || ""}" ${el.kind}${groupCount != null ? ` (group of ${groupCount})` : ""}${el.role ? ` role=${el.role}` : ""}${parts.length ? ` [${parts.join(", ")}]` : " [no texture]"}`);
   }
   if (scene.abstractions.length) {
     lines.push("abstractions: " + scene.abstractions.map((a) => `${a.id} "${a.name}"=${Number(a.value).toFixed(2)} -> ${(a.targets || []).map((t) => `${t.elementId}.${t.slot}.${t.option}`).join(", ")}`).join("; "));
@@ -1017,7 +1084,11 @@ export function sceneSummary(scene) {
 export function elementsJson(scene, ids = null) {
   return scene.elements
     .filter((el) => !ids || ids.includes(el.id))
-    .map((el) => ({ id: el.id, label: el.label, kind: el.kind, role: el.role || "", geometry: el.kind === "line" ? { path: el.path } : el.kind === "region" ? { boundary: el.boundary } : { at: el.at } }));
+    .map((el) => ({
+      id: el.id, label: el.label, kind: el.kind, role: el.role || "",
+      geometry: el.kind === "line" ? (Array.isArray(el.paths) ? { paths: el.paths } : { path: el.path })
+        : el.kind === "region" ? { boundary: el.boundary } : { at: el.at },
+    }));
 }
 
 /** Textures as the texture / parameters stages should see them. */
@@ -1036,18 +1107,28 @@ export function texturesJson(scene, ids = null) {
 
 /** Option specs (numeric + semantic) for the brushes/stamps actually used
  * by the given elements -- what the parameters stage needs. */
+function specRows(spec) {
+  return Object.entries(spec).map(([k, m]) => {
+    const range = m.kind === "enum" ? m.options.join("|") : m.kind === "nnum" ? "number or null" : `${m.min}..${m.max}`;
+    return `  ${k}: default ${m.def === null ? "null" : m.def}, ${range}${OPTION_DESC[k] ? ` -- ${OPTION_DESC[k]}` : ""}`;
+  });
+}
+
 export function optionSpecsText(scene, ids = null) {
   const fns = new Set();
-  for (const t of texturesJson(scene, ids)) fns.add(t.fn);
-  const blocks = [];
-  for (const fn of fns) {
-    const spec = optionSpecFor(fn);
-    const rows = Object.entries(spec).map(([k, m]) => {
-      const range = m.kind === "enum" ? m.options.join("|") : m.kind === "nnum" ? "number or null" : `${m.min}..${m.max}`;
-      return `  ${k}: default ${m.def === null ? "null" : m.def}, ${range}${OPTION_DESC[k] ? ` -- ${OPTION_DESC[k]}` : ""}`;
-    });
-    blocks.push(`${fn} (${isBrush(fn) ? "line brush" : "stamp"}):\n${rows.join("\n")}`);
+  const patternKinds = new Set();
+  for (const t of texturesJson(scene, ids)) {
+    fns.add(t.fn);
+    if (t.slot === "fill" && t.pattern && PATTERN_OPTIONS[t.pattern.kind]) patternKinds.add(t.pattern.kind);
   }
+  const blocks = [];
+  for (const fn of fns) blocks.push(`${fn} (${isBrush(fn) ? "line brush" : "stamp"}):\n${specRows(optionSpecFor(fn)).join("\n")}`);
+  // A fill has TWO option spaces: its brush's own options (above) and its
+  // pattern's own numeric fields -- both are valid targets for an
+  // abstraction or a direct options edit on that same {elementId, slot:
+  // "fill"} pair; the app tells them apart by name, not by anything you
+  // need to say.
+  for (const kind of patternKinds) blocks.push(`${kind} (fill pattern, on any "fill" slot using it):\n${specRows(PATTERN_OPTIONS[kind]).join("\n")}`);
   return blocks.join("\n\n");
 }
 
@@ -1101,7 +1182,7 @@ export function validateStageOutput(stage, out, scene) {
       if (!id || seen.has(id)) id = nextId({ elements: [...scene.elements, ...elements], abstractions: [] }, "el");
       seen.add(id);
       const el = { id, label: String(e.label || id), kind: e.kind, role: String(e.role || "") };
-      if (e.kind === "line") el.path = g.path;
+      if (e.kind === "line") { if (Array.isArray(g.paths)) el.paths = g.paths; else el.path = g.path; }
       else if (e.kind === "region") el.boundary = g.boundary;
       else if (e.kind === "point") el.at = g.at;
       else errors.push(`${what}: kind must be line|region|point (got "${e.kind}")`);
@@ -1141,9 +1222,18 @@ export function validateStageOutput(stage, out, scene) {
       if (!s) { errors.push(`${what}: ${o.elementId}.${o.slot} has no texture`); return; }
       const opts = parseJsonField(o.options, what, errors, {});
       const spec = optionSpecFor(s.fn);
-      const clean = {};
-      for (const [k, v] of Object.entries(opts || {})) { if (k in spec) clean[k] = v; else errors.push(`${what}: "${k}" is not an option of ${s.fn}`); }
-      options.push({ elementId: o.elementId, slot: o.slot, options: clean });
+      // A fill slot has two independently-named option spaces: its brush's
+      // own options, and its pattern's own numeric fields (hatch's gap,
+      // grid's dx/dy, diamond's diag/fillGap) -- route each name to
+      // whichever it belongs to (see resolveTarget()).
+      const patSpec = o.slot === "fill" && s.pattern ? (PATTERN_OPTIONS[s.pattern.kind] || {}) : {};
+      const clean = {}, patternClean = {};
+      for (const [k, v] of Object.entries(opts || {})) {
+        if (k in spec) clean[k] = v;
+        else if (k in patSpec) patternClean[k] = v;
+        else errors.push(`${what}: "${k}" is not an option of ${s.fn}${Object.keys(patSpec).length ? ` or its ${s.pattern.kind} pattern` : ""}`);
+      }
+      options.push({ elementId: o.elementId, slot: o.slot, options: clean, patternOptions: patternClean });
     });
     const abstractions = [];
     const seen = new Set();
@@ -1154,7 +1244,11 @@ export function validateStageOutput(stage, out, scene) {
       (Array.isArray(targetsRaw) ? targetsRaw : []).forEach((t) => {
         const s = slotObj(scene, t.elementId, t.slot);
         if (!s) { errors.push(`${what}: target ${t.elementId}.${t.slot} has no texture`); return; }
-        if (!(t.option in optionSpecFor(s.fn)) || !optionSpan(s.fn, t.option)) { errors.push(`${what}: "${t.option}" is not a numeric option of ${s.fn}`); return; }
+        if (!resolveTarget(scene, t.elementId, t.slot, t.option)) {
+          const patHint = t.slot === "fill" && s.pattern ? ` or its ${s.pattern.kind} pattern` : "";
+          errors.push(`${what}: "${t.option}" is not a numeric option of ${s.fn}${patHint}`);
+          return;
+        }
         targets.push({ elementId: t.elementId, slot: t.slot, option: t.option, weight: Number(t.weight), direction: Number(t.direction) < 0 ? -1 : 1 });
       });
       let id = typeof a.id === "string" && a.id.trim() ? a.id.trim() : "";
@@ -1199,21 +1293,27 @@ export function mergeTextures(scene, value) {
     if (!t.fn) { delete tex[t.slot]; continue; }
     const prev = tex[t.slot];
     const same = prev && prev.fn === t.fn;
-    tex[t.slot] = { fn: t.fn, options: same ? prev.options : {}, bases: same ? prev.bases : {}, ...(t.slot === "fill" ? { pattern: t.pattern } : {}) };
+    tex[t.slot] = {
+      fn: t.fn, options: same ? prev.options : {}, bases: same ? prev.bases : {},
+      ...(t.slot === "fill" ? { pattern: t.pattern, patternBases: same ? prev.patternBases : {} } : {}),
+    };
   }
   return pruneAbstractions(scene);
 }
 
-/** Parameters stage output -> scene: options become the new bases, the
- * abstraction list is replaced, then the rule is applied. */
+/** Parameters stage output -> scene: options (brush and, for a fill,
+ * pattern) become the new bases, the abstraction list is replaced, then
+ * the rule is applied. */
 export function mergeParameters(scene, value) {
   for (const o of value.options) {
     const s = slotObj(scene, o.elementId, o.slot);
     if (!s) continue;
     s.options = { ...(s.options || {}), ...o.options };
+    if (o.patternOptions && Object.keys(o.patternOptions).length) s.pattern = { ...(s.pattern || {}), ...o.patternOptions };
     s.bases = {};
+    s.patternBases = {};
   }
   scene.abstractions = value.abstractions;
-  for (const s of Object.values(scene.textures)) for (const slot of Object.values(s)) if (slot && typeof slot === "object") slot.bases = {};
+  for (const s of Object.values(scene.textures)) for (const slot of Object.values(s)) if (slot && typeof slot === "object") { slot.bases = {}; slot.patternBases = {}; }
   applyAbstractions(scene);
 }

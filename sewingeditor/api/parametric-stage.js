@@ -50,7 +50,7 @@ const GEOMETRY_ELEMENT_ITEM = {
     label: { type: "string", description: "short human label, e.g. 'x axis', 'bar 2', 'shaded area'" },
     kind: { type: "string", enum: ["line", "region", "point"] },
     role: { type: "string", description: "chart role for the report: axis | tick | curve | bar | marker | label | other" },
-    geometry: { type: "string", description: "JSON string. line: {\"path\": <piece>}. region: {\"boundary\": [<piece>, ...]} concatenated in order and closed. point: {\"at\": [x, y]}. A piece is {\"x\": \"<expr in t>\", \"y\": \"<expr in t>\", \"tEnd\": n} OR {\"points\": [[x,y], ...]} OR {\"ref\": \"<line element id>\", \"tFrom\": n, \"tTo\": n, \"reverse\": bool}." },
+    geometry: { type: "string", description: "JSON string. line, ONE stroke: {\"path\": <piece>}. line, a GROUP of several disconnected strokes sharing this one element's texture (e.g. all the axis's tick marks as one element): {\"paths\": [<piece>, <piece>, ...]}. region: {\"boundary\": [<piece>, ...]} concatenated in order and closed. point, ONE stamp: {\"at\": [x, y]}. point, a GROUP of several stamps sharing this one element's texture (e.g. a row of data markers): {\"at\": [[x,y], [x,y], ...]}. A piece is {\"x\": \"<expr in t>\", \"y\": \"<expr in t>\", \"tEnd\": n} OR {\"points\": [[x,y], ...]} OR {\"ref\": \"<line element id>\", \"tFrom\": n, \"tTo\": n, \"reverse\": bool} (ref only targets a single-stroke \"path\" line, not a \"paths\" group)." },
   },
   required: ["id", "label", "kind", "role", "geometry"],
   additionalProperties: false,

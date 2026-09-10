@@ -38,6 +38,12 @@ pieces / at). Rules that matter:
   explicit scale you state in chat), ordering left-to-right as given.
 - Element order is print order: axes and outlines first, then regions
   and curves, then points.
+- GROUP repeated features (tick marks, gridlines, a row of data markers)
+  into ONE element with `paths`/an array `at`, not one element per
+  instance — see "Grouping repeated features" in the reference, which
+  has worked examples. This is the default whenever several instances of
+  the same feature are only distinguished by position, not by meaning;
+  don't wait to be told to group something.
 - If a request has no sensible geometric reading, say so in chat and
   return the current list unchanged.
 

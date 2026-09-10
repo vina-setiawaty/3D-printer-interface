@@ -13,17 +13,31 @@ geometry report.
 
 OUTPUT: JSON { chat, options, abstractions }.
 
+A "fill" slot has TWO independently-named option spaces, both listed in
+the option specs you're given and both usable below exactly the same
+way, by name — you never say which space a name belongs to, the app
+looks it up:
+- the fill's BRUSH options (e.g. a hairy fill's hairLength, spacing)
+- the fill's PATTERN's own options — hatch's gap/angleDeg, grid's
+  dx/dy/angleDeg, diamond's diag/fillGap. A hatch or grid fill's
+  "density" is its pattern's gap/dx/dy, NOT a brush option — do not
+  reach for a brush option (or invent one) to control fill spacing when
+  the pattern already has one.
+`brush`/`outline` slots only have the first space.
+
 options — for each element slot you touch: {elementId, slot, options}
-with `options` a JSON string of { name: value } using ONLY names in that
-brush/stamp's spec; omit names you leave at their current value. Stay
-inside each option's range and the physical limits in the reference
-(gaps that fuse, relief that can't be felt). Values must be consistent
-with the element's size (a 12 mm bar cannot hold a 10 mm dot gap).
+with `options` a JSON string of { name: value } using ONLY names listed
+in that slot's option specs (brush names, plus pattern names for a
+fill); omit names you leave at their current value. Stay inside each
+option's range and the physical limits in the reference (gaps that
+fuse, relief that can't be felt). Values must be consistent with the
+element's size (a 12 mm bar cannot hold a 10 mm dot gap).
 
 abstractions — the FULL list of high-level knobs (replaces the previous
 list; keep ids of ones you retain, update their targets if textures
 changed). Each is {id, name, description, value, targets} with `targets`
-a JSON string [{elementId, slot, option, weight, direction}, ...].
+a JSON string [{elementId, slot, option, weight, direction}, ...] --
+`option` may name either space above for a fill slot.
 
 How a knob works (the page applies this rule, you only supply the
 targets): the knob has a value in 0..1 with 0.5 meaning "as the options

@@ -543,7 +543,9 @@ function smallBtn(label, onClick) {
 // --- elements ---
 
 function renderElementCard(el, idx) {
-  const c = card(el.label || el.id, `${el.id} · ${el.kind}${el.role ? ` · ${el.role}` : ""}`);
+  const groupCount = el.kind === "point" && Array.isArray(el.at) && Array.isArray(el.at[0]) ? el.at.length
+    : el.kind === "line" && Array.isArray(el.paths) ? el.paths.length : null;
+  const c = card(el.label || el.id, `${el.id} · ${el.kind}${el.role ? ` · ${el.role}` : ""}${groupCount != null ? ` · group of ${groupCount}` : ""}`);
   const del = document.createElement("span");
   del.className = "pg-call-del";
   del.textContent = "remove";
@@ -562,17 +564,77 @@ function renderElementCard(el, idx) {
   return c;
 }
 
+// A small "single | group" toggle shared by point/line editors -- a group
+// is several stamps/strokes sharing this one element's texture (ticks,
+// gridlines, a row of markers). `onToggle(isGroup)` swaps the element's
+// geometry field shape; the caller re-renders.
+function groupToggle(isGroup, onToggle) {
+  const lbl = document.createElement("label");
+  lbl.className = "pg-field";
+  lbl.innerHTML = `<span>form</span>`;
+  const sel = document.createElement("select");
+  [["single", "single"], ["group", "group (repeated, one texture)"]].forEach(([v, text]) => {
+    const o = document.createElement("option"); o.value = v; o.textContent = text;
+    if ((isGroup ? "group" : "single") === v) o.selected = true;
+    sel.appendChild(o);
+  });
+  sel.onchange = () => onToggle(sel.value === "group");
+  lbl.appendChild(sel);
+  return lbl;
+}
+
 function renderGeometryEditor(el) {
   const wrap = document.createElement("div");
   if (el.kind === "point") {
-    const g = fieldsGrid();
-    el.at = Array.isArray(el.at) ? el.at : [110, 110];
-    g.appendChild(numField("x", el.at[0], (v) => { el.at[0] = v; commitGeometry(); }));
-    g.appendChild(numField("y", el.at[1], (v) => { el.at[1] = v; commitGeometry(); }));
-    wrap.appendChild(g);
+    const isGroup = Array.isArray(el.at) && Array.isArray(el.at[0]);
+    wrap.appendChild(groupToggle(isGroup, (toGroup) => {
+      el.at = toGroup ? (isGroup ? el.at : [el.at || [110, 110]]) : (isGroup ? (el.at[0] || [110, 110]) : (el.at || [110, 110]));
+      commitGeometry(); renderPanel();
+    }));
+    if (isGroup) {
+      wrap.appendChild(jsonField("points [[x,y],…] -- one stamp per entry, all sharing this element's texture", el.at, (v) => {
+        if (Array.isArray(v) && v.length) { el.at = v; commitGeometry(); }
+      }));
+    } else {
+      el.at = Array.isArray(el.at) && !Array.isArray(el.at[0]) ? el.at : [110, 110];
+      const g = fieldsGrid();
+      g.appendChild(numField("x", el.at[0], (v) => { el.at[0] = v; commitGeometry(); }));
+      g.appendChild(numField("y", el.at[1], (v) => { el.at[1] = v; commitGeometry(); }));
+      wrap.appendChild(g);
+    }
   } else if (el.kind === "line") {
-    el.path = el.path && typeof el.path === "object" ? el.path : { x: "40 + t", y: "110", tEnd: 60 };
-    wrap.appendChild(renderPieceEditor(el.path, (p) => { el.path = p; commitGeometry(); renderPanel(); }, false));
+    const isGroup = Array.isArray(el.paths);
+    wrap.appendChild(groupToggle(isGroup, (toGroup) => {
+      if (toGroup) { el.paths = isGroup ? el.paths : [el.path || { points: [[40, 40], [60, 40]] }]; delete el.path; }
+      else { el.path = isGroup ? (el.paths[0] || { x: "40 + t", y: "110", tEnd: 60 }) : el.path; delete el.paths; }
+      commitGeometry(); renderPanel();
+    }));
+    if (isGroup) {
+      const list = document.createElement("div");
+      el.paths.forEach((piece, i) => {
+        const pw = document.createElement("div");
+        pw.className = "pg-piece";
+        const head = document.createElement("div");
+        head.className = "pg-fields-title";
+        head.textContent = `stroke ${i + 1}`;
+        const rm = document.createElement("span");
+        rm.className = "pg-call-del";
+        rm.textContent = "remove stroke";
+        rm.onclick = () => { el.paths.splice(i, 1); commitGeometry(); renderPanel(); };
+        head.appendChild(rm);
+        pw.appendChild(head);
+        pw.appendChild(renderPieceEditor(piece, (p) => { el.paths[i] = p; commitGeometry(); renderPanel(); }, false));
+        list.appendChild(pw);
+      });
+      wrap.appendChild(list);
+      const row = document.createElement("div");
+      row.className = "pg-btn-row";
+      row.appendChild(smallBtn("+ stroke", () => { el.paths.push({ points: [[40, 40], [60, 40]] }); commitGeometry(); renderPanel(); }));
+      wrap.appendChild(row);
+    } else {
+      el.path = el.path && typeof el.path === "object" ? el.path : { x: "40 + t", y: "110", tEnd: 60 };
+      wrap.appendChild(renderPieceEditor(el.path, (p) => { el.path = p; commitGeometry(); renderPanel(); }, false));
+    }
   } else if (el.kind === "region") {
     el.boundary = Array.isArray(el.boundary) && el.boundary.length ? el.boundary : [{ points: [[40, 40], [80, 40], [80, 70], [40, 70], [40, 40]] }];
     const list = document.createElement("div");
@@ -673,9 +735,10 @@ function renderSlotEditor(el, tex, slot) {
     if (s) {
       const spec = C.PATTERN_OPTIONS[pat.kind];
       if (spec) {
-        for (const [k, m] of Object.entries(spec)) {
-          g.appendChild(renderField(k, m, pat[k], (v) => { if (v == null) delete pat[k]; else pat[k] = v; s.pattern = pat; saveScene(); scheduleRerun(); }));
-        }
+        // Route through optionField so a pattern value an abstraction also
+        // drives (e.g. a "density" knob targeting hatch's gap) rebases
+        // instead of fighting the slider on the next applyAbstractions().
+        for (const k of Object.keys(spec)) g.appendChild(optionField(k, spec[k], { elementId: el.id, slot, option: k }, s));
       } else {
         const { kind, ...rest } = pat;
         g.appendChild(jsonField(`${kind} spec (JSON)`, rest, (v) => { if (v && typeof v === "object") { s.pattern = { kind, ...v }; saveScene(); scheduleRerun(); } }));
@@ -723,23 +786,32 @@ function renderAbstractionCard(a) {
     const s = scene.textures[t.elementId]?.[t.slot];
     if (!s) return;
     const el = scene.elements.find((e) => e.id === t.elementId);
-    const spec = C.optionSpecFor(s.fn)[t.option];
-    if (!spec) return;
+    // A fill's option and pattern spaces are named independently (see
+    // resolveTarget()) -- look in whichever one this target actually
+    // resolves to, so a knob driving e.g. hatch's own "gap" still renders.
+    const target = C.resolveTarget(scene, t.elementId, t.slot, t.option);
+    if (!target) return;
     const label = `${el?.label || t.elementId} · ${t.slot} · ${t.option}  (${Number(t.direction) < 0 ? "−" : "+"}${(weights[i] * 100).toFixed(0)}%)`;
-    g.appendChild(optionField(label, spec, t, s));
+    g.appendChild(optionField(label, target.spec, t, s));
   });
   c.appendChild(g);
   return c;
 }
 
-// An option input bound to a scene slot; a manual edit of a driven option
-// rebases it so the sliders stay put.
+// An option input bound to a scene slot -- the value may live on the
+// slot's own brush/stamp options, or (fill only) on its pattern's own
+// numeric fields (hatch's gap, grid's dx/dy, ...) -- see resolveTarget().
+// A manual edit of a driven option rebases it so the sliders stay put.
 function optionField(label, spec, t, s) {
-  const f = renderField(label, spec, s.options?.[t.option], (v) => {
-    s.options = s.options || {};
-    if (v === null || v === undefined || v === "") { delete s.options[t.option]; delete (s.bases || {})[t.option]; }
+  const loc = () => C.targetLocation(scene, t.elementId, t.slot, t.option) || "options";
+  const bagOf = (l) => (l === "pattern" ? s.pattern : s.options) || {};
+  const f = renderField(label, spec, bagOf(loc())[t.option], (v) => {
+    const l = loc();
+    const bag = l === "pattern" ? (s.pattern = s.pattern || {}) : (s.options = s.options || {});
+    const bases = l === "pattern" ? s.patternBases : s.bases;
+    if (v === null || v === undefined || v === "") { delete bag[t.option]; if (bases) delete bases[t.option]; }
     else {
-      s.options[t.option] = v;
+      bag[t.option] = v;
       if (typeof v === "number") { C.rebaseOption(scene, t.elementId, t.slot, t.option, v); C.applyAbstractions(scene); refreshDrivenInputs(); }
     }
     saveScene(); scheduleRerun();
@@ -755,7 +827,9 @@ function refreshDrivenInputs() {
     const [elementId, slot, option] = inp.dataset.opt.split(" ");
     const s = scene.textures[elementId]?.[slot];
     if (!s) return;
-    const v = s.options?.[option];
+    const loc = C.targetLocation(scene, elementId, slot, option);
+    const bag = (loc === "pattern" ? s.pattern : s.options) || {};
+    const v = bag[option];
     if (inp.type === "checkbox") inp.checked = !!v;
     else if (document.activeElement !== inp) inp.value = v ?? "";
   });

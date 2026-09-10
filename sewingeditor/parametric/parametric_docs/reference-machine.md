@@ -54,11 +54,71 @@ A **piece** is one run of geometry:
 
 | kind | geometry | notes |
 |---|---|---|
-| `line` | `{"path": <piece>}` | an axis, a curve, a tick, a polyline chart |
+| `line`, one stroke | `{"path": <piece>}` | an axis, a curve, a polyline chart |
+| `line`, a **group** | `{"paths": [<piece>, <piece>, ...]}` | several disconnected strokes, printed as separate strokes but sharing this ONE element's texture — see "Grouping repeated features" below |
 | `region` | `{"boundary": [<piece>, ...]}` | the pieces are concatenated in order and must come back to the start (an end within 0.5 mm snaps; a larger gap is closed with a straight edge, which is the normal way to close a `points` boundary). The result must be a simple, non-self-intersecting shape. "The area between curve A and curve B" is `[{"ref": "A"}, {"ref": "B", "reverse": true}]` (plus `points` edges if their ends don't meet). |
-| `point` | `{"at": [x, y]}` | a marker, a data point |
+| `point`, one stamp | `{"at": [x, y]}` | a single marker or data point |
+| `point`, a **group** | `{"at": [[x, y], [x, y], ...]}` | several stamps sharing this ONE element's texture — see below |
 
 Elements are printed in list order. Give every element a short `label`
 and a chart `role` (`axis`, `tick`, `curve`, `bar`, `marker`, `label`,
 `other`) — the page's geometry report uses roles to tabulate bar heights,
 axis extents and curve ranges.
+
+### Grouping repeated features
+
+The texture and parameters stages assign ONE brush/pattern/knob per
+ELEMENT, not per stroke or stamp — so a set of identical, repeated marks
+must be ONE element (a `paths` or array-`at` group), never N separate
+elements. This is not about labeling: it changes how many texture
+decisions later stages have to make and keeps them all consistent by
+construction.
+
+**Recognize the pattern, don't just follow a keyword list.** Ask: are
+these instances of the *same visual feature*, repeated on a regular or
+semi-regular basis, that a person would touch and read as ONE kind of
+mark (not as N individually meaningful things)? If yes, group them.
+Concretely:
+
+- **Axis tick marks** (0 through 10, every 10mm, …) — ONE `line` element
+  with `role: "tick"`, `paths` holding one short 2-point piece per tick.
+  NOT ten separate `tick` elements.
+- **A row of evenly-spaced data markers** on a curve — ONE `point`
+  element with `role: "marker"`, `at` holding one `[x, y]` per marker.
+  NOT one element per marker.
+- **Gridlines** across a chart area — ONE `line` element (`role: "other"`
+  or a role you choose), `paths` holding one 2-point piece per line.
+- **A dashed border made of many short strokes you're placing by hand**
+  (rare — usually `freeformDashed`/`hatch` handle this without any
+  grouping at all) — still ONE `paths` group if you do place them.
+
+Do NOT group things that are visually similar but semantically distinct
+(three bars with three different heights encoding three different
+values) — those stay separate elements so the report's per-element chart
+table can list each one's own height. Group only when the individual
+instances carry no distinct meaning beyond "one more of these."
+
+Example — an x-axis from 0 to 100 with a tick every 10 units:
+```json
+{ "id": "", "label": "x axis", "kind": "line", "role": "axis",
+  "geometry": "{\"path\": {\"points\": [[40, 150], [140, 150]]}}" }
+{ "id": "", "label": "x-axis ticks", "kind": "line", "role": "tick",
+  "geometry": "{\"paths\": [
+    {\"points\": [[40, 150], [40, 153]]},
+    {\"points\": [[50, 150], [50, 153]]},
+    {\"points\": [[60, 150], [60, 153]]},
+    {\"points\": [[70, 150], [70, 153]]},
+    {\"points\": [[80, 150], [80, 153]]},
+    {\"points\": [[90, 150], [90, 153]]},
+    {\"points\": [[100, 150], [100, 153]]},
+    {\"points\": [[110, 150], [110, 153]]},
+    {\"points\": [[120, 150], [120, 153]]},
+    {\"points\": [[130, 150], [130, 153]]},
+    {\"points\": [[140, 150], [140, 153]]}
+  ]}" }
+```
+Two elements total (the axis, the tick group) — not one element per
+tick. The texture stage then assigns exactly one brush to `"x-axis
+ticks"` and every tick prints identically; the parameters stage exposes
+exactly one set of numbers (and can attach one knob, e.g. "tick
+boldness") for the whole group.

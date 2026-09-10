@@ -14,6 +14,13 @@ deterministic report, and any HARD ERRORS or WARNINGS the app's compiler
 already found (a coordinate outside the safe area, a boundary that
 doesn't close or crosses itself, a path too steep to print).
 
+A `line`/`point` element may be a GROUP (repeated ticks, gridlines,
+markers) — its report entry then has `strokeCount`/`count` and a few
+`samples` instead of a single `start`/`end`/`at`; that's normal, not a
+defect, and a group still needs only one fix entry (with the same id) if
+something about the WHOLE group is wrong (e.g. it's positioned off the
+axis) — you don't need to enumerate its members.
+
 Judge whether the proposed elements correctly and printably represent
 what was asked:
 - Fix every HARD ERROR -- these are not optional.
