@@ -724,6 +724,27 @@ export function checkBrushRules(fn, opts, ctx = {}, tag = fn) {
   return { errors, warnings };
 }
 
+// A value the model deliberately left alone arrives as an EMPTY STRING or
+// null -- the app's own convention for "no value" everywhere else (a
+// cleared texture slot's `fn`, an unused `pattern`/`transform` field all
+// use "" the same way) -- so treat those as "skip this key", never as a
+// stored value: falling through to `??` at render time only works for
+// undefined/null, so a stored "" would render as a blank field forever
+// instead of showing its real current value or default. A non-empty
+// value that doesn't fit the option's kind is a real mistake, not
+// something to silently drop.
+function coerceOptionValue(meta, v) {
+  if (v === null || v === undefined || v === "") return { skip: true };
+  if (meta.kind === "enum") {
+    if (typeof v === "string" && meta.options.includes(v)) return { value: v };
+    return { error: `must be one of ${meta.options.join("|")}` };
+  }
+  if (meta.kind === "bool") return { value: !!v };
+  const n = Number(v);
+  if (!Number.isFinite(n)) return { error: "must be a number" };
+  return { value: meta.kind === "int" ? Math.round(n) : n };
+}
+
 function cleanOptions(fn, options) {
   const opts = {};
   for (const [k, v] of Object.entries(options || {})) if (v !== null && v !== undefined && v !== "") opts[k] = v;
@@ -1229,9 +1250,12 @@ export function validateStageOutput(stage, out, scene) {
       const patSpec = o.slot === "fill" && s.pattern ? (PATTERN_OPTIONS[s.pattern.kind] || {}) : {};
       const clean = {}, patternClean = {};
       for (const [k, v] of Object.entries(opts || {})) {
-        if (k in spec) clean[k] = v;
-        else if (k in patSpec) patternClean[k] = v;
-        else errors.push(`${what}: "${k}" is not an option of ${s.fn}${Object.keys(patSpec).length ? ` or its ${s.pattern.kind} pattern` : ""}`);
+        const meta = spec[k] || patSpec[k];
+        if (!meta) { errors.push(`${what}: "${k}" is not an option of ${s.fn}${Object.keys(patSpec).length ? ` or its ${s.pattern.kind} pattern` : ""}`); continue; }
+        const c = coerceOptionValue(meta, v);
+        if (c.error) { errors.push(`${what}: "${k}" ${c.error} (got ${JSON.stringify(v)})`); continue; }
+        if (c.skip) continue;
+        if (k in spec) clean[k] = c.value; else patternClean[k] = c.value;
       }
       options.push({ elementId: o.elementId, slot: o.slot, options: clean, patternOptions: patternClean });
     });

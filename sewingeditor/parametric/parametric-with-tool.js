@@ -21,6 +21,8 @@
 // window for parametric-with-tool-compat.js.
 
 const STORAGE_KEY = "parametricWithToolSessionState";
+const DEBUG_LOG_KEY = "parametricWithToolDebugLog";
+const DEBUG_LOG_MAX_TURNS = 15;   // localStorage is finite; keep the most recent turns
 
 // Prompt docs per stage. A doc wrapped in a ``` fence contributes only the
 // fenced block; a plain doc is used whole.
@@ -52,6 +54,15 @@ let rerunTimer = null;
 let pending = null;        // { instruction, targets, remaining: [stage...] } for retry
 let busy = false;
 
+// Debug log: one entry per user turn, each holding every stage call that
+// turn triggered (route, then whichever chain), with the RAW text the
+// model returned -- before JSON.parse, before validation -- so a broken
+// response (malformed JSON, a rejected field, a timeout) is inspectable
+// after the fact instead of only a summarized error message. Persisted
+// separately from the scene so "new conversation" doesn't lose it.
+let debugLog = [];
+let currentDebugTurn = null;
+
 const $ = (sel) => document.querySelector(sel);
 
 // ---------------------------------------------------------------- state --
@@ -61,6 +72,69 @@ function loadScene() {
   catch (e) { return C.defaultScene(); }
 }
 function saveScene() { localStorage.setItem(STORAGE_KEY, JSON.stringify(scene)); }
+
+function loadDebugLog() {
+  try {
+    const v = JSON.parse(localStorage.getItem(DEBUG_LOG_KEY) || "[]");
+    return Array.isArray(v) ? v : [];
+  } catch (e) { return []; }
+}
+function saveDebugLog() {
+  while (debugLog.length > DEBUG_LOG_MAX_TURNS) debugLog.shift();
+  try { localStorage.setItem(DEBUG_LOG_KEY, JSON.stringify(debugLog)); }
+  catch (e) { /* quota exceeded -- drop the oldest half and try once more */
+    debugLog = debugLog.slice(Math.ceil(debugLog.length / 2));
+    try { localStorage.setItem(DEBUG_LOG_KEY, JSON.stringify(debugLog)); } catch (e2) { /* give up silently */ }
+  }
+}
+
+// Starts a new turn in the debug log (one user input -> one or more
+// stage calls). Call once per onSend(), before any callStage().
+function beginDebugTurn(userInput) {
+  currentDebugTurn = { at: new Date().toISOString(), userInput, calls: [] };
+  debugLog.push(currentDebugTurn);
+  saveDebugLog();
+}
+
+// Appends one call's record to the current turn (or a turn-less
+// fallback, so a retry outside onSend() still gets logged). Called from
+// callStage() via a try/finally so a thrown error still gets logged.
+function logDebugCall(record) {
+  if (!currentDebugTurn) { currentDebugTurn = { at: new Date().toISOString(), userInput: "(no turn context)", calls: [] }; debugLog.push(currentDebugTurn); }
+  currentDebugTurn.calls.push(record);
+  saveDebugLog();
+}
+
+function formatDebugLog(log) {
+  if (!log.length) return "(the debug log is empty)";
+  const pretty = (text) => { try { return JSON.stringify(JSON.parse(text), null, 1); } catch (e) { return text; } };
+  const lines = [`parametric-with-tool debug log -- ${log.length} turn(s), exported ${new Date().toISOString()}`, ""];
+  log.forEach((turn, i) => {
+    lines.push(`${"=".repeat(70)}`, `TURN ${i + 1} -- ${turn.at}`, `USER: ${turn.userInput}`, "");
+    for (const c of turn.calls) {
+      lines.push(`${"-".repeat(70)}`, `[${c.stage}]  ${c.provider || ""} ${c.model || ""}${c.usage ? `  (in=${c.usage.input_tokens ?? "?"} out=${c.usage.output_tokens ?? "?"})` : ""}`);
+      lines.push("user message sent:", c.userMessage || "(none)", "");
+      if (c.networkError) lines.push("NETWORK ERROR:", c.networkError, "");
+      if (c.httpError) lines.push("HTTP/PROXY ERROR:", c.httpError, "");
+      if (c.refusal) lines.push("MODEL REFUSED:", c.refusal, "");
+      if (c.rawOutput != null) lines.push("raw model output:", pretty(c.rawOutput), "");
+      if (c.parseError) lines.push("JSON PARSE ERROR:", c.parseError, "");
+      if (c.validationErrors && c.validationErrors.length) lines.push("VALIDATION REJECTED:", c.validationErrors.join("\n"), "");
+      if (!c.networkError && !c.httpError && !c.refusal && !c.parseError && !(c.validationErrors && c.validationErrors.length)) lines.push("(accepted)", "");
+    }
+    lines.push("");
+  });
+  return lines.join("\n");
+}
+
+function downloadText(filename, text) {
+  const blob = new Blob([text], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
 
 // -------------------------------------------------------------- loading --
 
@@ -75,6 +149,7 @@ async function loadDeps() {
     return;
   }
   scene = loadScene();
+  debugLog = loadDebugLog();
   $("#pg-material").value = scene.config.material;
   try {
     const paths = [...new Set(Object.values(STAGE_DOCS).flat())];
@@ -165,37 +240,51 @@ async function callStage(stage, messages, contextScene = scene) {
   const effort = $("#pg-effort").value;
   const thinking = $("#pg-thinking").value === "on";
 
-  let response;
+  // Built up as the call progresses and logged in `finally` below no
+  // matter where (or whether) it throws -- a failed call is exactly the
+  // one you most need in the debug log.
+  const record = { stage, provider, model, userMessage: messages[messages.length - 1]?.content || "" };
   try {
-    response = await fetch("/api/parametric-stage", {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-app-secret": secret },
-      body: JSON.stringify({ stage, provider, model, effort, thinking, systemPrompt: systemPromptFor(stage), messages }),
-    });
-  } catch (e) {
-    throw new Error(`could not reach the LLM proxy: ${e.message || e}`);
+    let response;
+    try {
+      response = await fetch("/api/parametric-stage", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-app-secret": secret },
+        body: JSON.stringify({ stage, provider, model, effort, thinking, systemPrompt: systemPromptFor(stage), messages }),
+      });
+    } catch (e) {
+      record.networkError = String(e.message || e);
+      throw new Error(`could not reach the LLM proxy: ${e.message || e}`);
+    }
+    let data;
+    try { data = await readJsonResponse(response); }
+    catch (e) {
+      const preview = e.rawText ? (e.rawText.length > 300 ? e.rawText.slice(0, 300) + "…" : e.rawText) : "(empty response)";
+      record.httpError = `proxy returned non-JSON: ${preview}`;
+      throw new Error(`the proxy returned a response that wasn't valid JSON: ${preview}`);
+    }
+    if (!response.ok) { record.httpError = (data && data.error) || `HTTP ${response.status}`; throw new Error(record.httpError); }
+    const { text, refusal } = extractResponseOutput(data, provider);
+    if (refusal) { record.refusal = refusal; throw new Error(`the model declined: ${refusal}`); }
+    if (!text) { record.httpError = "no text content returned by the model"; throw new Error(record.httpError); }
+    record.rawOutput = text;
+    if (data.usage) record.usage = data.usage;
+    let json;
+    try { json = JSON.parse(text); }
+    catch (e) {
+      record.parseError = e.message + (wasTruncated(data, provider) ? " (looks truncated -- hit the token limit)" : "");
+      if (wasTruncated(data, provider)) throw new Error("generation was cut off (token limit) -- try again or narrow the request");
+      throw new Error(`could not parse the model output as JSON: ${e.message}`);
+    }
+    if (data.usage) recordCost(data.usage, model);
+    const v = C.validateStageOutput(VALIDATOR_FOR_STAGE[stage], json, contextScene);
+    record.validationErrors = v.errors;
+    if (v.errors.length) throw new Error(`${stage} output rejected: ${v.errors.join("; ")}`);
+    if (stage.endsWith("-check")) v.value.ok = !!json.ok;
+    return v.value;
+  } finally {
+    logDebugCall(record);
   }
-  let data;
-  try { data = await readJsonResponse(response); }
-  catch (e) {
-    const preview = e.rawText ? (e.rawText.length > 300 ? e.rawText.slice(0, 300) + "…" : e.rawText) : "(empty response)";
-    throw new Error(`the proxy returned a response that wasn't valid JSON: ${preview}`);
-  }
-  if (!response.ok) throw new Error((data && data.error) || `HTTP ${response.status}`);
-  const { text, refusal } = extractResponseOutput(data, provider);
-  if (refusal) throw new Error(`the model declined: ${refusal}`);
-  if (!text) throw new Error("no text content returned by the model");
-  let json;
-  try { json = JSON.parse(text); }
-  catch (e) {
-    if (wasTruncated(data, provider)) throw new Error("generation was cut off (token limit) -- try again or narrow the request");
-    throw new Error(`could not parse the model output as JSON: ${e.message}`);
-  }
-  if (data.usage) recordCost(data.usage, model);
-  const v = C.validateStageOutput(VALIDATOR_FOR_STAGE[stage], json, contextScene);
-  if (v.errors.length) throw new Error(`${stage} output rejected: ${v.errors.join("; ")}`);
-  if (stage.endsWith("-check")) v.value.ok = !!json.ok;
-  return v.value;
 }
 
 // ---------------------------------------------------------- orchestration --
@@ -228,6 +317,7 @@ async function onSend() {
   pushMessage("user", instruction);
   input.value = "";
   pending = null;
+  beginDebugTurn(instruction);
 
   setBusy(true, "routing…");
   let route;
@@ -922,7 +1012,11 @@ function renderField(label, meta, value, onChange) {
   if (meta.min != null) inp.min = meta.min;
   if (meta.max != null) inp.max = meta.max;
   if (meta.kind === "nnum") inp.placeholder = "auto";
-  inp.value = value ?? (meta.kind === "nnum" ? "" : (meta.def ?? ""));
+  // A stored "" (the app's "no value" convention elsewhere) or a
+  // non-finite number is not a real value either -- fall back the same
+  // way missing does, instead of rendering permanently blank.
+  const hasValue = value !== null && value !== undefined && value !== "" && (typeof value !== "number" || Number.isFinite(value));
+  inp.value = hasValue ? value : (meta.kind === "nnum" ? "" : (meta.def ?? ""));
   inp.onchange = () => {
     if (inp.value === "") { onChange(null); return; }
     const n = parseFloat(inp.value);
@@ -957,6 +1051,16 @@ function initParametricEditor() {
   $("#pg-app-secret").addEventListener("change", () => saveAppSecretFrom("pg-app-secret"));
   $("#pg-provider").addEventListener("change", () => updateModelOptions("pg-provider", "pg-model"));
   $("#pg-new-btn").addEventListener("click", newConversation);
+  $("#pg-save-log-btn").addEventListener("click", () => {
+    if (!debugLog.length) { showMessages(["the debug log is empty — send a message first"]); return; }
+    downloadText(`parametric-log-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`, formatDebugLog(debugLog));
+  });
+  $("#pg-clear-log-btn").addEventListener("click", () => {
+    if (!confirm("Clear the saved debug log? This does not affect the conversation or scene.")) return;
+    debugLog = [];
+    currentDebugTurn = null;
+    saveDebugLog();
+  });
   $("#pg-material").addEventListener("change", () => {
     if (!scene) return;
     scene.config.material = $("#pg-material").value;

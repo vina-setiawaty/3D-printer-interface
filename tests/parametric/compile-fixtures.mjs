@@ -225,6 +225,31 @@ test("abstraction rule: weights normalize, contributions sum, manual edit rebase
   assert.equal(C.driversOf(s, "h", "fill", "spacing").length, 2);
 });
 
+test("parameters stage: an empty/null option value is skipped, not stored (regression: blank fields)", () => {
+  const s = C.defaultScene();
+  s.elements = [{ id: "b", label: "bar", kind: "region", boundary: [rect(40, 40, 20, 20)] }];
+  s.textures = { b: { fill: { fn: "solid", options: { width: 0.6 }, pattern: { kind: "hatch", angleDeg: 0, gap: 4 } } } };
+  const par = C.validateStageOutput("parameters", {
+    chat: "denser",
+    options: [{ elementId: "b", slot: "fill", options: JSON.stringify({ width: "", nLayers: null, speed: "400", gap: "" }) }],
+    abstractions: [],
+  }, s);
+  assert.deepEqual(par.errors, [], "empty/null values are skipped, not rejected");
+  assert.deepEqual(par.value.options[0].options, { speed: 400 }, "empty/null keys omitted; a numeric string coerces");
+  assert.deepEqual(par.value.options[0].patternOptions, {}, "an empty pattern value is also skipped, not stored as \"\"");
+  C.mergeParameters(s, par.value);
+  assert.equal(s.textures.b.fill.options.width, 0.6, "left alone, not overwritten with \"\"");
+  assert.equal(s.textures.b.fill.pattern.gap, 4, "left alone, not overwritten with \"\"");
+
+  const bad = C.validateStageOutput("parameters", {
+    chat: "denser",
+    options: [{ elementId: "b", slot: "fill", options: JSON.stringify({ width: "wide", gap: "loose" }) }],
+    abstractions: [],
+  }, s);
+  assert.equal(bad.errors.length, 2, "non-numeric garbage is a real error, not silently dropped");
+  assert.ok(bad.errors.every((e) => /must be a number/.test(e)));
+});
+
 test("abstraction can target a fill PATTERN option, not just its brush (regression: reported production failure)", () => {
   // A solid brush has no "gap" option -- "gap" here can only be the hatch
   // PATTERN's own spacing. Before resolveTarget() this was rejected as

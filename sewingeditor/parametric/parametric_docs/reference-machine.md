@@ -26,6 +26,15 @@ sensible printed size (a chart 60–120 mm wide) inside the safe area; the
 user rescales or moves it with the transform, not by asking for new
 coordinates.
 
+**Every curve's Y (and X) must land inside 15–205 after whatever data→mm
+mapping you chose.** Plugging a function straight through as millimetres
+without checking its actual range at the domain you picked is the most
+common way to break this — a downward parabola with a wide domain, an
+unshifted trig function, a steep line, all commonly swing well past the
+bed. Before finalizing, evaluate each formula's own y at its own
+endpoints and a midpoint and confirm those numbers land in 15–205; if
+not, shift the mapping's offset or shrink the domain until they do.
+
 ## Expression syntax (formulas in `t`, or in `t` and `u` for fill families)
 
 `+ - * /`, `^` (power), unary minus, parentheses, the constant `pi`, the
@@ -122,3 +131,48 @@ tick. The texture stage then assigns exactly one brush to `"x-axis
 ticks"` and every tick prints identically; the parameters stage exposes
 exactly one set of numbers (and can attach one knob, e.g. "tick
 boldness") for the whole group.
+
+### Region between two curves — solve the intersections, don't guess a domain
+
+A `ref` boundary only closes when the two curves' pieces span the exact
+same real range and **actually meet at both ends** — that means solving
+for where they cross, not picking two arbitrary-looking `tEnd`s and
+hoping. Skipping this produces exactly the two failures that show up
+most: the boundary crosses itself (the two refs don't meet, so the
+"closing" edge cuts back across the shape) and/or the curve swings
+outside 15–205 (an unbounded domain was used instead of the bounded one
+between the crossings).
+
+Worked example — shade the area between `y = 8` and `y = (x-2)^2` (data
+units), printed at 8 mm per unit with the origin placed at data (0, 0):
+
+1. **Solve the intersection first, in data units**: `8 = (x-2)^2` →
+   `x - 2 = ±2.83` → `x ≈ -0.83` or `x ≈ 4.83`. That real range,
+   `x ∈ [-0.83, 4.83]`, is the ONLY valid domain for both curves — not
+   the domain either curve would use alone.
+2. **Map to mm** with one consistent scale/offset for both curves (say
+   8 mm/unit, with x=0 landing at mm 60 and y=0 at mm 150 — chosen so
+   the whole shape, `y` up to 8 units = 64 mm above the baseline, stays
+   in 15–205): `x_mm = 60 + 8*x`, `y_mm = 150 - 8*y` (mm Y increases
+   downward from a data top, so this flips sign — check your own
+   orientation choice against the actual numbers, don't assume).
+3. **Give both curves the SAME parameter range** across that domain, so
+   their `path` pieces meet exactly at both ends:
+   ```json
+   { "id": "", "label": "y=8", "kind": "line", "role": "curve",
+     "geometry": "{\"path\": {\"x\": \"60 + 8*t\", \"y\": \"150 - 64\", \"tEnd\": 5.66}}" }
+   { "id": "", "label": "y=(x-2)^2", "kind": "line", "role": "curve",
+     "geometry": "{\"path\": {\"x\": \"60 + 8*(t - 0.83)\", \"y\": \"150 - 8*((t - 0.83 - 2)^2)\", \"tEnd\": 5.66}}" }
+   { "id": "", "label": "shaded region", "kind": "region",
+     "geometry": "{\"boundary\": [{\"ref\": \"<y=8 id>\"}, {\"ref\": \"<parabola id>\", \"reverse\": true}]}" }
+   ```
+   Here `t` runs 0 to 5.66 (= 4.83 − (−0.83)) on BOTH curves, and each
+   curve's own `x` formula shifts `t` so it lands on the real intersection
+   x-values at `t=0` and `t=5.66` — that's what makes the two refs meet.
+4. **Verify before finalizing**: evaluate both curves' `y` at `t=0` and
+   `t=5.66` — they must match each other (that's the closure) and land
+   inside 15–205 (here, 150−64=86 at both ends and the parabola's own
+   vertex y at its minimum, both comfortably inside range).
+
+The same solve-the-crossing-first approach applies to any "area between
+A and B" request, not just this pair of functions.
