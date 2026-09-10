@@ -113,6 +113,7 @@ function formatDebugLog(log) {
     lines.push(`${"=".repeat(70)}`, `TURN ${i + 1} -- ${turn.at}`, `USER: ${turn.userInput}`, "");
     for (const c of turn.calls) {
       lines.push(`${"-".repeat(70)}`, `[${c.stage}]  ${c.provider || ""} ${c.model || ""}${c.usage ? `  (in=${c.usage.input_tokens ?? "?"} out=${c.usage.output_tokens ?? "?"})` : ""}`);
+      lines.push(`settings: effort=${c.effort ?? "?"}  thinking=${c.thinking ?? "?"}  self-check=${c.selfCheck ?? "?"}  material=${c.material ?? "?"}`, "");
       lines.push("user message sent:", c.userMessage || "(none)", "");
       if (c.networkError) lines.push("NETWORK ERROR:", c.networkError, "");
       if (c.httpError) lines.push("HTTP/PROXY ERROR:", c.httpError, "");
@@ -242,8 +243,14 @@ async function callStage(stage, messages, contextScene = scene) {
 
   // Built up as the call progresses and logged in `finally` below no
   // matter where (or whether) it throws -- a failed call is exactly the
-  // one you most need in the debug log.
-  const record = { stage, provider, model, userMessage: messages[messages.length - 1]?.content || "" };
+  // one you most need in the debug log. Includes the generation settings
+  // actually in effect for this call (not just stage/model), so "was
+  // thinking on for this?" / "did self-check even run?" are answerable
+  // from the log alone instead of having to be asked.
+  const record = {
+    stage, provider, model, effort, thinking, selfCheck: selfCheckEnabled(), material: scene?.config?.material,
+    userMessage: messages[messages.length - 1]?.content || "",
+  };
   try {
     let response;
     try {
