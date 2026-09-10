@@ -1,16 +1,27 @@
 /**
  * texture_functions-with-tool.js -- PROTOTYPE fork of texture_functions.js,
- * used only by parametric-with-tool.html. Behavior is identical to the
- * pinned texture_functions.js for every existing call (verified by a
- * golden-file G-code diff, not just visual inspection) -- the only real
- * change is internal: the four "*Dotted" per-point-stamp line styles
- * (freeformDotted, freeformBlobDotted, freeformDirectionalBlobDotted,
- * freeformHairyDotted) used to each reimplement their own "sample the path,
- * compute arc-length stops, maybe reverse the order, stamp each" loop.
- * They now share one driver, walkArcLengthStops() (SECTION 3). Comments
- * here document only the FINAL current behavior -- see texture_functions.js
- * (or ../../texture_docs/) for the full historical tuning log this was
- * distilled from.
+ * used only by parametric-with-tool.html. Same deposited G-code as the
+ * pinned texture_functions.js for every texture (verified by
+ * tests/parametric/golden-brushes.mjs, a byte-for-byte golden diff), but
+ * restructured around ONE idea: a texture is what happens between two
+ * points.
+ *
+ *   SECTION 2  path engine  -- a formula path (samplePath) or an explicit
+ *                             polyline (polylineToPts) becomes an
+ *                             arc-length-tagged point list.
+ *   SECTION 3  brushes      -- brush*(em, pts, options): what is deposited
+ *                             along a point list.
+ *   SECTION 4  patterns     -- hatchStrokes / diamondStrokes: how a region
+ *                             becomes a list of strokes for a brush.
+ *   SECTION 5  stamps       -- stamp*(em, cx, cy, options): what is
+ *                             deposited at a single point.
+ *
+ * The old freeform*(em, xFunc, yFunc, ...) / *Dot / fill() entry points are
+ * gone from this fork; the compiler in ../parametric-catalog-with-tool.js
+ * samples paths, generates pattern strokes, calls em.newPattern() per
+ * top-level element and dispatches through BRUSHES / STAMPS. Comments
+ * document only the FINAL current behavior -- see texture_functions.js (or
+ * ../../texture_docs/) for the historical tuning log.
  *
  * ============================================================================
  * SECTION 1: CORE INFRASTRUCTURE (Emitter, shared constants, e-rate math)
@@ -312,17 +323,59 @@ export function totalLength(sampledPts) {
 }
 
 /**
+ * The polyline counterpart of samplePath(): turns an explicit
+ * [[x,y], ...] point list (corners allowed -- no steepness check, the
+ * corners are deliberate) into the same arc-length-tagged [x, y, s] list
+ * every brush walks. `step` densifies each straight run so a brush sees
+ * the same point density it sees from a formula path (dash sub-segment
+ * filtering and per-point height profiles depend on it); pass `null` to
+ * keep only the given vertices (a solid brush on a straight run needs no
+ * more than that).
+ */
+export function polylineToPts(points, step = 0.1) {
+  if (!Array.isArray(points) || points.length < 2) throw new Error("polylineToPts needs at least 2 points");
+  // Walk each straight run exactly the way samplePath() walks
+  // xFunc(t) = p0 + t*u (unit direction, t += step while t < len - 1e-9,
+  // then the exact end), and tag arc length by accumulated hypot between
+  // consecutive points -- same float rounding, so a brush's arc-length
+  // boundary tests give the same answer as on a formula path.
+  const raw = [[points[0][0], points[0][1]]];
+  for (let i = 1; i < points.length; i++) {
+    const [x0, y0] = points[i - 1], [x1, y1] = points[i];
+    const len = Math.hypot(x1 - x0, y1 - y0);
+    if (len < 1e-9) continue;
+    const ux = (x1 - x0) / len, uy = (y1 - y0) / len;
+    if (step) {
+      let t = step;
+      while (t < len - 1e-9) { raw.push([x0 + t * ux, y0 + t * uy]); t += step; }
+    }
+    raw.push([x0 + len * ux, y0 + len * uy]);
+  }
+  const out = [[raw[0][0], raw[0][1], 0.0]];
+  let s = 0.0;
+  for (let i = 1; i < raw.length; i++) {
+    s += Math.hypot(raw[i][0] - raw[i - 1][0], raw[i][1] - raw[i - 1][1]);
+    out.push([raw[i][0], raw[i][1], s]);
+  }
+  return out;
+}
+
+/**
  * ============================================================================
- * SECTION 3: LINE STYLES (all follow the freeform path engine above)
+ * SECTION 3: BRUSHES -- what happens between two points
  * ============================================================================
+ * Every brush is brush*(em, pts, options): `pts` is an arc-length-tagged
+ * point list from samplePath() (a formula path) or polylineToPts() (an
+ * explicit polyline); the brush only decides what is deposited along it.
+ * A brush never calls em.newPattern() -- the caller does, once per
+ * top-level printed element (each line, each hatch stroke, each dot, one
+ * whole diamond fill), exactly as the pre-refactor functions did.
  */
 
-/** Continuous solid line following any path. */
-export function freeformSolid(em, xFunc, yFunc, tStart, tEnd, {
-  width = 0.5, nLayers = 2, speed = 400, step = 0.1,
+/** Continuous solid ridge. */
+export function brushSolid(em, pts, {
+  width = 0.5, nLayers = 2, speed = 400,
 } = {}) {
-  const pts = samplePath(xFunc, yFunc, tStart, tEnd, { step });
-  em.newPattern();
   for (let layer = 1; layer <= nLayers; layer++) {
     const z = LAYER_HEIGHT * layer;
     em.goto(pts[0][0], pts[0][1], z);
@@ -338,19 +391,16 @@ export function freeformSolid(em, xFunc, yFunc, tStart, tEnd, {
   return pts;
 }
 
-/** Dashed line following any path -- segLen/gapLen measured along actual
- * arc length, not the raw t parameter. */
-export function freeformDashed(em, xFunc, yFunc, tStart, tEnd, {
-  segLen, gapLen, width = 0.5, nLayers = 2, speed = 400, step = 0.1,
+/** Dashes -- segLen/gapLen measured along actual arc length. */
+export function brushDashed(em, pts, {
+  segLen, gapLen, width = 0.5, nLayers = 2, speed = 400,
 } = {}) {
   if (typeof segLen !== "number" || typeof gapLen !== "number") {
     throw new TypeError(
-      "freeformDashed requires numeric segLen and gapLen in its options object, e.g. {segLen: 8, gapLen: 4}."
+      "dashed brush requires numeric segLen and gapLen in its options object, e.g. {segLen: 8, gapLen: 4}."
     );
   }
-  const pts = samplePath(xFunc, yFunc, tStart, tEnd, { step });
   const length = totalLength(pts);
-  em.newPattern();
   let s = 0.0;
   while (s < length - 1e-6) {
     const s2 = Math.min(s + segLen, length);
@@ -377,23 +427,20 @@ export function freeformDashed(em, xFunc, yFunc, tStart, tEnd, {
 }
 
 /**
- * Shared driver for the four per-point "*Dotted" styles below: sample the
- * path into its point list, compute arc-length stops every `gap` from 0 to
- * the path length (inclusive), optionally decide whether to walk them in
- * reverse, optionally compute each stop's local path heading, then call
- * `stampFn(cx, cy, {headingDeg})` at each stop. Returns the full sampled
- * point list, same as every *Dotted function returned before this
- * refactor -- this function only replaces their previously-duplicated
- * loop bodies, it changes no emitted G-code.
+ * Shared driver for the four per-point "*Dotted" brushes below: compute
+ * arc-length stops every `gap` from 0 to the path length (inclusive),
+ * optionally decide whether to walk them in reverse, optionally compute
+ * each stop's local path heading, then call `stampFn(cx, cy, {headingDeg})`
+ * at each stop.
  *
  * `reverseCheck`, if given, receives `{pts, length, gap, stops, step}` and
  * returns true/false -- each caller supplies its OWN reversal criterion
  * (they differ: directional lean vs. hair-pull direction), this driver
  * does not impose one. `withTangent` additionally hands the stamp a local
- * heading in degrees (only the directional-lean style needs this).
+ * heading in degrees (only the directional-lean style needs this). `step`
+ * is only the tangent half-width floor here (the caller already sampled).
  */
-function walkArcLengthStops(xFunc, yFunc, tStart, tEnd, gap, step, { reverseCheck = null, withTangent = false } = {}, stampFn) {
-  const pts = samplePath(xFunc, yFunc, tStart, tEnd, { step });
+function walkArcLengthStops(pts, gap, step, { reverseCheck = null, withTangent = false } = {}, stampFn) {
   const length = totalLength(pts);
   const stops = [];
   for (let s = 0; s <= length + 1e-6; s += gap) stops.push(s);
@@ -415,13 +462,11 @@ function walkArcLengthStops(xFunc, yFunc, tStart, tEnd, gap, step, { reverseChec
   return pts;
 }
 
-/** Dots stamped at regular ARC-LENGTH intervals along any path -- a flat
- * spiral-filled disc at each stop. */
-export function freeformDotted(em, xFunc, yFunc, tStart, tEnd, {
+/** Flat spiral-filled discs at regular arc-length intervals. */
+export function brushDotted(em, pts, {
   gap = 10.0, dotRadius = 0.8, nLayers = 2, speed = 250, step = 0.1,
 } = {}) {
-  em.newPattern();
-  return walkArcLengthStops(xFunc, yFunc, tStart, tEnd, gap, step, {}, (cx, cy) => {
+  return walkArcLengthStops(pts, gap, step, {}, (cx, cy) => {
     const dotPts = spiralDisc([cx, cy], dotRadius);
     for (let layer = 1; layer <= nLayers; layer++) {
       const z = LAYER_HEIGHT * layer;
@@ -437,11 +482,10 @@ export function freeformDotted(em, xFunc, yFunc, tStart, tEnd, {
   });
 }
 
-/** Dots stamped by the blobDot() point-extrusion mechanism (SECTION 5) at
- * regular arc-length intervals along any path -- the DEFAULT dotted-line
- * style, preferred over freeformDotted() unless a flat, spiral-filled disc
- * is specifically needed. */
-export function freeformBlobDotted(em, xFunc, yFunc, tStart, tEnd, {
+/** Blob domes (the stampBlob() mechanism, SECTION 5) at regular arc-length
+ * intervals -- the DEFAULT dotted brush, preferred over brushDotted()
+ * unless a flat, spiral-filled disc is specifically needed. */
+export function brushBlobDotted(em, pts, {
   gap = 10.0, diameter = 1.6, baseZ = 0.2, buildSteps = 6, taperFactor = 0.7,
   extrudeSpeed = 120, dwellMs = 2000, extrusionMultiplier = 1.3,
   retractMm = 4.0, postRetractDwellMs = 2000, baseExtraMm = 0.3,
@@ -450,8 +494,7 @@ export function freeformBlobDotted(em, xFunc, yFunc, tStart, tEnd, {
   liftZ = 5.0, liftSpeed = 600, liftDwellMs = 1000, topOrbitLoops = 3,
   step = 0.1,
 } = {}) {
-  em.newPattern();
-  return walkArcLengthStops(xFunc, yFunc, tStart, tEnd, gap, step, {}, (cx, cy) => {
+  return walkArcLengthStops(pts, gap, step, {}, (cx, cy) => {
     emitBlobDot(em, cx, cy, {
       diameter, baseZ, buildSteps, taperFactor, extrudeSpeed, dwellMs,
       extrusionMultiplier, retractMm, postRetractDwellMs, baseExtraMm,
@@ -462,18 +505,17 @@ export function freeformBlobDotted(em, xFunc, yFunc, tStart, tEnd, {
   });
 }
 
-/** `directionalBlobDot()`-mechanism dots stamped at regular arc-length
- * intervals along any path -- like `freeformBlobDotted` but each dot LEANS
- * along the path tangent at that point (a curved line produces blobs that
- * each rake "downstream"). `azimuthDeg` is an OFFSET added to that local
- * tangent, in degrees CCW -- 0 (default) leans exactly along the direction
- * of travel. `gap` defaults to one `diameter` so adjacent dots' base
- * circles just touch and the drags chain into a continuous raked ridge.
- * `stampOrder` (default "auto"): if the (offset) lean at the path start
- * points forward along the path, the line is stamped in reverse so each
- * apex leans back over already-placed (cooled) dots rather than toward the
- * fresh next one. */
-export function freeformDirectionalBlobDotted(em, xFunc, yFunc, tStart, tEnd, {
+/** `stampDirectionalBlob()`-mechanism dots at regular arc-length intervals
+ * -- like `brushBlobDotted` but each dot LEANS along the path tangent at
+ * that point (a curved line produces blobs that each rake "downstream").
+ * `azimuthDeg` is an OFFSET added to that local tangent, in degrees CCW --
+ * 0 (default) leans exactly along the direction of travel. `gap` defaults
+ * to one `diameter` so adjacent dots' base circles just touch and the
+ * drags chain into a continuous raked ridge. `stampOrder` (default
+ * "auto"): if the (offset) lean at the path start points forward along the
+ * path, the line is stamped in reverse so each apex leans back over
+ * already-placed (cooled) dots rather than toward the fresh next one. */
+export function brushDirectionalBlobDotted(em, pts, {
   gap = null, diameter = 2.0, azimuthDeg = 0, baseZ = 0.2, buildSteps = 6,
   taperFactor = 0.7, extrudeSpeed = 120, dwellMs = 2000,
   extrusionMultiplier = 1.3, retractMm = 4.0, postRetractDwellMs = 2000,
@@ -481,8 +523,7 @@ export function freeformDirectionalBlobDotted(em, xFunc, yFunc, tStart, tEnd, {
   stampOrder = "auto", step = 0.1,
 } = {}) {
   const g = gap ?? diameter;
-  em.newPattern();
-  return walkArcLengthStops(xFunc, yFunc, tStart, tEnd, g, step, {
+  return walkArcLengthStops(pts, g, step, {
     withTangent: true,
     reverseCheck: ({ pts, length, gap, stops, step }) => {
       if (stampOrder === "reverse") return true;
@@ -507,17 +548,14 @@ export function freeformDirectionalBlobDotted(em, xFunc, yFunc, tStart, tEnd, {
   });
 }
 
-/** Vertical-lift hair strands stamped at regular arc-length intervals
- * along any path. CAUTION: each strand is a retract/un-retract cycle --
- * see PARAMETER_CONSTRAINTS.md's retraction-cycle cap before using a
- * dense spacing over a long path. */
-export function freeformHairy(em, xFunc, yFunc, tStart, tEnd, {
+/** Vertical-lift hair strands at regular arc-length intervals. CAUTION:
+ * each strand is a retract/un-retract cycle -- mind the retraction-cycle
+ * cap before using a dense spacing over a long path. */
+export function brushHairy(em, pts, {
   spacing = 2.0, esegmentMm = 1.2, retractMm = 1.3, dwellMs = 400,
-  smallLift = 0.2, bigLift = 4.0, baseZ = 0.3, speed = 200, step = 0.1,
+  smallLift = 0.2, bigLift = 4.0, baseZ = 0.3, speed = 200,
 } = {}) {
-  const pts = samplePath(xFunc, yFunc, tStart, tEnd, { step });
   const length = totalLength(pts);
-  em.newPattern();
   const nRoots = Math.floor(length / spacing) + 1;
   const first = pointAtArcLength(pts, 0);
   em.goto(first[0], first[1], baseZ);
@@ -547,15 +585,15 @@ export function freeformHairy(em, xFunc, yFunc, tStart, tEnd, {
   return pts;
 }
 
-/** A line of discrete "hairy dots" (see emitHairyDot() in SECTION 5) at
- * regular arc-length intervals -- each stamp is an anchor blob plus ONE
- * pulled hair strand, not `freeformHairy`'s simpler point-stamp. Shares
- * `freeformHairy`'s retraction-cycle-count caution (one retract/unretract
- * PER strand). `stampOrder` (default "auto"): if the hair's XY projection
- * leans FORWARD along the path (toward the next dot), the line is stamped
- * in REVERSE so every strand trails behind its own dot, away from where
- * the nozzle heads next. */
-export function freeformHairyDotted(em, xFunc, yFunc, tStart, tEnd, {
+/** Discrete "hairy dots" (see emitHairyDot() in SECTION 5) at regular
+ * arc-length intervals -- each stamp is an anchor blob plus ONE pulled hair
+ * strand, not `brushHairy`'s simpler point-stamp. Shares `brushHairy`'s
+ * retraction-cycle-count caution (one retract/unretract PER strand).
+ * `stampOrder` (default "auto"): if the hair's XY projection leans FORWARD
+ * along the path (toward the next dot), the line is stamped in REVERSE so
+ * every strand trails behind its own dot, away from where the nozzle heads
+ * next. */
+export function brushHairyDotted(em, pts, {
   gap = 10.0, rootDiameter = 2.0, baseZ = 0.2, buildSteps = 6,
   taperFactor = 0.7, extrudeSpeed = 120, baseExtraMm = 0.3,
   baseDwellMs = 1000, dwellMs = 2000, extrusionMultiplier = 1.3,
@@ -567,8 +605,7 @@ export function freeformHairyDotted(em, xFunc, yFunc, tStart, tEnd, {
   overtravelMm = 2.0, overtravelSpeed = 600,
   stampOrder = "auto", step = 0.1,
 } = {}) {
-  em.newPattern();
-  return walkArcLengthStops(xFunc, yFunc, tStart, tEnd, gap, step, {
+  return walkArcLengthStops(pts, gap, step, {
     reverseCheck: ({ pts, length, gap, stops }) => {
       if (stampOrder === "reverse") return true;
       if (stampOrder !== "auto") return false;
@@ -591,28 +628,24 @@ export function freeformHairyDotted(em, xFunc, yFunc, tStart, tEnd, {
   });
 }
 
-/** Alternating thin/fat segments along any path -- a continuous, single-
- * layer line that switches bead WIDTH between two segment types, each
- * with its own LENGTH: `thinWidth` x `thinLen`, then `fatWidth` x
- * `fatLen`, repeating to the end of the path. Each segment type also has
- * its own bead HEIGHT (the nozzle Z steps to it per segment) -- the fat
- * segment sitting a little higher is what lets its extra volume spread
- * into a genuinely wider bead instead of doming at a fixed low Z. No
- * retract between segments (the line is continuous); one prime at the
- * start, one retract at the very end. Uses G91 for the XY (and per-segment
- * relative Z) segment walk. */
-export function freeformSegmented(em, xFunc, yFunc, tStart, tEnd, {
+/** Alternating thin/fat segments -- a continuous, single-layer line that
+ * switches bead WIDTH between two segment types, each with its own LENGTH:
+ * `thinWidth` x `thinLen`, then `fatWidth` x `fatLen`, repeating to the end
+ * of the path. Each segment type also has its own bead HEIGHT (the nozzle
+ * Z steps to it per segment) -- the fat segment sitting a little higher is
+ * what lets its extra volume spread into a genuinely wider bead instead of
+ * doming at a fixed low Z. No retract between segments (the line is
+ * continuous); one prime at the start, one retract at the very end. Uses
+ * G91 for the XY (and per-segment relative Z) segment walk. */
+export function brushSegmented(em, pts, {
   thinLen = 8.0, thinWidth = 0.8, thinHeight = 0.2, thinSpeed = 130,
   fatLen = 4.0, fatWidth = 1.6, fatHeight = 0.3, fatSpeed = 60,
   flowMult = 1.4, segDwellMs = 250,
   // eprime: one-time prime after goto() leaves the nozzle retracted --
   // just over the RETRACT_MM (1.3mm) the goto pulled.
   eprime = 1.6, primedwellS = 1.0, retractMm = 4.0, retractSpeed = 1000,
-  step = 0.1,
 } = {}) {
-  const pts = samplePath(xFunc, yFunc, tStart, tEnd, { step });
   const length = totalLength(pts);
-  em.newPattern();
 
   const first = pointAtArcLength(pts, 0);
   em.goto(first[0], first[1], thinHeight);   // first segment is thin (i=0)
@@ -659,15 +692,12 @@ export function freeformSegmented(em, xFunc, yFunc, tStart, tEnd, {
   return pts;
 }
 
-/** The sine-wave bulge technique, generalized to follow any path --
- * height varies as a function of ARC LENGTH along the path, not of x. */
-export function freeformVariableThickness(em, xFunc, yFunc, tStart, tEnd, {
+/** The sine-wave bulge technique -- bead height varies as a function of
+ * ARC LENGTH along the path. */
+export function brushVariableThickness(em, pts, {
   hMin = 0.16, hMax = 0.9, wavelength = 8.0, beadWidth = 0.8,
-  zGap = 0.25, speed = 25, peakDwellMs = 300, step = 0.1,
+  zGap = 0.25, speed = 25, peakDwellMs = 300,
 } = {}) {
-  const pts = samplePath(xFunc, yFunc, tStart, tEnd, { step });
-  em.newPattern();
-
   const hAt = (s) => hMin + (hMax - hMin) * 0.5 * (1 + Math.sin((2 * Math.PI * s) / wavelength));
 
   const firstH = hAt(0);
@@ -689,13 +719,15 @@ export function freeformVariableThickness(em, xFunc, yFunc, tStart, tEnd, {
 
 /**
  * ============================================================================
- * SECTION 4: REGIONS AND FILLS
+ * SECTION 4: PATTERNS -- stroke generators for filling a region
  * ============================================================================
- * A region is {x0, y0, w, h} -- an axis-aligned rectangle; the only region
- * type implemented. Diamond/checkerboard fill is NOT a generic "lines at a
- * gap" pattern -- which cells get filled solid is a discrete checkerboard
- * parity selection, so it is its own dedicated function, never routed
- * through fillRegion().
+ * A pattern turns a region (an axis-aligned rectangle {x0, y0, w, h} or a
+ * polygon [[x,y], ...]) into a list of STROKES (point lists) that a brush
+ * from SECTION 3 is then walked along. Patterns never emit G-code
+ * themselves. Diamond/checkerboard is NOT a generic "lines at a gap"
+ * pattern -- which cells get filled solid is a discrete checkerboard
+ * parity selection -- so it is its own generator, never emulated with two
+ * angled hatches.
  */
 
 /** Exact (Liang-Barsky) clip of the infinite line (px,py)+s*(dx,dy)
@@ -744,22 +776,6 @@ export function regionFillLines(region, angleDeg, gap) {
   return segments;
 }
 
-/** Generic fill: clip parallel lines across `region` at `angleDeg`, `gap`
- * apart, drawn with `styleFunc` (any freeform* line style). NEVER use
- * this for diamond fill. */
-export function fillRegion(em, region, styleFunc, { angleDeg = 0, gap = 4.0, ...styleOptions } = {}) {
-  const segments = regionFillLines(region, angleDeg, gap);
-  for (const [p0, p1] of segments) {
-    const ddx = p1[0] - p0[0], ddy = p1[1] - p0[1];
-    const length = Math.hypot(ddx, ddy);
-    if (length < 1e-6) continue;
-    const ux = ddx / length, uy = ddy / length;
-    const xFunc = (t) => p0[0] + t * ux;
-    const yFunc = (t) => p0[1] + t * uy;
-    styleFunc(em, xFunc, yFunc, 0, length, styleOptions);
-  }
-}
-
 /** Returns the clipped [start,end] segments needed to fill a polygon (an
  * array of [x,y] points, edges implied by consecutive pairs plus a
  * closing edge back to the first point -- SIMPLE, non-self-intersecting,
@@ -805,21 +821,15 @@ export function polygonFillLines(polygon, angleDeg, gap) {
   return segments;
 }
 
-/** Generic polygon fill: clip parallel lines across `polygon` at
- * `angleDeg`, `gap` apart, drawn with `styleFunc` (any freeform* line
- * style) -- the polygon-boundary analogue of fillRegion(). NEVER use this
- * for diamond fill (DIAMOND stays rectangle-only). */
-export function fillPolygonRegion(em, polygon, styleFunc, { angleDeg = 0, gap = 4.0, ...styleOptions } = {}) {
-  const segments = polygonFillLines(polygon, angleDeg, gap);
-  for (const [p0, p1] of segments) {
-    const ddx = p1[0] - p0[0], ddy = p1[1] - p0[1];
-    const length = Math.hypot(ddx, ddy);
-    if (length < 1e-6) continue;
-    const ux = ddx / length, uy = ddy / length;
-    const xFunc = (t) => p0[0] + t * ux;
-    const yFunc = (t) => p0[1] + t * uy;
-    styleFunc(em, xFunc, yFunc, 0, length, styleOptions);
-  }
+/** HATCH pattern: parallel strokes across `region` (rect or polygon) at
+ * `angleDeg`, `gap` apart. Returns an array of 2-point strokes
+ * [[x0,y0],[x1,y1]], each meant to be densified (polylineToPts) and
+ * walked by one brush call with its own em.newPattern(). */
+export function hatchStrokes(region, angleDeg = 0, gap = 4.0) {
+  const segments = Array.isArray(region)
+    ? polygonFillLines(region, angleDeg, gap)
+    : regionFillLines(region, angleDeg, gap);
+  return segments.filter(([p0, p1]) => Math.hypot(p1[0] - p0[0], p1[1] - p0[1]) >= 1e-6);
 }
 
 function clipLineFamilyRegion(x0, y0, w, h, constVal, family) {
@@ -838,29 +848,19 @@ function clipLineFamilyRegion(x0, y0, w, h, constVal, family) {
   return result;
 }
 
-/** Standard multi-layer stroke: print `points` as a path, nLayers times,
- * each pass a full layer higher. */
-export function emitStroke(em, points, nLayers, width, speed) {
-  for (let layer = 1; layer <= nLayers; layer++) {
-    const z = LAYER_HEIGHT * layer;
-    em.goto(points[0][0], points[0][1], z);
-    em.unretract();
-    for (let i = 1; i < points.length; i++) {
-      const seg = dist(points[i - 1], points[i]);
-      if (seg < 1e-9) continue;
-      em.printMove(points[i][0], points[i][1], seg * eRate(width, LAYER_HEIGHT), speed);
-    }
-    em.retract();
-  }
-}
-
-/** Diamond lattice with checkerboard fill. region={x0,y0,w,h}. Indexes
- * diamonds by their TRUE rotated-square-grid coordinates (i,j) via
- * center=(x0+half*(i+j), y0+half*(i-j)), checkerboard parity=(i+j)%2.
- * DO NOT reimplement this via fillRegion(). */
-export function diamondFillRegion(em, region, { diag = 8.0, fillGap = 0.6 } = {}) {
+/** DIAMOND pattern: lattice lines plus checkerboard-filled cells for a
+ * rectangle region={x0,y0,w,h}. Indexes diamonds by their TRUE rotated-
+ * square-grid coordinates (i,j) via center=(x0+half*(i+j), y0+half*(i-j)),
+ * checkerboard parity=(i+j)%2. Returns {strokes, diamonds}: each stroke is
+ * {points: [[x,y],[x,y]], brush: {nLayers, width, speed}} for the SOLID
+ * brush (lattice at 400 mm/min, cell scanlines at 450), to be walked
+ * WITHOUT densifying (`polylineToPts(points, null)`) under ONE
+ * em.newPattern() for the whole fill. `diamonds` feeds
+ * verifyCheckerboard(). DO NOT emulate this with two angled hatches. */
+export function diamondStrokes(region, { diag = 8.0, fillGap = 0.6 } = {}) {
   const { x0, y0, w, h } = region;
-  em.newPattern();
+  const strokes = [];
+  const push = (seg, speed) => strokes.push({ points: seg, brush: { nLayers: 2, width: 0.4, speed } });
   const half = diag / 2.0;
 
   const diamonds = [];
@@ -885,11 +885,11 @@ export function diamondFillRegion(em, region, { diag = 8.0, fillGap = 0.6 } = {}
 
   for (const c of [...diffConsts].sort((a, b) => a - b)) {
     const seg = clipLineFamilyRegion(x0, y0, w, h, c, "diff");
-    if (seg) emitStroke(em, seg, 2, 0.4, 400);
+    if (seg) push(seg, 400);
   }
   for (const c of [...sumConsts].sort((a, b) => a - b)) {
     const seg = clipLineFamilyRegion(x0, y0, w, h, c, "sum");
-    if (seg) emitStroke(em, seg, 2, 0.4, 400);
+    if (seg) push(seg, 400);
   }
 
   for (const [cx, cy, filled] of diamonds) {
@@ -900,12 +900,12 @@ export function diamondFillRegion(em, region, { diag = 8.0, fillGap = 0.6 } = {}
         if (ww > 0.05) {
           const xa = Math.max(x0, cx - ww);
           const xb = Math.min(x0 + w, cx + ww);
-          if (xb > xa) emitStroke(em, [[xa, yy], [xb, yy]], 2, 0.4, 450);
+          if (xb > xa) push([[xa, yy], [xb, yy]], 450);
         }
       }
     }
   }
-  return diamonds;
+  return { strokes, diamonds };
 }
 
 /** Explicit adjacency verification -- the ONLY acceptable way to confirm
@@ -932,36 +932,18 @@ export function verifyCheckerboard(diamonds, diag) {
   return { checked, violations };
 }
 
-// pass as `style` to fill() to request diamond fill
-export const DIAMOND = "__diamond__";
-
-/** THE single unified entry point for all fills. `region` is either a
- * rectangle `{x0,y0,w,h}` or a polygon (an array of `[x,y]` points, e.g.
- * a sampled parametric boundary). `style` is either DIAMOND (routed to
- * the dedicated diamond algorithm -- rectangle regions only) or any
- * freeform* line-style function (routed through fillRegion() for a
- * rectangle, fillPolygonRegion() for a polygon). Callers never need to
- * know this split exists. */
-export function fill(em, region, style, options = {}) {
-  const isPolygon = Array.isArray(region);
-  if (style === DIAMOND) {
-    if (isPolygon) throw new Error("DIAMOND fill only supports a rectangular region, not a polygon boundary");
-    return diamondFillRegion(em, region, options);
-  } else if (isPolygon) {
-    return fillPolygonRegion(em, region, style, options);
-  } else {
-    return fillRegion(em, region, style, options);
-  }
-}
-
 /**
  * ============================================================================
- * SECTION 5: STANDALONE DOTS
+ * SECTION 5: STAMPS -- what happens at one point
  * ============================================================================
+ * stamp*(em, cx, cy, options). Like brushes, a stamp never calls
+ * em.newPattern(); the caller does once per standalone dot (the *Dotted
+ * brushes above call the same emit* mechanisms per stop under a single
+ * newPattern() for the whole line).
  */
 
 /**
- * Shared point-extrusion mechanism for blobDot() / freeformBlobDotted():
+ * Shared point-extrusion mechanism for stampBlob() / brushBlobDotted():
  * builds a small dome by extruding WHILE rising in Z (no XY movement),
  * dwell, retract, orbit around the dome at its own height, then (via the
  * caller's next goto()) travel to the next spot. `diameter` is the primary
@@ -1055,12 +1037,11 @@ function emitBlobDot(em, cx, cy, {
   // goto(), which itself lifts to travel height before the XY move)
 }
 
-/** The DEFAULT dot texture -- a single-point "blob" dot, preferred over
- * circularDot() unless a flat, precisely spiral-filled disc is
- * specifically needed. Extrudes filament at one fixed XY position (no
- * lateral movement), dwells, retracts, orbits -- see emitBlobDot() above. */
-export function blobDot(em, cx, cy, options = {}) {
-  em.newPattern();
+/** The DEFAULT stamp -- a single-point "blob" dome, preferred over
+ * stampDisc() unless a flat, precisely spiral-filled disc is specifically
+ * needed. Extrudes filament at one fixed XY position (no lateral
+ * movement), dwells, retracts, orbits -- see emitBlobDot() above. */
+export function stampBlob(em, cx, cy, options = {}) {
   emitBlobDot(em, cx, cy, options);
 }
 
@@ -1134,25 +1115,23 @@ function emitDirectionalBlobDot(em, cx, cy, {
   em.x = endX; em.y = endY;
 }
 
-/** The directional (leaning) blob dot -- see emitDirectionalBlobDot()
+/** The directional (leaning) blob stamp -- see emitDirectionalBlobDot()
  * above. `azimuthDeg` (CCW from +X) sets the lean direction. For a line
- * of these use freeformDirectionalBlobDotted(). */
-export function directionalBlobDot(em, cx, cy, options = {}) {
-  em.newPattern();
+ * of these use brushDirectionalBlobDotted(). */
+export function stampDirectionalBlob(em, cx, cy, options = {}) {
   emitDirectionalBlobDot(em, cx, cy, options);
 }
 
-/** A single solid circular dot, built by spiraling a fill path outward --
- * an ALTERNATIVE to the default blobDot() when a flat, precisely
+/** A single solid circular disc, built by spiraling a fill path outward --
+ * an ALTERNATIVE to the default stampBlob() when a flat, precisely
  * diameter'd disc is needed (diameter and height are independently
- * controlled, unlike blobDot()'s derived-from-diameter dome). height
+ * controlled, unlike the blob's derived-from-diameter dome). height
  * should be a multiple of LAYER_HEIGHT (0.2mm). No hollow-centre
  * ("donut") shape is implemented. */
-export function circularDot(em, cx, cy, { diameter = 1.6, height = 0.4, speed = 250 } = {}) {
+export function stampDisc(em, cx, cy, { diameter = 1.6, height = 0.4, speed = 250 } = {}) {
   const nLayers = Math.max(MIN_LAYERS, Math.round(height / LAYER_HEIGHT));
   const pts = spiralDisc([cx, cy], diameter / 2.0);
-  em.newPattern();
-  emitStroke(em, pts, nLayers, 0.42, speed);
+  brushSolid(em, polylineToPts(pts, null), { width: 0.42, nLayers, speed });
 }
 
 // The 4 named hair directions, as (azimuth, elevation) degree pairs.
@@ -1308,76 +1287,22 @@ function emitHairyDot(em, cx, cy, {
   pull(overtravelMm, null, overtravelSpeed, true);
 }
 
-/** The dot form of the hairy texture -- see emitHairyDot() above. Do NOT
- * improvise a single hairy dot by calling `freeformHairy` with a
- * zero-length path -- that function's strand-placement logic assumes a
- * path with real extent. */
-export function hairyDot(em, cx, cy, options = {}) {
-  em.newPattern();
+/** The stamp form of the hairy texture -- see emitHairyDot() above. Do NOT
+ * improvise a single hairy dot by calling `brushHairy` on a zero-length
+ * path -- that brush's strand-placement logic assumes real extent. */
+export function stampHairy(em, cx, cy, options = {}) {
   emitHairyDot(em, cx, cy, options);
 }
 
-/**
- * ============================================================================
- * SECTION 6: MULTI-TEXTURE LAYOUT VERIFICATION
- * ============================================================================
- * Nothing else here checks whether two SEPARATELY-chosen regions
- * physically overlap -- overlapping regions generate silently, then crash
- * the nozzle into already-printed material during the actual print.
- */
+/** Name → function maps the compiler dispatches on. Keys are the brush /
+ * stamp names the scene model, the option table and the prompt docs use. */
+export const BRUSHES = {
+  solid: brushSolid, dashed: brushDashed, dotted: brushDotted,
+  blobDotted: brushBlobDotted, directionalBlobDotted: brushDirectionalBlobDotted,
+  hairy: brushHairy, hairyDotted: brushHairyDotted, segmented: brushSegmented,
+  variableThickness: brushVariableThickness,
+};
+export const STAMPS = {
+  blob: stampBlob, disc: stampDisc, directionalBlob: stampDirectionalBlob, hairyDot: stampHairy,
+};
 
-/** Returns the overlapping area in mm^2 between two regions (0 if none). */
-export function regionOverlapArea(a, b) {
-  const xOverlap = Math.max(0, Math.min(a.x0 + a.w, b.x0 + b.w) - Math.max(a.x0, b.x0));
-  const yOverlap = Math.max(0, Math.min(a.y0 + a.h, b.y0 + b.h) - Math.max(a.y0, b.y0));
-  return xOverlap * yOverlap;
-}
-
-/**
- * Checks a list of regions for overlaps and for insufficient clearance.
- * Call this BEFORE generating a multi-texture print, and confirm
- * `ok === true`. Overlaps are hard failures (nozzle collision); gaps
- * smaller than minGap are warnings (features may fuse together).
- */
-export function verifyLayout(regions, { minGap = 0.5, bedMargin = 15.0 } = {}) {
-  const errors = [];
-  const warnings = [];
-
-  regions.forEach((r, i) => {
-    const label = r.name || `region[${i}]`;
-    if (r.x0 < bedMargin || r.y0 < bedMargin ||
-        r.x0 + r.w > BED_X - bedMargin || r.y0 + r.h > BED_Y - bedMargin) {
-      errors.push(
-        `${label} at x[${r.x0}-${r.x0 + r.w}] y[${r.y0}-${r.y0 + r.h}] ` +
-        `falls outside the safe bed area (${bedMargin}mm margin on a ` +
-        `${BED_X}x${BED_Y}mm bed).`
-      );
-    }
-  });
-
-  for (let i = 0; i < regions.length; i++) {
-    for (let j = i + 1; j < regions.length; j++) {
-      const a = regions[i], b = regions[j];
-      const la = a.name || `region[${i}]`, lb = b.name || `region[${j}]`;
-      const area = regionOverlapArea(a, b);
-      if (area > 0) {
-        errors.push(
-          `${la} and ${lb} OVERLAP by ${area.toFixed(1)}mm^2 -- the nozzle ` +
-          `would crash into already-printed material. Move one of them.`
-        );
-        continue;
-      }
-      const xGap = Math.max(a.x0 - (b.x0 + b.w), b.x0 - (a.x0 + a.w));
-      const yGap = Math.max(a.y0 - (b.y0 + b.h), b.y0 - (a.y0 + a.h));
-      const clearance = Math.max(xGap, yGap);
-      if (clearance < minGap) {
-        warnings.push(
-          `${la} and ${lb} are only ${clearance.toFixed(1)}mm apart ` +
-          `(recommended minimum ${minGap}mm) -- adjacent features may fuse.`
-        );
-      }
-    }
-  }
-
-  return { ok: errors.length === 0, errors, warnings };
-}

@@ -17,6 +17,7 @@ for this page, not copied from those docs.
 | `path-spec.md` | How a line/curve path is described as JSON. |
 | `hardware.md` | Trimmed machine + TPU essentials. |
 | `PARAMETER_CONSTRAINTS.md` | **Fill-in form.** Placeholder limits (min gaps, min sizes, retraction caps). The user edits it and returns it; the numbers are then transcribed into `../parametric-catalog.js`, which is what the page enforces. |
+| `texture_functions-with-tool.js`, `stage-route.md`, `stage-geometry.md`, `stage-texture.md`, `stage-parameters.md`, `reference-machine.md`, `reference-brushes.md` | Used only by **`../parametric-with-tool.html`** (the 4-stage pipeline: route → geometry → texture → parameters). The library fork is restructured as brushes / patterns / stamps and verified byte-identical by `tests/parametric/golden-brushes.mjs`; each `stage-*.md` is one stage's system prompt, the two `reference-*.md` are shared facts. Enforced limits for that page live in `../parametric-catalog-with-tool.js`. |
 
 ## Keeping things in sync
 

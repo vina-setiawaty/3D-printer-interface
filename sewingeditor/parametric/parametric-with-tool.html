@@ -3,7 +3,7 @@
 
 <head>
   <meta charset="UTF-8">
-  <title>3dp sewing machine - parametric tactile graphics (+ tool execution, experimental)</title>
+  <title>3dp sewing machine - parametric tactile graphics (4-stage pipeline, experimental)</title>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.3.1/p5.js"></script>
   <script src="../lib/p5.fab.sewing.js" type="text/javascript"></script>
@@ -268,6 +268,30 @@
 
   #pg-gcode-menu { flex: 0 0 auto; margin-top: 0.4em; }
 
+  #pg-report-wrap { flex: 0 0 auto; margin-bottom: 0.4em; max-height: 30%; overflow-y: auto; }
+  #pg-report-wrap summary { cursor: pointer; font-family: monospace; font-size: 0.8em; color: #666; }
+  #pg-report { font-family: monospace; font-size: 0.75em; white-space: pre-wrap; margin: 0.3em 0; color: #444; }
+
+  .pg-section {
+    font-family: monospace;
+    font-size: 0.75em;
+    text-transform: uppercase;
+    color: #666;
+    border-bottom: 1px solid #DDD;
+    margin: 0.8em 0 0.4em;
+    padding-bottom: 0.15em;
+  }
+  .pg-btn-row { display: flex; gap: 0.4em; margin-top: 0.4em; }
+  .pg-small-btn { font-size: 0.75em; padding: 0.25em 0.55em; }
+  .pg-piece { border-left: 2px solid #EEE; padding-left: 0.4em; margin: 0.3em 0; }
+  .pg-desc { font-size: 0.85em; color: #666; margin-bottom: 0.3em; }
+  .pg-slider { flex-direction: row; align-items: center; gap: 0.5em; }
+  .pg-slider input[type=range] { flex: 1; }
+  .pg-slider > span { font-family: monospace; min-width: 2.5em; }
+  .pg-json { width: 100%; font-family: monospace; font-size: 0.8em; height: 3.5em; resize: vertical; }
+  .pg-json.pg-bad { border-color: #c00; background: #FFF4F4; }
+  .pg-retry { color: #06c; cursor: pointer; text-decoration: underline; margin-left: 0.5em; }
+
   #printer-controls { clear: both; padding-top: 0.5em; }
   #printer-controls h2 {
     font-size: 0.75rem;
@@ -298,7 +322,7 @@
 
       <!-- Column 1: chat -->
       <div class="pg-col" id="pg-col-chat">
-        <h1>Describe the graphic <span class="pg-experimental-badge">+ tool execution</span>
+        <h1>Describe the graphic <span class="pg-experimental-badge">4-stage pipeline</span>
           <span style="float:right;"><span class="btn" id="pg-new-btn" style="font-size:0.85em;padding:0.3em 0.6em;">new</span></span>
         </h1>
 
@@ -343,7 +367,7 @@
           <div class="ui-group">
             <span class="label">Tool execution</span>
             <select id="pg-code-execution">
-              <option value="on" selected>on (verifies geometry, slower — Claude only)</option>
+              <option value="on" selected>on (geometry + texture stages self-check, slower — Claude only)</option>
               <option value="off">off (faster — turn off if you hit FUNCTION_INVOCATION_TIMEOUT)</option>
             </select>
           </div>
@@ -351,7 +375,7 @@
 
         <div id="pg-transcript"></div>
 
-        <textarea id="pg-input" placeholder="e.g. a bar chart with 3 bars: heights 5mm, 12mm, 8mm"></textarea>
+        <textarea id="pg-input" placeholder="e.g. a bar chart with 3 bars: heights 5mm, 12mm, 8mm — then: shade the area between the axis and the curve; make the shading denser"></textarea>
         <div class="pg-send-row">
           <div class="btn" id="pg-send-btn">send</div>
           <span id="pg-status" class="llm-status"></span>
@@ -369,6 +393,10 @@
       <!-- Column 3: generated g-code -->
       <div class="pg-col" id="pg-col-gcode">
         <h1>Generated G-code</h1>
+        <details id="pg-report-wrap">
+          <summary>geometry report (what the model verifies against)</summary>
+          <pre id="pg-report"></pre>
+        </details>
         <div id="pg-digest"></div>
         <textarea id="raw-gcode-textarea" spellcheck="false"></textarea>
         <div class="ui-group" id="pg-gcode-menu">
@@ -467,9 +495,8 @@
 
   <script type="text/javascript" src="../script.js?v=4"></script>
   <script type="text/javascript" src="../llm.js?v=1"></script>
-  <script type="text/javascript" src="parametric-catalog-with-tool.js?v=1"></script>
-  <script type="text/javascript" src="parametric-with-tool.js?v=1"></script>
-  <script type="text/javascript" src="parametric-compat.js?v=1"></script>
+  <script type="module" src="parametric-with-tool.js?v=2"></script>
+  <script type="text/javascript" src="parametric-with-tool-compat.js?v=1"></script>
 </body>
 
 </html>
