@@ -2,12 +2,12 @@
 //
 // The model returns a list of CALLS ({fn, geometry, options, label}); this
 // file is the fixed machinery that turns that data into G-code by calling
-// the pinned `parametric_docs/texture_functions.js`. No model-authored
+// the pinned `docs/texture_functions.js`. No model-authored
 // code is ever executed — only data-driven calls into the allowlist below.
 //
 // Enforced limits (min AND max gaps, min sizes, retraction caps, call
 // ordering) are the PLACEHOLDER values from
-// parametric_docs/PARAMETER_CONSTRAINTS.md. When the user returns that form
+// docs/PARAMETER_CONSTRAINTS.md. When the user returns that form
 // with real numbers, edit CONSTRAINTS here to match — that file and this
 // object are the two halves that must stay in sync.
 

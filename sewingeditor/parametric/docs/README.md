@@ -1,4 +1,4 @@
-# parametric_docs
+# parametric docs
 
 Reference set for the **parametric tactile-graphic page**
 (`../parametric.html`) — a 3-column prototype where an LLM composes a list
@@ -9,6 +9,9 @@ This folder is a **pinned prototype snapshot**, deliberately separate from
 `../../texture_docs/` (the live fine-tuning workspace). It was written fresh
 for this page, not copied from those docs.
 
+For the newer 4-stage pipeline page, see `../../parametric-with-tool/docs/`
+instead — the two pages no longer share a docs folder.
+
 | File | What it is |
 |---|---|
 | `texture_functions.js` | Pinned copy of the texture library. The page imports **this** copy, not `../../texture_docs/`'s, so ongoing tuning there can't silently change the prototype. Re-copy deliberately when you want the update. |
@@ -17,12 +20,11 @@ for this page, not copied from those docs.
 | `path-spec.md` | How a line/curve path is described as JSON. |
 | `hardware.md` | Trimmed machine + TPU essentials. |
 | `PARAMETER_CONSTRAINTS.md` | **Fill-in form.** Placeholder limits (min gaps, min sizes, retraction caps). The user edits it and returns it; the numbers are then transcribed into `../parametric-catalog.js`, which is what the page enforces. |
-| `texture_functions-with-tool.js`, `stage-route.md`, `stage-geometry.md`, `stage-geometry-check.md`, `stage-texture.md`, `stage-texture-check.md`, `stage-parameters.md`, `reference-machine.md`, `reference-brushes.md` | Used only by **`../parametric-with-tool.html`** (the pipeline: route → geometry [→ geometry-check] → texture [→ texture-check] → parameters). The `*-check` stages review a just-generated element/texture list against a report the app computes deterministically (no LLM tool use) and can patch it. The library fork is restructured as brushes / patterns / stamps and verified byte-identical by `tests/parametric/golden-brushes.mjs`; each `stage-*.md` is one stage's system prompt, the two `reference-*.md` are shared facts. Enforced limits for that page live in `../parametric-catalog-with-tool.js`. |
 
 ## Keeping things in sync
 
 - Prompt text changes → update `system-prompt.md` **and** the matching
-  section of `../docs/llm-api-data-flow.md`.
+  section of `../../docs/llm-api-data-flow.md`.
 - Enforced-limit changes → `PARAMETER_CONSTRAINTS.md` **and**
   `../parametric-catalog.js` together.
 - Library update wanted → re-copy `../../texture_docs/texture_functions.js`

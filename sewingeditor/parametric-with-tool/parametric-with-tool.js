@@ -27,12 +27,12 @@ const DEBUG_LOG_MAX_TURNS = 15;   // localStorage is finite; keep the most recen
 // Prompt docs per stage. A doc wrapped in a ``` fence contributes only the
 // fenced block; a plain doc is used whole.
 const STAGE_DOCS = {
-  route: ["parametric_docs/stage-route.md"],
-  geometry: ["parametric_docs/stage-geometry.md", "parametric_docs/reference-machine.md"],
-  "geometry-check": ["parametric_docs/stage-geometry-check.md", "parametric_docs/reference-machine.md"],
-  texture: ["parametric_docs/stage-texture.md", "parametric_docs/reference-machine.md", "parametric_docs/reference-brushes.md"],
-  "texture-check": ["parametric_docs/stage-texture-check.md", "parametric_docs/reference-machine.md", "parametric_docs/reference-brushes.md"],
-  parameters: ["parametric_docs/stage-parameters.md", "parametric_docs/reference-brushes.md"],
+  route: ["docs/stage-route.md"],
+  geometry: ["docs/stage-geometry.md", "docs/reference-machine.md"],
+  "geometry-check": ["docs/stage-geometry-check.md", "docs/reference-machine.md"],
+  texture: ["docs/stage-texture.md", "docs/reference-machine.md", "docs/reference-brushes.md"],
+  "texture-check": ["docs/stage-texture-check.md", "docs/reference-machine.md", "docs/reference-brushes.md"],
+  parameters: ["docs/stage-parameters.md", "docs/reference-brushes.md"],
 };
 const CHAIN = { geometry: ["geometry", "texture", "parameters"], texture: ["texture", "parameters"], parameters: ["parameters"], chat: [] };
 const STAGE_LABEL = { route: "routing", geometry: "geometry", texture: "texture", parameters: "parameters" };

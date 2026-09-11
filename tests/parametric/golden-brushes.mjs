@@ -15,7 +15,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const TF = await import("../../sewingeditor/parametric/parametric_docs/texture_functions-with-tool.js");
+const TF = await import("../../sewingeditor/parametric-with-tool/docs/texture_functions-with-tool.js");
 const GOLDEN_DIR = join(here, "golden");
 const update = process.argv.includes("--update");
 

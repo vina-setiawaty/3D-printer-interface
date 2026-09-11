@@ -1,6 +1,6 @@
 # Texture catalog — the functions you may compose
 
-Ground truth is `parametric_docs/texture_functions.js` (a pinned copy). This
+Ground truth is `docs/texture_functions.js` (a pinned copy). This
 file is the menu: which functions exist, what each one makes, and which
 options you may set. **Never invent geometry a function already produces,
 and never write raw G-code** — your job is to pick functions and set their

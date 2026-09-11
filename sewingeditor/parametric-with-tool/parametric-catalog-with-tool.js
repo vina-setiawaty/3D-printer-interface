@@ -24,7 +24,7 @@
 // operators/functions. There is no code path from a formula string to any
 // JS object, global, or property access outside that grammar.
 
-import * as TF from "./parametric_docs/texture_functions-with-tool.js";
+import * as TF from "./docs/texture_functions-with-tool.js";
 
 export const SCENE_VERSION = 2;
 

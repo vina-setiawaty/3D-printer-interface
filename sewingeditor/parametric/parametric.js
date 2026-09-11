@@ -6,7 +6,7 @@
 //
 // The model returns { chat, calls[] } (see api/generate-parametric.js).
 // Each call is executed locally by parametric-catalog.js against the pinned
-// parametric_docs/texture_functions.js — editing a parameter re-runs the
+// docs/texture_functions.js — editing a parameter re-runs the
 // call list with no API round-trip.
 //
 // Reuses llm.js's provider-agnostic helpers (extractResponseOutput,
@@ -15,11 +15,11 @@
 
 const PARAMETRIC_STORAGE_KEY = "parametricSessionState";
 const PROMPT_DOCS = [
-  "parametric_docs/system-prompt.md",
-  "parametric_docs/catalog.md",
-  "parametric_docs/path-spec.md",
-  "parametric_docs/hardware.md",
-  "parametric_docs/PARAMETER_CONSTRAINTS.md",
+  "docs/system-prompt.md",
+  "docs/catalog.md",
+  "docs/path-spec.md",
+  "docs/hardware.md",
+  "docs/PARAMETER_CONSTRAINTS.md",
 ];
 
 let TF = null;                 // texture_functions.js module, loaded async
@@ -63,11 +63,11 @@ async function loadParametricDeps() {
   const status = document.querySelector("#pg-status");
   status.textContent = "loading texture library…";
   try {
-    TF = await import("./parametric_docs/texture_functions.js");
+    TF = await import("./docs/texture_functions.js");
   } catch (e) {
     status.textContent = "";
     document.querySelector("#pg-messages").innerHTML =
-      `<li>could not load parametric_docs/texture_functions.js: ${escapeHtml(String(e.message || e))}</li>`;
+      `<li>could not load docs/texture_functions.js: ${escapeHtml(String(e.message || e))}</li>`;
     return;
   }
   try {

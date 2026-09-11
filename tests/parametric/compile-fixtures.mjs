@@ -4,7 +4,7 @@
 // stage-output validation and merging.
 
 import assert from "node:assert/strict";
-import * as C from "../../sewingeditor/parametric/parametric-catalog-with-tool.js";
+import * as C from "../../sewingeditor/parametric-with-tool/parametric-catalog-with-tool.js";
 
 let passed = 0;
 function test(name, fn) {
