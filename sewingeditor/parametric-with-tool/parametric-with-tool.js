@@ -8,17 +8,22 @@
 //
 // A user message goes to the ROUTE stage, which rewrites it as a
 // self-contained instruction and picks the entry stage; the page then
-// chains geometry -> texture -> parameters (or a suffix of that) through
-// /api/parametric-stage. Every stage's JSON is validated and merged into
-// the SCENE by parametric-catalog-with-tool.js, which also compiles the
-// scene to G-code locally -- editing anything in column 2 re-generates
-// without an API round-trip.
+// chains geometry -> texture -> parameters (or a suffix of that), calling
+// the chosen provider (OpenAI or Anthropic) DIRECTLY from the browser with
+// a key the user enters (see stage-schemas.js for per-stage schemas/token
+// budgets and llm.js's callLlmDirect for the request itself -- no Vercel
+// proxy is involved). Every stage's JSON is validated and merged into the
+// SCENE by parametric-catalog-with-tool.js, which also compiles the scene
+// to G-code locally -- editing anything in column 2 re-generates without
+// an API round-trip.
 //
 // This is an ES module; it reads llm.js's classic-script helpers
 // (escapeHtml, readJsonResponse, wasTruncated, extractResponseOutput,
-// recordCost, renderCostTracker, updateModelOptions, saveAppSecretFrom,
-// loadAppSecretInto) as globals, and exposes initParametricEditor on
-// window for parametric-with-tool-compat.js.
+// recordCost, renderCostTracker, updateModelOptions, saveApiKeyFrom,
+// loadApiKeyInto, callLlmDirect) as globals, and exposes
+// initParametricEditor on window for parametric-with-tool-compat.js.
+
+import { STAGES } from "./stage-schemas.js";
 
 const STORAGE_KEY = "parametricWithToolSessionState";
 const DEBUG_LOG_KEY = "parametricWithToolDebugLog";
@@ -234,12 +239,19 @@ function stageUserMessage(stage, instruction, targets) {
 // `contextScene` defaults to the live scene; a *-check call passes a
 // draft scene-like object instead, since its response's elementIds may
 // reference elements the real scene hasn't merged yet.
+function apiKeyFor(provider) {
+  return $(provider === "openai" ? "#pg-openai-key" : "#pg-anthropic-key").value;
+}
+
 async function callStage(stage, messages, contextScene = scene) {
-  const secret = $("#pg-app-secret").value;
   const provider = $("#pg-provider").value;
   const model = $("#pg-model").value;
   const effort = $("#pg-effort").value;
-  const thinking = $("#pg-thinking").value === "on";
+  // A stage that isn't thinking-capable (route, geometry-check,
+  // texture-check -- see stage-schemas.js) never gets thinking on, even if
+  // the page-wide toggle is, same cap the old proxy enforced server-side.
+  const thinking = $("#pg-thinking").value === "on" && !!STAGES[stage].thinking;
+  const apiKey = apiKeyFor(provider);
 
   // Built up as the call progresses and logged in `finally` below no
   // matter where (or whether) it throws -- a failed call is exactly the
@@ -252,25 +264,18 @@ async function callStage(stage, messages, contextScene = scene) {
     userMessage: messages[messages.length - 1]?.content || "",
   };
   try {
-    let response;
+    const cfg = STAGES[stage];
+    let data;
     try {
-      response = await fetch("/api/parametric-stage", {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-app-secret": secret },
-        body: JSON.stringify({ stage, provider, model, effort, thinking, systemPrompt: systemPromptFor(stage), messages }),
+      data = await callLlmDirect({
+        provider, apiKey, model, systemPrompt: systemPromptFor(stage), messages,
+        schema: cfg.schema, schemaName: cfg.schemaName, maxOutputTokens: cfg.maxOutputTokens,
+        effort, thinking,
       });
     } catch (e) {
-      record.networkError = String(e.message || e);
-      throw new Error(`could not reach the LLM proxy: ${e.message || e}`);
+      record.httpError = String(e.message || e);
+      throw e;
     }
-    let data;
-    try { data = await readJsonResponse(response); }
-    catch (e) {
-      const preview = e.rawText ? (e.rawText.length > 300 ? e.rawText.slice(0, 300) + "…" : e.rawText) : "(empty response)";
-      record.httpError = `proxy returned non-JSON: ${preview}`;
-      throw new Error(`the proxy returned a response that wasn't valid JSON: ${preview}`);
-    }
-    if (!response.ok) { record.httpError = (data && data.error) || `HTTP ${response.status}`; throw new Error(record.httpError); }
     const { text, refusal } = extractResponseOutput(data, provider);
     if (refusal) { record.refusal = refusal; throw new Error(`the model declined: ${refusal}`); }
     if (!text) { record.httpError = "no text content returned by the model"; throw new Error(record.httpError); }
@@ -319,7 +324,7 @@ async function onSend() {
   if (busy) return;
   if (!ready) { showMessages(["still loading — try again in a moment"]); return; }
   if (!instruction) { showMessages(["type a message first"]); return; }
-  if (!$("#pg-app-secret").value) { showMessages(["enter the app password first"]); return; }
+  if (!apiKeyFor($("#pg-provider").value)) { showMessages([`enter your ${$("#pg-provider").value} API key first`]); return; }
 
   pushMessage("user", instruction);
   input.value = "";
@@ -1043,7 +1048,8 @@ function initParametricEditor() {
     const r = e.target.closest(".pg-retry");
     if (r) onRetry(r.dataset.kind);
   });
-  $("#pg-app-secret").addEventListener("change", () => saveAppSecretFrom("pg-app-secret"));
+  $("#pg-openai-key").addEventListener("change", () => saveApiKeyFrom("openai", "pg-openai-key"));
+  $("#pg-anthropic-key").addEventListener("change", () => saveApiKeyFrom("anthropic", "pg-anthropic-key"));
   $("#pg-provider").addEventListener("change", () => updateModelOptions("pg-provider", "pg-model"));
   $("#pg-new-btn").addEventListener("click", newConversation);
   $("#pg-save-log-btn").addEventListener("click", () => {
@@ -1064,7 +1070,8 @@ function initParametricEditor() {
   });
 
   updateModelOptions("pg-provider", "pg-model");
-  loadAppSecretInto("pg-app-secret");
+  loadApiKeyInto("openai", "pg-openai-key");
+  loadApiKeyInto("anthropic", "pg-anthropic-key");
   renderCostTracker();
   $("#pg-send-btn").classList.add("disabled");
 

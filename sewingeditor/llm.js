@@ -262,6 +262,120 @@ function loadAppSecretInto(inputId) {
   }
 }
 
+// Client-side-direct flows (no Vercel proxy) store the user's own OpenAI/
+// Anthropic keys under one shared localStorage slot per provider, so any
+// page that migrates to calling providers directly reuses whatever the
+// user already entered elsewhere -- same pattern as saveAppSecretFrom/
+// loadAppSecretInto above, just keyed per provider instead of one shared
+// app password.
+function saveApiKeyFrom(provider, inputId) {
+  localStorage.setItem(`llmApiKey_${provider}`, document.querySelector(`#${inputId}`).value);
+}
+
+function loadApiKeyInto(provider, inputId) {
+  const key = localStorage.getItem(`llmApiKey_${provider}`);
+  if (key) {
+    document.querySelector(`#${inputId}`).value = key;
+  }
+}
+
+// Direct-from-browser equivalents of api/_lib/llm-proxy.js's callOpenAI/
+// callAnthropic. No app secret, no server-side model/effort allowlist --
+// the request goes straight from this page to the provider using a key the
+// user typed in, so there's no shared budget to gate. Anthropic requires
+// the browser-access header below or it rejects the request outright;
+// OpenAI's API answers direct browser calls with no special header needed.
+async function callOpenAIDirect(apiKey, model, systemPrompt, messages, schema, schemaName, maxOutputTokens, effort) {
+  return fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "authorization": `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      instructions: systemPrompt,
+      input: (messages.length === 1 && messages[0].role === "user")
+        ? messages[0].content
+        : messages.map(m => ({
+            role: m.role,
+            content: [{ type: m.role === "assistant" ? "output_text" : "input_text", text: m.content }],
+          })),
+      max_output_tokens: maxOutputTokens,
+      reasoning: { effort },
+      text: {
+        format: {
+          type: "json_schema",
+          name: schemaName,
+          schema,
+          strict: true,
+        },
+      },
+    }),
+  });
+}
+
+async function callAnthropicDirect(apiKey, model, systemPrompt, messages, schema, maxOutputTokens, effort, thinking) {
+  return fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: maxOutputTokens,
+      thinking: { type: thinking ? "adaptive" : "disabled" },
+      output_config: {
+        effort,
+        format: { type: "json_schema", schema },
+      },
+      system: systemPrompt,
+      messages,
+    }),
+  });
+}
+
+// Dispatches to the right provider, relays a clean Error on any failure
+// (network, non-JSON body, upstream error, or an Anthropic pause_turn --
+// see llm-proxy.js's handleGenerateRequest for why that one is treated as
+// a hard failure here rather than something worth resuming), and otherwise
+// returns the raw upstream JSON body untouched -- callers read it with the
+// same extractResponseOutput()/wasTruncated() used for the proxied flows.
+async function callLlmDirect({ provider, apiKey, model, systemPrompt, messages, schema, schemaName, maxOutputTokens, effort, thinking }) {
+  if (!apiKey) throw new Error(`enter your ${provider} API key first`);
+
+  let upstreamResponse;
+  try {
+    upstreamResponse = provider === "openai"
+      ? await callOpenAIDirect(apiKey, model, systemPrompt, messages, schema, schemaName, maxOutputTokens, effort)
+      : await callAnthropicDirect(apiKey, model, systemPrompt, messages, schema, maxOutputTokens, effort, thinking);
+  } catch (e) {
+    throw new Error(`could not reach ${provider}: ${e.message || e}`);
+  }
+
+  let data;
+  try {
+    data = await readJsonResponse(upstreamResponse);
+  } catch (e) {
+    const preview = e.rawText ? (e.rawText.length > 300 ? e.rawText.slice(0, 300) + "…" : e.rawText) : "(empty response)";
+    throw new Error(`${provider} returned a response that wasn't valid JSON: ${preview}`);
+  }
+
+  if (!upstreamResponse.ok) {
+    const detail = (data && data.error && data.error.message) ? data.error.message : `HTTP ${upstreamResponse.status}`;
+    throw new Error(detail);
+  }
+
+  if (provider === "anthropic" && data.stop_reason === "pause_turn") {
+    throw new Error("verification step didn't finish in time — try a simpler request");
+  }
+
+  return data;
+}
+
 // Anthropic Messages API and OpenAI Responses API return the generated text
 // (and a refusal, if any) in different shapes — branch on which provider the
 // request was sent to rather than guessing from the payload shape.
