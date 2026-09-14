@@ -1,1 +1,10 @@
 .claude/
+
+# Node / Vercel local dev
+node_modules/
+.vercel/
+
+# Local env files (real API keys — never commit)
+.env
+.env.*
+!.env.example
