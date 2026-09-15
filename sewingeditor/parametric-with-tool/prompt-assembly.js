@@ -26,7 +26,7 @@ export const STAGE_DOCS = {
   "geometry-check": ["docs/stage-geometry-check.md", "docs/ref-coordinates.md", "docs/ref-geometry-language.md"],
   texture: ["docs/stage-texture.md", "docs/ref-coordinates.md", "docs/ref-expressions.md", "docs/ref-patterns.md", "docs/ref-brush-menu.md"],
   "texture-check": ["docs/stage-texture-check.md", "docs/ref-patterns.md"],
-  parameters: ["docs/stage-parameters.md", "docs/ref-patterns.md"],
+  ui: ["docs/stage-ui.md"],
 };
 
 // Generated sections, by name, appended after the docs.
@@ -35,7 +35,7 @@ export const STAGE_GENERATED = {
   "geometry-check": ["limits"],
   texture: ["limits", "legibility"],
   "texture-check": ["limits", "legibility"],
-  parameters: ["limits", "legibility"],
+  ui: ["attributes"],
 };
 
 /** Every doc path the page must fetch, deduplicated. */
@@ -95,9 +95,8 @@ export function composeSystemPrompt(stage, { docs, scene, C }) {
     if (text == null) throw new Error(`prompt doc "${p}" was not loaded`);
     return text;
   });
-  for (const name of STAGE_GENERATED[stage] || []) {
-    parts.push(name === "limits" ? C.limitsText() : C.legibilityText());
-  }
+  const GENERATE = { limits: () => C.limitsText(), legibility: () => C.legibilityText(), attributes: () => C.attributeGuideText() };
+  for (const name of STAGE_GENERATED[stage] || []) parts.push(GENERATE[name]());
   if (stage === "route") parts.push(`SCENE SUMMARY:\n${C.sceneSummary(scene)}`);
   else parts.push(materialText(scene));
   return parts.join(SEP);
@@ -157,9 +156,24 @@ export function composeUserMessage(stage, { scene, C, instruction, targets = [],
     parts.push(`CURRENT TEXTURES (JSON):\n${jsonLines(C.texturesJson(scene))}`);
   }
 
-  if (stage === "parameters") {
+  if (stage === "texture") {
+    // The texture stage sets the numbers now, so it needs the specs. These
+    // cover the brushes already in use; anything it newly chooses is
+    // described in the brush and pattern reference in its system prompt.
+    parts.push(`OPTION SPECS for the brushes/stamps currently in use:\n${C.optionSpecsText(scene, ids) || "(no textures yet)"}`);
+  }
+  if (stage === "ui") {
     parts.push(`OPTION SPECS for the brushes/stamps in use:\n${C.optionSpecsText(scene, ids) || "(no textures yet)"}`);
-    parts.push(`CURRENT ABSTRACTIONS (JSON):\n${jsonLines(scene.abstractions)}`);
+    parts.push(`CURRENTLY SURFACED GROUPS (JSON):\n${jsonLines(scene.groups || [])}`);
+    // The real, already-resolved candidates for each attribute in THIS
+    // scene, so the stage confirms and prunes a list rather than authoring
+    // one from memory and having half of it rejected.
+    const offered = [];
+    for (const key of C.ATTRIBUTE_KEYS) {
+      const members = C.expandAttribute(scene, key, ids);
+      if (members.length) offered.push(`${key}:\n${members.map((m) => `  ${JSON.stringify(m)}`).join("\n")}`);
+    }
+    parts.push(`PARAMETERS IN THIS SCENE THAT AFFECT EACH ATTRIBUTE (pick from these; a member not listed for its attribute is rejected):\n${offered.join("\n") || "(no textures yet)"}`);
   }
 
   parts.push(`LATEST GEOMETRY REPORT:\n${C.reportText(scene.lastReport)}`);

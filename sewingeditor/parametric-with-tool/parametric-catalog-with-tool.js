@@ -15,7 +15,7 @@
 //                    geometry REPORT (the model verifies against this)
 //   runJobs()        jobs -> G-code via texture_functions-with-tool.js's
 //                    BRUSHES / STAMPS, bounds + retraction scan, digest
-//   applyAbstractions() / rebaseOption()   the abstraction rule
+//   resolveMember() / expandAttribute()    parameter groups
 //   validateStageOutput() / merge*()       stage JSON -> scene
 //
 // A model-supplied formula string is NEVER eval()'d or passed to
@@ -25,8 +25,15 @@
 // JS object, global, or property access outside that grammar.
 
 import * as TF from "./docs/texture_functions-with-tool.js";
+import { ATTRIBUTES, ATTRIBUTE_KEYS, CUSTOM_ATTRIBUTE, influencesOf, influenceFor } from "./attributes.js";
 
-export const SCENE_VERSION = 2;
+export { ATTRIBUTES, ATTRIBUTE_KEYS, CUSTOM_ATTRIBUTE };
+
+// 3: parameter "abstractions" (weighted knobs) became "groups" (a heading
+// over the parameters that affect one attribute). An older stored scene is
+// discarded by normalizeScene rather than migrated -- the knob values had
+// no meaning under the new model.
+export const SCENE_VERSION = 3;
 
 // ------------------------------------------------------------ constraints --
 //
@@ -147,7 +154,7 @@ export function legibilityText() {
 // ---------------------------------------------------------------- options --
 
 // kind: "num" | "int" | "nnum" (nullable number) | "enum". min/max are the
-// slider spans the abstraction rule uses and the input clamps.
+// range a value must sit inside, and the span the UI input uses.
 const N = (def, min, max, step) => ({ kind: "num", def, min, max, step: step ?? 0.1 });
 const I = (def, min, max) => ({ kind: "int", def, min, max, step: 1 });
 const NN = (def) => ({ kind: "nnum", def });
@@ -547,7 +554,7 @@ export function defaultScene() {
     transform: { scale: 1.0, origin: null },
     elements: [],
     textures: {},
-    abstractions: [],
+    groups: [],
     messages: [],
     lastReport: null,
   };
@@ -562,7 +569,7 @@ export function normalizeScene(raw) {
   s.transform = { scale: Number(raw.transform?.scale) || 1.0, origin: Array.isArray(raw.transform?.origin) ? raw.transform.origin : null };
   s.elements = Array.isArray(raw.elements) ? raw.elements : [];
   s.textures = raw.textures && typeof raw.textures === "object" ? raw.textures : {};
-  s.abstractions = Array.isArray(raw.abstractions) ? raw.abstractions : [];
+  s.groups = Array.isArray(raw.groups) ? raw.groups : [];
   s.messages = Array.isArray(raw.messages) ? raw.messages : [];
   s.lastReport = raw.lastReport || null;
   return s;
@@ -570,7 +577,7 @@ export function normalizeScene(raw) {
 
 export function nextId(scene, prefix) {
   let n = 1;
-  const taken = new Set([...scene.elements.map((e) => e.id), ...scene.abstractions.map((a) => a.id)]);
+  const taken = new Set([...scene.elements.map((e) => e.id), ...(scene.groups || []).map((g) => g.id)]);
   while (taken.has(`${prefix}_${n}`)) n++;
   return `${prefix}_${n}`;
 }
@@ -1325,135 +1332,170 @@ export function runJobs(jobs, { material = "TPU" } = {}) {
   return { gcode, digest, errors, warnings, ok: errors.length === 0 };
 }
 
-// ------------------------------------------------------------ abstractions --
-
-/** Normalized weights for an abstraction's targets: clamp to >= 0, scale
- * to sum 1; equal weights if none are usable. */
-export function normalizedWeights(targets) {
-  const w = targets.map((t) => (Number.isFinite(Number(t.weight)) ? Math.max(0, Number(t.weight)) : 0));
-  const sum = w.reduce((a, b) => a + b, 0);
-  if (sum <= 0) return targets.map(() => 1 / Math.max(1, targets.length));
-  return w.map((x) => x / sum);
-}
+// ---------------------------------------------------------------- groups --
+//
+// A GROUP is a heading plus the parameters that affect the attribute the
+// heading names. It is presentation, not arithmetic: the panel shows those
+// controls together, under the user's own word for the quality, and each
+// control edits its own option directly.
+//
+// This replaces a weighted-knob model in which the model invented a set of
+// targets and weights per turn and the page moved every target by
+// direction x weight x (value - base) x range. That was doing too much at
+// once -- inventing the relationships, hiding the real numbers behind a
+// slider, and re-deriving both every turn -- and the user could not see
+// what a knob would actually do. The relationships now live in
+// attributes.js, and nothing transforms anyone's values.
 
 function slotObj(scene, elementId, slot) {
   const tex = scene.textures[elementId];
   return tex && tex[slot] && tex[slot].fn ? tex[slot] : null;
 }
 
-/** What an abstraction target ({elementId, slot, option}) actually names:
- * the slot's own brush/stamp option, or -- fill slots only -- a numeric
- * field of the fill's own PATTERN (hatch's gap/angleDeg, grid's dx/dy,
- * diamond's diag/fillGap). A fill has two independently-named option
- * spaces (its brush AND its pattern); the brush is checked first, so a
- * name that happens to exist on both (there are none today, but a future
- * brush/pattern pair could collide) resolves to the brush. Returns null
- * if `option` isn't a recognized numeric field in either space. */
-export function resolveTarget(scene, elementId, slot, option) {
+/** What a group member names, and where its value lives.
+ *
+ * A member is {level, elementId?, slot?, option}:
+ *   level "graphic"  a property of the whole graphic -- only `scale`
+ *   level "brush"    an option of the brush/stamp in that slot
+ *   level "pattern"  a fill pattern's own numeric field
+ *
+ * For a fill slot the brush and the pattern are two independently-named
+ * spaces; "brush" and "pattern" say which, and resolveMember accepts
+ * either spelling by looking the name up when `level` is absent (the
+ * model does not have to know). Returns null when the option is not a
+ * recognized numeric field of the texture actually in that slot. */
+export function resolveMember(scene, member) {
+  const { elementId, slot, option } = member || {};
+  if (member?.level === "graphic" || (!elementId && !slot)) {
+    if (option !== "scale") return null;
+    return { level: "graphic", spec: GRAPHIC_OPTIONS.scale, location: "graphic" };
+  }
   const s = slotObj(scene, elementId, slot);
   if (!s) return null;
+  const wantPattern = member.level === "pattern";
   const brushSpec = optionSpecFor(s.fn)[option];
-  if (brushSpec && brushSpec.min != null && brushSpec.max != null) {
-    return { s, location: "options", spec: brushSpec, span: brushSpec.max - brushSpec.min, isInt: brushSpec.kind === "int" };
-  }
+  if (!wantPattern && brushSpec) return { level: "brush", s, spec: brushSpec, location: "options" };
   if (slot === "fill" && s.pattern) {
     const patSpec = (PATTERN_OPTIONS[s.pattern.kind] || {})[option];
-    if (patSpec && patSpec.min != null && patSpec.max != null) {
-      return { s, location: "pattern", spec: patSpec, span: patSpec.max - patSpec.min, isInt: patSpec.kind === "int" };
-    }
+    if (patSpec) return { level: "pattern", s, spec: patSpec, location: "pattern" };
   }
+  // asked for a pattern option that does not exist; fall back to the brush
+  if (wantPattern && brushSpec) return { level: "brush", s, spec: brushSpec, location: "options" };
   return null;
 }
 
-/** Which named bag (`s.options`/`s.bases` or `s.pattern`/`s.patternBases`)
- * a resolved target's value and rebase-base live in. */
-function targetBags(target) {
-  const { s, location } = target;
-  return location === "pattern"
-    ? { values: (s.pattern = s.pattern || {}), bases: (s.patternBases = s.patternBases || {}) }
-    : { values: (s.options = s.options || {}), bases: (s.bases = s.bases || {}) };
+/** Graphic-level parameters a group may surface. `scale` is stored as a
+ * multiplier on the transform; the panel shows it as a percentage. */
+export const GRAPHIC_OPTIONS = {
+  scale: { kind: "num", def: 1, min: 0.1, max: 4, step: 0.05 },
+};
+
+/** Read / write a resolved member's current value. */
+export function memberValue(scene, member) {
+  const r = resolveMember(scene, member);
+  if (!r) return undefined;
+  if (r.location === "graphic") return scene.transform.scale;
+  const bag = r.location === "pattern" ? r.s.pattern : r.s.options;
+  return (bag || {})[member.option];
 }
 
-/** Sum over every abstraction of direction * weight * (value - v0) * span
- * for one option. */
-export function abstractionContribution(scene, elementId, slot, option) {
-  let total = 0;
-  const target = resolveTarget(scene, elementId, slot, option);
-  if (!target) return 0;
-  for (const a of scene.abstractions) {
-    const targets = Array.isArray(a.targets) ? a.targets : [];
-    const w = normalizedWeights(targets);
-    targets.forEach((t, i) => {
-      if (t.elementId !== elementId || t.slot !== slot || t.option !== option) return;
-      const dir = Number(t.direction) < 0 ? -1 : 1;
-      total += dir * w[i] * ((Number(a.value) || 0) - (Number(a.v0) || 0)) * target.span;
-    });
+export function setMemberValue(scene, member, value) {
+  const r = resolveMember(scene, member);
+  if (!r) return false;
+  if (r.location === "graphic") {
+    if (Number(value) > 0) scene.transform.scale = Number(value);
+    return true;
   }
-  return total;
+  const bag = r.location === "pattern" ? (r.s.pattern = r.s.pattern || {}) : (r.s.options = r.s.options || {});
+  if (value === null || value === undefined || value === "") delete bag[member.option];
+  else bag[member.option] = value;
+  return true;
 }
 
-/** The abstraction rule: option = clamp(base + contributions, min, max)
- * for every option some abstraction targets -- the option may live on
- * the slot's brush or (fill only) its pattern, see resolveTarget().
- * `base` is stored alongside it (set from the parameters stage, or
- * rebased by a manual edit). Mutates the scene in place. */
-export function applyAbstractions(scene) {
-  const driven = new Set();
-  for (const a of scene.abstractions) for (const t of a.targets || []) driven.add(`${t.elementId} ${t.slot} ${t.option}`);
-  for (const key of driven) {
-    const [elementId, slot, option] = key.split(" ");
-    const target = resolveTarget(scene, elementId, slot, option);
-    if (!target) continue;
-    const { values, bases } = targetBags(target);
-    if (bases[option] == null) {
-      const cur = values[option];
-      bases[option] = Number.isFinite(Number(cur)) && cur !== null && cur !== "" ? Number(cur) : (target.spec.def ?? target.spec.min);
-    }
-    let v = bases[option] + abstractionContribution(scene, elementId, slot, option);
-    v = Math.min(target.spec.max, Math.max(target.spec.min, v));
-    v = target.isInt ? Math.round(v) : +v.toFixed(3);
-    values[option] = v;
-  }
+/** Which named bag a member's value lives in -- "graphic", "options" or
+ * "pattern". The panel needs it to read and write the right place. */
+export function memberLocation(scene, member) {
+  return resolveMember(scene, member)?.location ?? null;
 }
 
-/** A manual edit of a driven option keeps the sliders where they are:
- * base = edited - contributions. */
-export function rebaseOption(scene, elementId, slot, option, value) {
-  const target = resolveTarget(scene, elementId, slot, option);
-  if (!target) return;
-  targetBags(target).bases[option] = value - abstractionContribution(scene, elementId, slot, option);
+/** The groups that surface a given option (so the panel can list
+ * everything no group claims). */
+export function groupsOf(scene, elementId, slot, option) {
+  return (scene.groups || []).filter((g) => (g.members || []).some((m) => m.elementId === elementId && m.slot === slot && m.option === option));
 }
 
-/** Which named bag ("options" or "pattern") an abstraction target's value
- * lives in -- the UI needs this to read/write the right place. */
-export function targetLocation(scene, elementId, slot, option) {
-  const target = resolveTarget(scene, elementId, slot, option);
-  return target ? target.location : null;
-}
-
-/** Which abstractions drive a given option (for grouping in the UI). */
-export function driversOf(scene, elementId, slot, option) {
+/** Every parameter in the scene that the table says affects `attribute`,
+ * as ready-made members. Offered to the ui stage so it confirms and prunes
+ * a real list rather than authoring one from memory. */
+export function expandAttribute(scene, attribute, ids = null) {
   const out = [];
-  for (const a of scene.abstractions) {
-    const targets = Array.isArray(a.targets) ? a.targets : [];
-    const w = normalizedWeights(targets);
-    targets.forEach((t, i) => { if (t.elementId === elementId && t.slot === slot && t.option === option) out.push({ abstraction: a, weight: w[i], direction: Number(t.direction) < 0 ? -1 : 1 }); });
+  const seen = new Set();
+  const add = (member, inf) => {
+    const key = `${member.level} ${member.elementId || ""} ${member.slot || ""} ${member.option}`;
+    if (seen.has(key)) return;
+    const r = resolveMember(scene, member);
+    // The level must match what the influence meant, not merely resolve.
+    // resolveMember is deliberately lenient for model output (a name is
+    // looked up in whichever space has it), and that leniency would offer
+    // nonsense here: "gap" as a hairiness parameter means a hairy-dot
+    // brush's gap, but on a solid-brush fill the same name falls through
+    // to the hatch pattern's row spacing, which has nothing to do with hair.
+    if (!r || r.level !== inf.level) return;
+    seen.add(key);
+    out.push({ ...member, direction: inf.direction, strength: inf.strength, note: inf.note || "" });
+  };
+  for (const inf of influencesOf(attribute)) {
+    if (inf.level === "graphic") { add({ level: "graphic", option: inf.option }, inf); continue; }
+    for (const el of scene.elements) {
+      if (ids && !ids.includes(el.id)) continue;
+      for (const slot of slotsFor(el.kind)) {
+        add({ level: inf.level, elementId: el.id, slot, option: inf.option }, inf);
+      }
+    }
   }
-  return out;
+  // primary controls first, then in scene order
+  return out.sort((a, b) => (a.strength === b.strength ? 0 : a.strength === "primary" ? -1 : 1));
 }
 
-/** Drop targets whose element/slot/option no longer exists (after a
- * geometry or texture change). Returns the dropped targets' descriptions. */
-export function pruneAbstractions(scene) {
+/** The attribute reference for the ui stage's prompt, generated from the
+ * table so the prompt and the validator can never disagree about what
+ * affects what. */
+export function attributeGuideText() {
+  const lines = [
+    "ATTRIBUTES AND WHAT AFFECTS THEM",
+    "",
+    "These are the qualities a person reaches for, and the parameters that",
+    "move each one. A group for a named attribute may surface ONLY the",
+    "parameters listed under it (the app rejects anything else); a `custom`",
+    "group may surface anything, with a reason.",
+    "",
+  ];
+  for (const [key, a] of Object.entries(ATTRIBUTES)) {
+    lines.push(`${key} -- ${a.description}`);
+    lines.push(`  the user might say: ${a.aliases.join(", ")}`);
+    for (const i of a.influences) {
+      const where = i.level === "graphic" ? "graphic" : `${i.level} option`;
+      lines.push(`    ${i.option} (${where}, ${i.strength}): ${i.direction > 0 ? "raising it raises" : "raising it lowers"} ${key}${i.note ? ` -- ${i.note}` : ""}`);
+    }
+    for (const c of a.cautions || []) lines.push(`    ! ${c}`);
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
+/** Drop members whose element/slot/option no longer exists (after a
+ * geometry or texture change), then empty groups. Returns descriptions of
+ * what was dropped. */
+export function pruneGroups(scene) {
   const dropped = [];
-  for (const a of scene.abstractions) {
-    a.targets = (a.targets || []).filter((t) => {
-      const ok = !!resolveTarget(scene, t.elementId, t.slot, t.option);
-      if (!ok) dropped.push(`${a.name}: ${t.elementId}.${t.slot}.${t.option}`);
+  for (const g of scene.groups || []) {
+    g.members = (g.members || []).filter((m) => {
+      const ok = !!resolveMember(scene, m);
+      if (!ok) dropped.push(`${g.title}: ${m.elementId || "graphic"}.${m.slot || ""}.${m.option}`);
       return ok;
     });
   }
-  scene.abstractions = scene.abstractions.filter((a) => a.targets.length);
+  scene.groups = (scene.groups || []).filter((g) => g.members.length);
   return dropped;
 }
 
@@ -1474,8 +1516,8 @@ export function sceneSummary(scene) {
       : el.kind === "line" && Array.isArray(el.paths) ? el.paths.length : null;
     lines.push(`${el.id} "${el.label || ""}" ${el.kind}${groupCount != null ? ` (group of ${groupCount})` : ""}${el.role ? ` role=${el.role}` : ""}${parts.length ? ` [${parts.join(", ")}]` : " [no texture]"}`);
   }
-  if (scene.abstractions.length) {
-    lines.push("abstractions: " + scene.abstractions.map((a) => `${a.id} "${a.name}"=${Number(a.value).toFixed(2)} -> ${(a.targets || []).map((t) => `${t.elementId}.${t.slot}.${t.option}`).join(", ")}`).join("; "));
+  if ((scene.groups || []).length) {
+    lines.push("surfaced parameter groups: " + scene.groups.map((g) => `${g.id} "${g.title}" (${g.attribute}) -> ${(g.members || []).map((m) => `${m.elementId || "graphic"}.${m.option}`).join(", ")}`).join("; "));
   }
   return lines.join("\n");
 }
@@ -1526,7 +1568,7 @@ export function optionSpecsText(scene, ids = null) {
   for (const fn of fns) blocks.push(`${fn} (${isBrush(fn) ? "line brush" : "stamp"}):\n${specRows(optionSpecFor(fn)).join("\n")}`);
   // A fill has TWO option spaces: its brush's own options (above) and its
   // pattern's own numeric fields -- both are valid targets for an
-  // abstraction or a direct options edit on that same {elementId, slot:
+  // group member or a direct options edit on that same {elementId, slot:
   // "fill"} pair; the app tells them apart by name, not by anything you
   // need to say.
   for (const kind of patternKinds) blocks.push(`${kind} (fill pattern, on any "fill" slot using it):\n${specRows(PATTERN_OPTIONS[kind]).join("\n")}`);
@@ -1567,10 +1609,11 @@ export function validateStageOutput(stage, out, scene) {
   if (!out || typeof out !== "object") return { value: null, errors: ["output is not an object"] };
 
   if (stage === "route") {
-    const route = ["geometry", "texture", "parameters", "chat"].includes(out.route) ? out.route : null;
-    if (!route) errors.push(`route must be geometry|texture|parameters|chat (got "${out.route}")`);
+    const route = ["geometry", "texture", "ui", "chat"].includes(out.route) ? out.route : null;
+    if (!route) errors.push(`route must be geometry|texture|ui|chat (got "${out.route}")`);
     const targets = Array.isArray(out.targets) ? out.targets.filter((t) => ids.has(t)) : [];
-    return { value: { route, instruction: String(out.instruction || ""), targets, reply: String(out.reply || "") }, errors };
+    const acceptance = (Array.isArray(out.acceptance) ? out.acceptance : []).map((a) => String(a || "").trim()).filter(Boolean);
+    return { value: { route, instruction: String(out.instruction || ""), targets, acceptance, reply: String(out.reply || "") }, errors };
   }
 
   if (stage === "geometry") {
@@ -1580,7 +1623,7 @@ export function validateStageOutput(stage, out, scene) {
       const what = `element ${i + 1}`;
       const g = parseJsonField(e.geometry, `${what} geometry`, errors, {});
       let id = typeof e.id === "string" && e.id.trim() ? e.id.trim() : "";
-      if (!id || seen.has(id)) id = nextId({ elements: [...scene.elements, ...elements], abstractions: [] }, "el");
+      if (!id || seen.has(id)) id = nextId({ elements: [...scene.elements, ...elements], groups: [] }, "el");
       seen.add(id);
       const el = { id, label: String(e.label || id), kind: e.kind, role: String(e.role || "") };
       if (e.kind === "line") { if (Array.isArray(g.paths)) el.paths = g.paths; else el.path = g.path; }
@@ -1610,58 +1653,92 @@ export function validateStageOutput(stage, out, scene) {
           else if (STAMP_PATTERNS.includes(pattern.kind) ? !isStamp(fn) : !isBrush(fn)) errors.push(`${what}: pattern "${pattern.kind}" needs a ${STAMP_PATTERNS.includes(pattern.kind) ? "stamp" : "line brush"}, got "${fn}"`);
         }
       }
-      textures.push({ elementId: t.elementId, slot: t.slot, fn, pattern });
+      // The texture stage sets the numbers for the texture it chose --
+      // the brush's own options and, for a fill, its pattern's fields,
+      // named the same way and sorted out here. Choosing a texture and
+      // choosing its values is one decision ("a hairy fill, strands about
+      // 4mm apart"); splitting them across two calls meant the stage that
+      // picked the texture could not say what it had in mind.
+      const values = parseJsonField(t.options, `${what} options`, errors, {});
+      const clean = {}, patternClean = {};
+      if (fn) {
+        const spec = optionSpecFor(fn);
+        const patSpec = t.slot === "fill" && pattern ? (PATTERN_OPTIONS[pattern.kind] || {}) : {};
+        for (const [k, v] of Object.entries(values || {})) {
+          const meta = spec[k] || patSpec[k];
+          if (!meta) { errors.push(`${what}: "${k}" is not an option of ${fn}${Object.keys(patSpec).length ? ` or its ${pattern.kind} pattern` : ""}`); continue; }
+          const c = coerceOptionValue(meta, v);
+          if (c.error) { errors.push(`${what}: "${k}" ${c.error} (got ${JSON.stringify(v)})`); continue; }
+          if (c.skip) continue;
+          if (k in spec) clean[k] = c.value; else patternClean[k] = c.value;
+        }
+      }
+      textures.push({ elementId: t.elementId, slot: t.slot, fn, pattern, options: clean, patternOptions: patternClean });
     });
     return { value: { chat: String(out.chat || ""), textures }, errors };
   }
 
-  if (stage === "parameters") {
-    const options = [];
-    (Array.isArray(out.options) ? out.options : []).forEach((o, i) => {
-      const what = `options ${i + 1}`;
-      const s = slotObj(scene, o.elementId, o.slot);
-      if (!s) { errors.push(`${what}: ${o.elementId}.${o.slot} has no texture`); return; }
-      const opts = parseJsonField(o.options, what, errors, {});
-      const spec = optionSpecFor(s.fn);
-      // A fill slot has two independently-named option spaces: its brush's
-      // own options, and its pattern's own numeric fields (hatch's gap,
-      // grid's dx/dy, diamond's diag/fillGap) -- route each name to
-      // whichever it belongs to (see resolveTarget()).
-      const patSpec = o.slot === "fill" && s.pattern ? (PATTERN_OPTIONS[s.pattern.kind] || {}) : {};
-      const clean = {}, patternClean = {};
-      for (const [k, v] of Object.entries(opts || {})) {
-        const meta = spec[k] || patSpec[k];
-        if (!meta) { errors.push(`${what}: "${k}" is not an option of ${s.fn}${Object.keys(patSpec).length ? ` or its ${s.pattern.kind} pattern` : ""}`); continue; }
-        const c = coerceOptionValue(meta, v);
-        if (c.error) { errors.push(`${what}: "${k}" ${c.error} (got ${JSON.stringify(v)})`); continue; }
-        if (c.skip) continue;
-        if (k in spec) clean[k] = c.value; else patternClean[k] = c.value;
-      }
-      options.push({ elementId: o.elementId, slot: o.slot, options: clean, patternOptions: patternClean });
-    });
-    const abstractions = [];
+  if (stage === "ui") {
+    const groups = [];
     const seen = new Set();
-    (Array.isArray(out.abstractions) ? out.abstractions : []).forEach((a, i) => {
-      const what = `abstraction ${i + 1}`;
-      const targetsRaw = parseJsonField(a.targets, `${what} targets`, errors, []);
-      const targets = [];
-      (Array.isArray(targetsRaw) ? targetsRaw : []).forEach((t) => {
-        const s = slotObj(scene, t.elementId, t.slot);
-        if (!s) { errors.push(`${what}: target ${t.elementId}.${t.slot} has no texture`); return; }
-        if (!resolveTarget(scene, t.elementId, t.slot, t.option)) {
-          const patHint = t.slot === "fill" && s.pattern ? ` or its ${s.pattern.kind} pattern` : "";
-          errors.push(`${what}: "${t.option}" is not a numeric option of ${s.fn}${patHint}`);
+    (Array.isArray(out.groups) ? out.groups : []).forEach((g, i) => {
+      const what = `group ${i + 1}`;
+      const attribute = String(g.attribute || "").trim();
+      if (attribute !== CUSTOM_ATTRIBUTE && !ATTRIBUTE_KEYS.includes(attribute)) {
+        errors.push(`${what}: attribute must be one of ${ATTRIBUTE_KEYS.join(", ")} or "${CUSTOM_ATTRIBUTE}" (got "${g.attribute}")`);
+        return;
+      }
+      const membersRaw = parseJsonField(g.members, `${what} members`, errors, []);
+      const members = [];
+      (Array.isArray(membersRaw) ? membersRaw : []).forEach((m, j) => {
+        const where = `${what} member ${j + 1}`;
+        const resolved = resolveMember(scene, m);
+        if (!resolved) {
+          const s0 = m.elementId ? slotObj(scene, m.elementId, m.slot) : null;
+          errors.push(`${where}: "${m.option}" is not a parameter of ${m.level === "graphic" || !m.elementId ? "the graphic" : `${m.elementId}.${m.slot}${s0 ? ` (${s0.fn})` : " (no texture)"}`}`);
           return;
         }
-        targets.push({ elementId: t.elementId, slot: t.slot, option: t.option, weight: Number(t.weight), direction: Number(t.direction) < 0 ? -1 : 1 });
+        // A named attribute may only surface what the influence table says
+        // affects it. This is the whole point of the table: the model
+        // chooses which of the real relationships to show, it does not get
+        // to assert a new one. "custom" is the way to surface anything
+        // else, and it has to be named as such.
+        const inf = attribute === CUSTOM_ATTRIBUTE ? null : influenceFor(attribute, resolved.level, m.option);
+        if (attribute !== CUSTOM_ATTRIBUTE && !inf) {
+          errors.push(`${where}: "${m.option}" is not listed as affecting ${attribute} -- surface it under a "custom" group with a reason, or drop it`);
+          return;
+        }
+        const control = m.control && typeof m.control === "object" ? m.control : {};
+        const spec = resolved.spec;
+        const narrowed = {};
+        for (const k of ["min", "max"]) {
+          const v = Number(control[k]);
+          if (!Number.isFinite(v)) continue;
+          if (spec.min != null && spec.max != null && (v < spec.min || v > spec.max)) {
+            errors.push(`${where}: control ${k} ${v} is outside "${m.option}"'s own range ${spec.min}..${spec.max}`);
+            continue;
+          }
+          narrowed[k] = v;
+        }
+        if (narrowed.min != null && narrowed.max != null && !(narrowed.max > narrowed.min)) {
+          errors.push(`${where}: control min must be below control max`);
+          return;
+        }
+        members.push({
+          level: resolved.level,
+          ...(resolved.level === "graphic" ? {} : { elementId: m.elementId, slot: m.slot }),
+          option: m.option,
+          direction: Number(m.direction) < 0 ? -1 : (inf ? inf.direction : 1),
+          note: String(m.note || inf?.note || ""),
+          control: { label: String(control.label || m.option), ...narrowed },
+        });
       });
-      let id = typeof a.id === "string" && a.id.trim() ? a.id.trim() : "";
-      if (!id || seen.has(id)) id = nextId({ elements: scene.elements, abstractions: [...scene.abstractions, ...abstractions] }, "ab");
+      let id = typeof g.id === "string" && g.id.trim() ? g.id.trim() : "";
+      if (!id || seen.has(id)) id = nextId({ elements: scene.elements, groups: [...(scene.groups || []), ...groups] }, "gr");
       seen.add(id);
-      const value = Number.isFinite(Number(a.value)) ? Math.min(1, Math.max(0, Number(a.value))) : 0.5;
-      if (targets.length) abstractions.push({ id, name: String(a.name || id), description: String(a.description || ""), value, v0: value, targets });
+      if (members.length) groups.push({ id, title: String(g.title || attribute), attribute, description: String(g.description || ""), members });
     });
-    return { value: { chat: String(out.chat || ""), options, abstractions }, errors };
+    return { value: { chat: String(out.chat || ""), groups }, errors };
   }
 
   return { value: null, errors: [`unknown stage "${stage}"`] };
@@ -1669,8 +1746,8 @@ export function validateStageOutput(stage, out, scene) {
 
 // ------------------------------------------------------------------ merge --
 
-/** Geometry stage output -> scene. Keeps textures/abstractions for ids
- * that survive; drops the rest (pruned targets are returned). */
+/** Geometry stage output -> scene. Keeps the textures and groups of ids
+ * that survive; drops the rest (what was pruned is returned). */
 export function mergeGeometry(scene, value) {
   scene.elements = value.elements;
   const ids = new Set(scene.elements.map((e) => e.id));
@@ -1685,11 +1762,13 @@ export function mergeGeometry(scene, value) {
     if (Array.isArray(value.transform.origin) && value.transform.origin.length === 2) scene.transform.origin = value.transform.origin.map(Number);
     else if (value.transform.origin === null) scene.transform.origin = null;
   }
-  return pruneAbstractions(scene);
+  return pruneGroups(scene);
 }
 
-/** Texture stage output -> scene. fn "" clears a slot; a changed fn resets
- * options to {} (the parameters stage runs next). */
+/** Texture stage output -> scene: the brush/stamp, the fill pattern, and
+ * the option values for both. Keeping a slot's existing values when the fn
+ * is unchanged means "make it hairier" can adjust one number without the
+ * stage having to restate the rest. `fn` of "" clears the slot. */
 export function mergeTextures(scene, value) {
   for (const t of value.textures) {
     scene.textures[t.elementId] = scene.textures[t.elementId] || {};
@@ -1697,27 +1776,22 @@ export function mergeTextures(scene, value) {
     if (!t.fn) { delete tex[t.slot]; continue; }
     const prev = tex[t.slot];
     const same = prev && prev.fn === t.fn;
-    tex[t.slot] = {
-      fn: t.fn, options: same ? prev.options : {}, bases: same ? prev.bases : {},
-      ...(t.slot === "fill" ? { pattern: t.pattern, patternBases: same ? prev.patternBases : {} } : {}),
-    };
+    const options = { ...(same ? prev.options || {} : {}), ...(t.options || {}) };
+    const slot = { fn: t.fn, options };
+    if (t.slot === "fill") {
+      const samePattern = same && prev.pattern && t.pattern && prev.pattern.kind === t.pattern.kind;
+      slot.pattern = { ...(samePattern ? prev.pattern : {}), ...(t.pattern || {}), ...(t.patternOptions || {}) };
+    }
+    tex[t.slot] = slot;
   }
-  return pruneAbstractions(scene);
+  return pruneGroups(scene);
 }
 
-/** Parameters stage output -> scene: options (brush and, for a fill,
- * pattern) become the new bases, the abstraction list is replaced, then
- * the rule is applied. */
-export function mergeParameters(scene, value) {
-  for (const o of value.options) {
-    const s = slotObj(scene, o.elementId, o.slot);
-    if (!s) continue;
-    s.options = { ...(s.options || {}), ...o.options };
-    if (o.patternOptions && Object.keys(o.patternOptions).length) s.pattern = { ...(s.pattern || {}), ...o.patternOptions };
-    s.bases = {};
-    s.patternBases = {};
-  }
-  scene.abstractions = value.abstractions;
-  for (const s of Object.values(scene.textures)) for (const slot of Object.values(s)) if (slot && typeof slot === "object") { slot.bases = {}; slot.patternBases = {}; }
-  applyAbstractions(scene);
+/** UI stage output -> scene. Groups are presentation only: they say what
+ * the panel surfaces and under which heading. Nothing here touches a
+ * value, which is exactly the point -- the numbers are the texture
+ * stage's, and what the user sees in the panel is those same numbers. */
+export function mergeUi(scene, value) {
+  scene.groups = value.groups;
+  return pruneGroups(scene);
 }

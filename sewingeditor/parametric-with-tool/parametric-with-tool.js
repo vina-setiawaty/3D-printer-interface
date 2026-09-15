@@ -1,14 +1,14 @@
 // parametric-with-tool.html -- four-stage LLM pipeline for tactile graphics.
 //
 // Column 1: a multi-turn chat. Column 2: the parameter panel (global
-// transform, elements with their textures, high-level abstraction knobs,
-// remaining brush options). Column 3: the geometry report, the print
+// transform, elements with their textures, the parameter groups the ui
+// stage surfaced, and the full option list). Column 3: the geometry report, the print
 // digest and the generated G-code (the shared #raw-gcode-textarea +
 // run/save wiring from script.js).
 //
 // A user message goes to the ROUTE stage, which rewrites it as a
 // self-contained instruction and picks the entry stage; the page then
-// chains geometry -> texture -> parameters (or a suffix of that), calling
+// chains geometry -> texture -> ui (or a suffix of that), calling
 // the chosen provider (OpenAI or Anthropic) DIRECTLY from the browser with
 // a key the user enters (see stage-schemas.js for per-stage schemas/token
 // budgets and llm.js's callLlmDirect for the request itself -- no Vercel
@@ -30,13 +30,13 @@ const STORAGE_KEY = "parametricWithToolSessionState";
 const DEBUG_LOG_KEY = "parametricWithToolDebugLog";
 const DEBUG_LOG_MAX_TURNS = 15;   // localStorage is finite; keep the most recent turns
 
-const CHAIN = { geometry: ["geometry", "texture", "parameters"], texture: ["texture", "parameters"], parameters: ["parameters"], chat: [] };
-const STAGE_LABEL = { route: "routing", geometry: "geometry", texture: "texture", parameters: "parameters" };
+const CHAIN = { geometry: ["geometry", "texture", "ui"], texture: ["texture", "ui"], ui: ["ui"], chat: [] };
+const STAGE_LABEL = { route: "routing", geometry: "geometry", texture: "texture", ui: "controls" };
 // A *-check call reuses the "geometry"/"texture" output validator (same
 // per-item shape -- see api/parametric-stage.js's shared item schemas);
 // only the top-level `ok` boolean is read separately, straight off the
 // raw parsed JSON, since it has no nested-JSON field that needs parsing.
-const VALIDATOR_FOR_STAGE = { route: "route", geometry: "geometry", "geometry-check": "geometry", texture: "texture", "texture-check": "texture", parameters: "parameters" };
+const VALIDATOR_FOR_STAGE = { route: "route", geometry: "geometry", "geometry-check": "geometry", texture: "texture", "texture-check": "texture", ui: "ui" };
 // Fill pattern kinds whose coordinates the model writes itself -- these
 // are the only ones worth a texture-check pass; hatch/grid/diamond are
 // recomputed deterministically from the region and can't be "wrong".
@@ -312,7 +312,7 @@ function selfCheckEnabled() { return $("#pg-self-check").value === "on"; }
 // patch anything wrong. Returns the (possibly patched) elements and a
 // chat note to show, or null if nothing changed.
 async function checkGeometry(step, total, instruction, elements, transform) {
-  const draft = { elements, textures: {}, transform, config: scene.config, abstractions: [] };
+  const draft = { elements, textures: {}, transform, config: scene.config, groups: [] };
   let compiled;
   try { compiled = C.compileScene(draft); } catch (e) { return { elements, note: null }; }
   const worthChecking = compiled.errors.length > 0 || compiled.warnings.length > 0 ||
@@ -350,7 +350,7 @@ async function checkTexture(step, total, instruction, textures) {
   const worthChecking = textures.some((t) => t.slot === "fill" && t.pattern && FREEFORM_PATTERN_KINDS.includes(t.pattern.kind));
   if (!selfCheckEnabled() || !worthChecking) return { textures, note: null };
 
-  const draft = { elements: scene.elements, textures: structuredClone(scene.textures), transform: scene.transform, config: scene.config, abstractions: structuredClone(scene.abstractions) };
+  const draft = { elements: scene.elements, textures: structuredClone(scene.textures), transform: scene.transform, config: scene.config, groups: structuredClone(scene.groups || []) };
   C.mergeTextures(draft, { textures });
   let compiled;
   try { compiled = C.compileScene(draft); } catch (e) { return { textures, note: null }; }
@@ -422,10 +422,10 @@ async function runChain() {
     let dropped = [];
     if (stage === "geometry") dropped = C.mergeGeometry(scene, value);
     else if (stage === "texture") dropped = C.mergeTextures(scene, value);
-    else if (stage === "parameters") C.mergeParameters(scene, value);
+    else if (stage === "ui") dropped = C.mergeUi(scene, value);
     pending.remaining.shift();
     rerenderAll();
-    if (dropped.length) showMessages([`dropped abstraction targets that no longer apply: ${escapeHtml(dropped.join(", "))}`]);
+    if (dropped.length) showMessages([`dropped surfaced controls that no longer apply: ${escapeHtml(dropped.join(", "))}`]);
   }
   pending = null;
   setBusy(false);
@@ -509,11 +509,10 @@ function renderPanel() {
   el.appendChild(elsTitle);
   if (!scene.elements.length) el.appendChild(note("elements appear here after the AI proposes a graphic"));
   scene.elements.forEach((element, idx) => el.appendChild(renderElementCard(element, idx)));
-  el.appendChild(section("high-level parameters"));
-  if (!scene.abstractions.length) el.appendChild(note("the parameters stage proposes knobs like hairiness or density here"));
-  scene.abstractions.forEach((a) => el.appendChild(renderAbstractionCard(a)));
-  el.appendChild(section("other brush options"));
-  el.appendChild(renderOtherOptions());
+  el.appendChild(section("surfaced controls"));
+  if (!(scene.groups || []).length) el.appendChild(note("the controls stage groups the parameters that matter here, under the quality they affect"));
+  (scene.groups || []).forEach((g) => el.appendChild(renderGroupCard(g)));
+  el.appendChild(renderAllOptions());
 }
 
 function section(title) {
@@ -601,7 +600,7 @@ function renderElementCard(el, idx) {
   del.onclick = () => {
     scene.elements.splice(idx, 1);
     delete scene.textures[el.id];
-    C.pruneAbstractions(scene);
+    C.pruneGroups(scene);
     saveScene(); rerenderAll();
   };
   c.querySelector(".pg-call-head").appendChild(del);
@@ -817,7 +816,7 @@ function renderSlotEditor(el, tex, slot) {
   g.appendChild(renderField(wantsStamp ? "stamp" : "brush", { kind: "enum", options: names, def: "(none)" }, s?.fn || "(none)", (v) => {
     if (v === "(none)") delete tex[slot];
     else if (!s || s.fn !== v) tex[slot] = { fn: v, options: {}, bases: {}, ...(isFill ? { pattern: pat } : {}) };
-    C.pruneAbstractions(scene);
+    C.pruneGroups(scene);
     saveScene(); rerenderAll();
   }));
   if (isFill) {
@@ -833,16 +832,17 @@ function renderSlotEditor(el, tex, slot) {
         const needStamp = C.STAMP_PATTERNS.includes(kind);
         if (needStamp !== C.isStamp(s.fn)) { s.fn = needStamp ? "blob" : "solid"; s.options = {}; s.bases = {}; }
       }
-      C.pruneAbstractions(scene);
+      C.pruneGroups(scene);
       saveScene(); rerenderAll();
     }));
     if (s) {
       const spec = C.PATTERN_OPTIONS[pat.kind];
       if (spec) {
-        // Route through optionField so a pattern value an abstraction also
-        // drives (e.g. a "density" knob targeting hatch's gap) rebases
-        // instead of fighting the slider on the next applyAbstractions().
-        for (const k of Object.keys(spec)) g.appendChild(optionField(k, spec[k], { elementId: el.id, slot, option: k }, s));
+        // level "pattern" explicitly: a fill's brush and its pattern are
+        // separately-named spaces, and some names exist in both (a
+        // blobDotted fill and a hatch pattern both have "gap"). These
+        // fields are the pattern's.
+        for (const k of Object.keys(spec)) g.appendChild(optionField(k, spec[k], { level: "pattern", elementId: el.id, slot, option: k }, s));
       } else {
         const { kind, ...rest } = pat;
         g.appendChild(jsonField(`${kind} spec (JSON)`, rest, (v) => { if (v && typeof v === "object") { s.pattern = { kind, ...v }; saveScene(); scheduleRerun(); } }));
@@ -853,113 +853,124 @@ function renderSlotEditor(el, tex, slot) {
   return wrap;
 }
 
-// --- abstractions ---
+// --- surfaced parameter groups ---
 
-function optKey(t) { return `${t.elementId} ${t.slot} ${t.option}`; }
-
-function renderAbstractionCard(a) {
-  const c = card(a.name, a.id);
+// A group is a heading plus the parameters that affect the quality it
+// names. Each control edits its own option directly: no knob, no weights,
+// nothing between the number shown and the number printed. The direction
+// arrow says which way the quality goes as the value rises, which is the
+// part a weighted knob used to hide.
+function renderGroupCard(group) {
+  const c = card(group.title, group.attribute === C.CUSTOM_ATTRIBUTE ? "custom" : group.attribute);
   const del = document.createElement("span");
   del.className = "pg-call-del";
   del.textContent = "remove";
-  del.onclick = () => { scene.abstractions = scene.abstractions.filter((x) => x !== a); saveScene(); rerenderAll(); };
+  del.onclick = () => { scene.groups = scene.groups.filter((x) => x !== group); saveScene(); rerenderAll(); };
   c.querySelector(".pg-call-head").appendChild(del);
-  if (a.description) { const p = document.createElement("div"); p.className = "pg-desc"; p.textContent = a.description; c.appendChild(p); }
-
-  const row = document.createElement("label");
-  row.className = "pg-field pg-field-wide pg-slider";
-  const val = document.createElement("span");
-  val.textContent = Number(a.value).toFixed(2);
-  const inp = document.createElement("input");
-  inp.type = "range"; inp.min = 0; inp.max = 1; inp.step = 0.01; inp.value = a.value;
-  inp.oninput = () => {
-    a.value = parseFloat(inp.value);
-    val.textContent = a.value.toFixed(2);
-    C.applyAbstractions(scene);
-    refreshDrivenInputs();
-    saveScene();
-    scheduleRerun();
-  };
-  row.appendChild(val);
-  row.appendChild(inp);
-  c.appendChild(row);
-
+  if (group.description) {
+    const p = document.createElement("div");
+    p.className = "pg-desc";
+    p.textContent = group.description;
+    c.appendChild(p);
+  }
   const g = fieldsGrid();
-  const weights = C.normalizedWeights(a.targets);
-  a.targets.forEach((t, i) => {
-    const s = scene.textures[t.elementId]?.[t.slot];
-    if (!s) return;
-    const el = scene.elements.find((e) => e.id === t.elementId);
-    // A fill's option and pattern spaces are named independently (see
-    // resolveTarget()) -- look in whichever one this target actually
-    // resolves to, so a knob driving e.g. hatch's own "gap" still renders.
-    const target = C.resolveTarget(scene, t.elementId, t.slot, t.option);
-    if (!target) return;
-    const label = `${el?.label || t.elementId} · ${t.slot} · ${t.option}  (${Number(t.direction) < 0 ? "−" : "+"}${(weights[i] * 100).toFixed(0)}%)`;
-    g.appendChild(optionField(label, target.spec, t, s));
-  });
+  let shown = 0;
+  for (const m of group.members || []) {
+    const f = memberField(m);
+    if (f) { g.appendChild(f); shown++; }
+  }
   c.appendChild(g);
+  if (!shown) c.appendChild(note("these controls no longer apply to the current textures"));
   return c;
 }
 
-// An option input bound to a scene slot -- the value may live on the
-// slot's own brush/stamp options, or (fill only) on its pattern's own
-// numeric fields (hatch's gap, grid's dx/dy, ...) -- see resolveTarget().
-// A manual edit of a driven option rebases it so the sliders stay put.
+// One control for one group member. `control.min`/`max` narrow the input
+// to what suits this scene; the option's own range still bounds it.
+function memberField(m) {
+  const loc = C.memberLocation(scene, m);
+  if (!loc) return null;
+  const r = C.resolveMember(scene, m);
+  const spec = { ...r.spec };
+  if (m.control?.min != null) spec.min = Math.max(spec.min ?? m.control.min, m.control.min);
+  if (m.control?.max != null) spec.max = Math.min(spec.max ?? m.control.max, m.control.max);
+
+  const el = m.elementId ? scene.elements.find((e) => e.id === m.elementId) : null;
+  const arrow = Number(m.direction) < 0 ? "↓" : "↑";
+  const where = m.level === "graphic" ? "whole graphic" : `${el?.label || m.elementId} · ${m.slot}`;
+  const label = `${m.control?.label || m.option} — ${where} ${arrow}`;
+
+  // The graphic's scale reads as a percentage everywhere else in the
+  // panel, so it does here too.
+  if (m.level === "graphic" && m.option === "scale") {
+    const f = renderField(label, { kind: "num", step: 5, min: (spec.min ?? 0.1) * 100, max: (spec.max ?? 4) * 100 },
+      +(scene.transform.scale * 100).toFixed(1), (v) => {
+        if (v != null && v > 0) scene.transform.scale = v / 100;
+        saveScene(); scheduleRerun();
+      });
+    if (m.note) f.title = m.note;
+    return f;
+  }
+
+  const f = renderField(label, spec, C.memberValue(scene, m), (v) => {
+    C.setMemberValue(scene, m, v);
+    saveScene(); scheduleRerun();
+  });
+  f.title = m.note || C.OPTION_DESC[m.option] || "";
+  return f;
+}
+
+// An option input bound to one texture slot, for the full option list
+// below. The value lives either on the slot's own brush/stamp options or
+// (fill only) on its pattern's own fields.
 function optionField(label, spec, t, s) {
-  const loc = () => C.targetLocation(scene, t.elementId, t.slot, t.option) || "options";
+  const loc = () => C.memberLocation(scene, t) || "options";
   const bagOf = (l) => (l === "pattern" ? s.pattern : s.options) || {};
   const f = renderField(label, spec, bagOf(loc())[t.option], (v) => {
     const l = loc();
     const bag = l === "pattern" ? (s.pattern = s.pattern || {}) : (s.options = s.options || {});
-    const bases = l === "pattern" ? s.patternBases : s.bases;
-    if (v === null || v === undefined || v === "") { delete bag[t.option]; if (bases) delete bases[t.option]; }
-    else {
-      bag[t.option] = v;
-      if (typeof v === "number") { C.rebaseOption(scene, t.elementId, t.slot, t.option, v); C.applyAbstractions(scene); refreshDrivenInputs(); }
-    }
+    if (v === null || v === undefined || v === "") delete bag[t.option];
+    else bag[t.option] = v;
     saveScene(); scheduleRerun();
   });
-  const input = f.querySelector("input,select");
-  if (input) input.dataset.opt = optKey(t);
   if (C.OPTION_DESC[t.option]) f.title = C.OPTION_DESC[t.option];
   return f;
 }
 
-function refreshDrivenInputs() {
-  document.querySelectorAll("[data-opt]").forEach((inp) => {
-    const [elementId, slot, option] = inp.dataset.opt.split(" ");
-    const s = scene.textures[elementId]?.[slot];
-    if (!s) return;
-    const loc = C.targetLocation(scene, elementId, slot, option);
-    const bag = (loc === "pattern" ? s.pattern : s.options) || {};
-    const v = bag[option];
-    if (inp.type === "checkbox") inp.checked = !!v;
-    else if (document.activeElement !== inp) inp.value = v ?? "";
-  });
-}
+// Everything the groups do not surface, kept reachable but out of the way.
+// A group is a shortcut to the parameters that matter, never the only way
+// to reach one.
+function renderAllOptions() {
+  const details = document.createElement("details");
+  details.className = "pg-all-options";
+  const summary = document.createElement("summary");
+  details.appendChild(summary);
 
-function renderOtherOptions() {
   const wrap = document.createElement("div");
-  let any = false;
+  let count = 0;
   for (const el of scene.elements) {
     const tex = scene.textures[el.id] || {};
     for (const slot of C.slotsFor(el.kind)) {
       const s = tex[slot];
       if (!s?.fn) continue;
       const spec = C.optionSpecFor(s.fn);
-      const undriven = Object.keys(spec).filter((k) => !C.driversOf(scene, el.id, slot, k).length);
-      if (!undriven.length) continue;
-      any = true;
-      const c = card(`${el.label || el.id} · ${slot}`, s.fn);
+      const patSpec = slot === "fill" && s.pattern ? (C.PATTERN_OPTIONS[s.pattern.kind] || {}) : {};
+      const rows = [
+        ...Object.keys(spec).map((k) => ({ level: "brush", elementId: el.id, slot, option: k, spec: spec[k] })),
+        ...Object.keys(patSpec).map((k) => ({ level: "pattern", elementId: el.id, slot, option: k, spec: patSpec[k] })),
+      ].filter((m) => !C.groupsOf(scene, el.id, slot, m.option).length);
+      if (!rows.length) continue;
+      count += rows.length;
+      const c = card(`${el.label || el.id} · ${slot}`, s.fn + (patSpec && Object.keys(patSpec).length ? ` + ${s.pattern.kind}` : ""));
       const g = fieldsGrid();
-      for (const k of undriven) g.appendChild(optionField(k, spec[k], { elementId: el.id, slot, option: k }, s));
+      for (const m of rows) g.appendChild(optionField(m.option, m.spec, m, s));
       c.appendChild(g);
       wrap.appendChild(c);
     }
   }
-  if (!any) wrap.appendChild(note("no textures yet"));
-  return wrap;
+  summary.textContent = count ? `all other options (${count})` : "all other options";
+  if (!count) wrap.appendChild(note(scene.elements.length ? "every option is surfaced above" : "no textures yet"));
+  details.appendChild(wrap);
+  return details;
 }
 
 // --- fields ---

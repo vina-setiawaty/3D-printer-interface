@@ -36,8 +36,9 @@ export const TEXTURE_ITEM = {
     slot: { type: "string", enum: ["brush", "outline", "fill"], description: "line/point: brush. region: outline (a line brush along the boundary) and/or fill (a pattern + brush)" },
     fn: { type: "string", description: "brush or stamp name from the reference; empty string clears the slot" },
     pattern: { type: "string", description: "fill slot only: JSON string of the pattern spec, e.g. {\"kind\": \"hatch\", \"angleDeg\": 45, \"gap\": 4}; empty otherwise" },
+    options: { type: "string", description: "JSON string { optionName: value, ... } of the NUMBERS for this slot -- the brush's or stamp's own options and, for a fill, its pattern's fields, named the same way (the app looks up which is which). Use only names listed in the OPTION SPECS you are given, and keep every value inside its stated range. Omit a name to keep the value it already has; \"{}\" to change none." },
   },
-  required: ["elementId", "slot", "fn", "pattern"],
+  required: ["elementId", "slot", "fn", "pattern", "options"],
   additionalProperties: false,
 };
 
@@ -47,12 +48,13 @@ export const STAGES = {
     schema: {
       type: "object",
       properties: {
-        route: { type: "string", enum: ["geometry", "texture", "parameters", "chat"], description: "which stage the request enters (geometry runs texture and parameters after it; texture runs parameters after it); 'chat' answers without changing the scene" },
+        route: { type: "string", enum: ["geometry", "texture", "ui", "chat"], description: "which specialist the request enters (geometry runs texture and ui after it; texture runs ui after it); 'chat' answers without changing the scene" },
         instruction: { type: "string", description: "the user's request rewritten so it is self-contained: resolve 'this', 'the second bar', 'again' into element ids and concrete asks; empty when route is chat" },
         targets: { type: "array", items: { type: "string" }, description: "element ids the request is about (empty = the whole scene)" },
+        acceptance: { type: "array", items: { type: "string" }, description: "2-6 short, checkable statements that would settle whether this turn succeeded, specific to this request ('three bars', 'bar heights in the ratio 5:12:8', 'the shading lies between the two curves only'). They are checked against the app's own measured numbers, so prefer statements numbers can settle. Empty when route is chat." },
         reply: { type: "string", description: "when route is chat: the answer or clarifying question; otherwise a one-line note of what will be done" },
       },
-      required: ["route", "instruction", "targets", "reply"],
+      required: ["route", "instruction", "targets", "acceptance", "reply"],
       additionalProperties: false,
     },
     maxOutputTokens: 2048, effort: "low", thinking: false, codeExecution: false,
@@ -128,46 +130,32 @@ export const STAGES = {
     },
     maxOutputTokens: 6144, effort: "low", thinking: false, codeExecution: false,
   },
-  parameters: {
-    schemaName: "parametric_parameters",
+  ui: {
+    schemaName: "parametric_ui",
     schema: {
       type: "object",
       properties: {
-        chat: chat("what the numbers do and which high-level knobs now exist"),
-        options: {
+        chat: chat("which qualities are now surfaced in the panel, and what each one adjusts"),
+        groups: {
           type: "array",
-          description: "option values per element slot (only names listed for that brush/stamp; omit to keep the current value)",
+          description: "the FULL list of parameter groups the panel should show (replaces the previous list; keep the ids of ones you retain)",
           items: {
             type: "object",
             properties: {
-              elementId: { type: "string" },
-              slot: { type: "string", enum: ["brush", "outline", "fill"] },
-              options: { type: "string", description: "JSON string { optionName: value, ... }" },
+              id: { type: "string", description: "gr_N; reuse an existing id, empty for a new one" },
+              title: { type: "string", description: "the heading, in the user's own words for the quality, e.g. 'shading density', 'how hairy the area feels'" },
+              attribute: { type: "string", description: "which attribute from the guide this group is about, or 'custom' for a quality the guide does not name" },
+              description: { type: "string", description: "one line: what this group of controls changes about how the graphic feels" },
+              members: { type: "string", description: "JSON string [{\"level\": \"brush\"|\"pattern\"|\"graphic\", \"elementId\", \"slot\", \"option\", \"note\", \"control\": {\"label\", \"min\", \"max\"}}, ...] -- the parameters to show under this heading. For a named attribute they must be ones the guide lists as affecting it. Omit elementId/slot for a graphic-level parameter. `control` is optional: a clearer label, and a min/max narrowed (never widened) to what suits this scene." },
             },
-            required: ["elementId", "slot", "options"],
-            additionalProperties: false,
-          },
-        },
-        abstractions: {
-          type: "array",
-          description: "the FULL list of high-level parameters (replaces the previous list; keep ids of ones you retain)",
-          items: {
-            type: "object",
-            properties: {
-              id: { type: "string", description: "ab_N; reuse an existing id, empty for a new one" },
-              name: { type: "string", description: "short knob name, e.g. hairiness, density, softness" },
-              description: { type: "string", description: "one line: what moving it up does" },
-              value: { type: "number", description: "current position 0..1 (0.5 = as currently set)" },
-              targets: { type: "string", description: "JSON string [{\"elementId\", \"slot\", \"option\", \"weight\": 0..1, \"direction\": 1 | -1}, ...] -- weights should sum to 1; direction +1 = the option rises with the knob" },
-            },
-            required: ["id", "name", "description", "value", "targets"],
+            required: ["id", "title", "attribute", "description", "members"],
             additionalProperties: false,
           },
         },
       },
-      required: ["chat", "options", "abstractions"],
+      required: ["chat", "groups"],
       additionalProperties: false,
     },
-    maxOutputTokens: 16384, effort: "medium", thinking: true, codeExecution: false,
+    maxOutputTokens: 8192, effort: "medium", thinking: true, codeExecution: false,
   },
 };

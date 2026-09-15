@@ -285,9 +285,19 @@
   .pg-small-btn { font-size: 0.75em; padding: 0.25em 0.55em; }
   .pg-piece { border-left: 2px solid #EEE; padding-left: 0.4em; margin: 0.3em 0; }
   .pg-desc { font-size: 0.85em; color: #666; margin-bottom: 0.3em; }
-  .pg-slider { flex-direction: row; align-items: center; gap: 0.5em; }
-  .pg-slider input[type=range] { flex: 1; }
-  .pg-slider > span { font-family: monospace; min-width: 2.5em; }
+  /* Everything no surfaced group claims: reachable, but folded away so the
+     panel leads with the controls that matter for what was asked. */
+  .pg-all-options { margin-top: 0.8em; }
+  .pg-all-options > summary {
+    font-family: monospace;
+    font-size: 0.75em;
+    text-transform: uppercase;
+    color: #666;
+    border-bottom: 1px solid #DDD;
+    margin: 0.8em 0 0.4em;
+    padding-bottom: 0.15em;
+    cursor: pointer;
+  }
   .pg-json { width: 100%; font-family: monospace; font-size: 0.8em; height: 3.5em; resize: vertical; }
   .pg-json.pg-bad { border-color: #c00; background: #FFF4F4; }
   .pg-retry { color: #06c; cursor: pointer; text-decoration: underline; margin-left: 0.5em; }

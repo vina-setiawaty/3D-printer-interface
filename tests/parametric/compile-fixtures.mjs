@@ -1,7 +1,7 @@
 // Offline tests for the scene compiler (no LLM involved):
 //   node tests/parametric/compile-fixtures.mjs
-// Scene -> jobs -> G-code, transform math, clipping, the abstraction rule,
-// stage-output validation and merging.
+// Scene -> jobs -> G-code, transform math, clipping, app-solved regions,
+// the enforced limits, parameter groups, stage-output validation and merging.
 
 import assert from "node:assert/strict";
 import * as C from "../../sewingeditor/parametric-with-tool/parametric-catalog-with-tool.js";
@@ -181,113 +181,8 @@ test("fill-on-fill overlap warns; outline around own fill does not", () => {
   assert.ok(!r.warnings.some((w) => /overlap/.test(w)));
 });
 
-test("abstraction rule: weights normalize, contributions sum, manual edit rebases, clamp", () => {
-  const s = C.defaultScene();
-  s.elements = [{ id: "h", label: "patch", kind: "region", boundary: [rect(40, 40, 30, 30)] }];
-  s.textures = { h: { fill: { fn: "hairy", options: { spacing: 6, bigLift: 4 }, pattern: { kind: "hatch", gap: 5 } } } };
-  s.abstractions = [{
-    id: "ab_1", name: "hairiness", value: 0.5, v0: 0.5,
-    targets: [
-      { elementId: "h", slot: "fill", option: "bigLift", weight: 3, direction: 1 },
-      { elementId: "h", slot: "fill", option: "spacing", weight: 1, direction: -1 },
-    ],
-  }];
-  assert.deepEqual(C.normalizedWeights(s.abstractions[0].targets), [0.75, 0.25]);
-  assert.deepEqual(C.normalizedWeights([{ weight: -1 }, { weight: "x" }]), [0.5, 0.5]);
 
-  C.applyAbstractions(s);
-  const fill = s.textures.h.fill;
-  assert.equal(fill.options.bigLift, 4, "at v0 the base is reproduced");
-  assert.equal(fill.options.spacing, 6);
 
-  s.abstractions[0].value = 1.0;
-  C.applyAbstractions(s);
-  // bigLift span 1..10 = 9, 0.75 * 0.5 * 9 = 3.375 ; spacing span 1..30 = 29, -0.25 * 0.5 * 29 = -3.625
-  assert.equal(fill.options.bigLift, 7.375);
-  assert.equal(fill.options.spacing, 2.375);
-
-  // a second abstraction sharing spacing adds its own contribution
-  s.abstractions.push({ id: "ab_2", name: "density", value: 0.5, v0: 0.5, targets: [{ elementId: "h", slot: "fill", option: "spacing", weight: 1, direction: -1 }] });
-  s.abstractions[1].value = 0.0;   // less dense -> spacing up by 0.5 * 29 = 14.5
-  C.applyAbstractions(s);
-  assert.equal(fill.options.spacing, 16.875);
-
-  // manual edit rebases: sliders unchanged, edited value reproduced
-  C.rebaseOption(s, "h", "fill", "spacing", 8);
-  C.applyAbstractions(s);
-  assert.equal(fill.options.spacing, 8);
-  assert.equal(s.abstractions[0].value, 1.0);
-
-  // clamp to the option range
-  s.abstractions[0].value = 0.0; s.abstractions[1].value = 0.0;
-  C.applyAbstractions(s);
-  assert.ok(fill.options.spacing <= 30 && fill.options.bigLift >= 1);
-  assert.equal(C.driversOf(s, "h", "fill", "spacing").length, 2);
-});
-
-test("parameters stage: an empty/null option value is skipped, not stored (regression: blank fields)", () => {
-  const s = C.defaultScene();
-  s.elements = [{ id: "b", label: "bar", kind: "region", boundary: [rect(40, 40, 20, 20)] }];
-  s.textures = { b: { fill: { fn: "solid", options: { width: 0.6 }, pattern: { kind: "hatch", angleDeg: 0, gap: 4 } } } };
-  const par = C.validateStageOutput("parameters", {
-    chat: "denser",
-    options: [{ elementId: "b", slot: "fill", options: JSON.stringify({ width: "", nLayers: null, speed: "400", gap: "" }) }],
-    abstractions: [],
-  }, s);
-  assert.deepEqual(par.errors, [], "empty/null values are skipped, not rejected");
-  assert.deepEqual(par.value.options[0].options, { speed: 400 }, "empty/null keys omitted; a numeric string coerces");
-  assert.deepEqual(par.value.options[0].patternOptions, {}, "an empty pattern value is also skipped, not stored as \"\"");
-  C.mergeParameters(s, par.value);
-  assert.equal(s.textures.b.fill.options.width, 0.6, "left alone, not overwritten with \"\"");
-  assert.equal(s.textures.b.fill.pattern.gap, 4, "left alone, not overwritten with \"\"");
-
-  const bad = C.validateStageOutput("parameters", {
-    chat: "denser",
-    options: [{ elementId: "b", slot: "fill", options: JSON.stringify({ width: "wide", gap: "loose" }) }],
-    abstractions: [],
-  }, s);
-  assert.equal(bad.errors.length, 2, "non-numeric garbage is a real error, not silently dropped");
-  assert.ok(bad.errors.every((e) => /must be a number/.test(e)));
-});
-
-test("abstraction can target a fill PATTERN option, not just its brush (regression: reported production failure)", () => {
-  // A solid brush has no "gap" option -- "gap" here can only be the hatch
-  // PATTERN's own spacing. Before resolveTarget() this was rejected as
-  // "not a numeric option of solid".
-  const s = C.defaultScene();
-  s.elements = [{ id: "b", label: "bar", kind: "region", boundary: [rect(40, 40, 20, 20)] }];
-  s.textures = { b: { fill: { fn: "solid", options: {}, pattern: { kind: "hatch", angleDeg: 0, gap: 4 } } } };
-  assert.equal(C.resolveTarget(s, "b", "fill", "gap").location, "pattern");
-  assert.equal(C.resolveTarget(s, "b", "fill", "width").location, "options", "the brush's own option still resolves too");
-  assert.equal(C.resolveTarget(s, "b", "fill", "nonsense"), null);
-
-  s.abstractions = [{ id: "ab_1", name: "density", value: 0.5, v0: 0.5, targets: [{ elementId: "b", slot: "fill", option: "gap", weight: 1, direction: -1 }] }];
-  C.applyAbstractions(s);
-  assert.equal(s.textures.b.fill.pattern.gap, 4, "v0 reproduces the base");
-  s.abstractions[0].value = 1;
-  C.applyAbstractions(s);
-  assert.ok(s.textures.b.fill.pattern.gap < 4, "denser (higher knob) -> smaller gap");
-  assert.equal(s.textures.b.fill.options.gap, undefined, "never written to the brush's own options");
-
-  // manual edit of the pattern field rebases like a brush option would
-  C.rebaseOption(s, "b", "fill", "gap", 2);
-  C.applyAbstractions(s);
-  assert.equal(s.textures.b.fill.pattern.gap, 2);
-
-  // the parameters-stage validator now accepts "gap" for this fill slot,
-  // both as a direct option edit and as an abstraction target
-  const par = C.validateStageOutput("parameters", {
-    chat: "denser",
-    options: [{ elementId: "b", slot: "fill", options: JSON.stringify({ gap: 1.5 }) }],
-    abstractions: [{ id: "", name: "density", description: "d", value: 0.5, targets: JSON.stringify([{ elementId: "b", slot: "fill", option: "gap", weight: 1, direction: -1 }]) }],
-  }, s);
-  assert.deepEqual(par.errors, []);
-  assert.equal(par.value.options[0].patternOptions.gap, 1.5);
-  assert.deepEqual(par.value.options[0].options, {});
-  C.mergeParameters(s, par.value);
-  assert.equal(s.textures.b.fill.pattern.gap, 1.5);
-  assert.equal(C.compileScene(s).errors.length, 0);
-});
 
 test("line group (tick marks): one element, one texture, N stroke jobs", () => {
   const s = C.defaultScene();
@@ -308,11 +203,11 @@ test("line group (tick marks): one element, one texture, N stroke jobs", () => {
   assert.equal(entry.samples.length, ticks.length);
   assert.ok(C.runJobs(r.jobs).ok);
 
-  // one texture assignment, one abstraction, drives the WHOLE group at once
-  s.abstractions = [{ id: "ab_1", name: "tick boldness", value: 1, v0: 0.5, targets: [{ elementId: "el_2", slot: "brush", option: "width", weight: 1, direction: 1 }] }];
-  C.applyAbstractions(s);
+  // one texture assignment covers the WHOLE group: changing it changes
+  // every tick, which is why repeated marks are one element
+  s.textures.el_2.brush.options.width = 0.9;
   const r2 = C.compileScene(s);
-  assert.ok(r2.jobs.filter((j) => j.elementId === "el_2").every((j) => j.options.width === s.textures.el_2.brush.options.width), "every tick stroke picks up the same driven value");
+  assert.ok(r2.jobs.filter((j) => j.elementId === "el_2").every((j) => j.options.width === 0.9), "every tick stroke picks up the one value");
 });
 
 test("point group (data markers): one element, one texture, N stamp jobs", () => {
@@ -361,11 +256,11 @@ test("stage validation + merge round trip", () => {
   const tex = C.validateStageOutput("texture", {
     chat: "textured",
     textures: [
-      { elementId: "el_1", slot: "brush", fn: "solid", pattern: "" },
-      { elementId: "el_2", slot: "outline", fn: "dashed", pattern: "" },
-      { elementId: "el_2", slot: "fill", fn: "hairy", pattern: JSON.stringify({ kind: "hatch", gap: 5 }) },
-      { elementId: "el_3", slot: "brush", fn: "solid", pattern: "" },   // a point needs a stamp
-      { elementId: "el_9", slot: "brush", fn: "solid", pattern: "" },   // unknown id
+      { elementId: "el_1", slot: "brush", fn: "solid", pattern: "", options: "{}" },
+      { elementId: "el_2", slot: "outline", fn: "dashed", pattern: "", options: "{}" },
+      { elementId: "el_2", slot: "fill", fn: "hairy", pattern: JSON.stringify({ kind: "hatch", gap: 5 }), options: "{}" },
+      { elementId: "el_3", slot: "brush", fn: "solid", pattern: "", options: "{}" },   // a point needs a stamp
+      { elementId: "el_9", slot: "brush", fn: "solid", pattern: "", options: "{}" },   // unknown id
     ],
   }, s);
   assert.equal(tex.errors.length, 2, tex.errors.join("; "));
@@ -373,43 +268,124 @@ test("stage validation + merge round trip", () => {
   const tex2 = C.validateStageOutput("texture", {
     chat: "textured",
     textures: [
-      { elementId: "el_1", slot: "brush", fn: "solid", pattern: "" },
-      { elementId: "el_2", slot: "outline", fn: "dashed", pattern: "" },
-      { elementId: "el_2", slot: "fill", fn: "hairy", pattern: JSON.stringify({ kind: "hatch", gap: 5 }) },
-      { elementId: "el_3", slot: "brush", fn: "blob", pattern: "" },
+      { elementId: "el_1", slot: "brush", fn: "solid", pattern: "", options: "{}" },
+      { elementId: "el_2", slot: "outline", fn: "dashed", pattern: "", options: "{}" },
+      // choosing a texture and choosing its numbers is one decision now
+      { elementId: "el_2", slot: "fill", fn: "hairy", pattern: JSON.stringify({ kind: "hatch", gap: 5 }), options: JSON.stringify({ spacing: 5, bigLift: 3, gap: 6 }) },
+      { elementId: "el_3", slot: "brush", fn: "blob", pattern: "", options: JSON.stringify({ diameter: 2 }) },
     ],
   }, s);
   assert.deepEqual(tex2.errors, []);
   C.mergeTextures(s, tex2.value);
   assert.equal(s.textures.el_2.fill.pattern.kind, "hatch");
+  assert.equal(s.textures.el_2.fill.options.spacing, 5, "brush option stored");
+  assert.equal(s.textures.el_2.fill.pattern.gap, 6, "a pattern field is routed to the pattern by name");
+  assert.equal(s.textures.el_3.brush.options.diameter, 2);
 
-  const par = C.validateStageOutput("parameters", {
-    chat: "params",
-    options: [
-      { elementId: "el_2", slot: "fill", options: JSON.stringify({ spacing: 5, bigLift: 3, bogus: 1 }) },
-    ],
-    abstractions: [
-      { id: "", name: "hairiness", description: "d", value: 0.5, targets: JSON.stringify([{ elementId: "el_2", slot: "fill", option: "bigLift", weight: 0.6, direction: 1 }, { elementId: "el_2", slot: "fill", option: "spacing", weight: 0.4, direction: -1 }]) },
-    ],
+  // an option belonging to neither space is a real error
+  const bogus = C.validateStageOutput("texture", {
+    chat: "", textures: [{ elementId: "el_2", slot: "fill", fn: "hairy", pattern: JSON.stringify({ kind: "hatch", gap: 5 }), options: JSON.stringify({ nonsense: 1 }) }],
   }, s);
-  assert.equal(par.errors.length, 1, "bogus option rejected");   // bogus option
-  C.mergeParameters(s, par.value);
-  assert.equal(s.abstractions[0].id, "ab_1");
-  assert.equal(s.textures.el_2.fill.options.spacing, 5);
-  s.abstractions[0].value = 1;
-  C.applyAbstractions(s);
-  assert.ok(s.textures.el_2.fill.options.bigLift > 3 && s.textures.el_2.fill.options.spacing < 5);
+  assert.equal(bogus.errors.length, 1);
+  assert.ok(/not an option of hairy/.test(bogus.errors[0]), bogus.errors[0]);
 
-  // texture change to a different fn drops the abstraction targets
-  C.mergeTextures(s, { textures: [{ elementId: "el_2", slot: "fill", fn: "solid", pattern: { kind: "hatch", gap: 4 } }] });
-  assert.equal(s.abstractions.length, 0);
+  // the ui stage surfaces controls and sets no values
+  const ui = C.validateStageOutput("ui", {
+    chat: "surfaced",
+    groups: [{
+      id: "", title: "how dense the shading feels", attribute: "density", description: "tighter rows read as darker",
+      members: JSON.stringify([
+        { level: "pattern", elementId: "el_2", slot: "fill", option: "gap", control: { label: "row spacing", min: 2, max: 8 } },
+        { level: "brush", elementId: "el_2", slot: "fill", option: "spacing" },
+        { level: "graphic", option: "scale" },
+      ]),
+    }],
+  }, s);
+  assert.deepEqual(ui.errors, []);
+  C.mergeUi(s, ui.value);
+  assert.equal(s.groups[0].id, "gr_1");
+  assert.equal(s.groups[0].members.length, 3);
+  assert.equal(s.groups[0].members[0].direction, -1, "direction comes from the table, not from the model");
+  assert.equal(s.groups[0].members[0].control.min, 2, "a narrowed control range is kept");
+  assert.equal(s.textures.el_2.fill.pattern.gap, 6, "surfacing a control changed no value");
+
+  // a member the table does not connect to that attribute is refused
+  const wrong = C.validateStageOutput("ui", {
+    chat: "", groups: [{ id: "", title: "density", attribute: "density", description: "",
+      members: JSON.stringify([{ level: "brush", elementId: "el_2", slot: "fill", option: "baseZ" }]) }],
+  }, s);
+  assert.equal(wrong.errors.length, 1);
+  assert.ok(/not listed as affecting density/.test(wrong.errors[0]), wrong.errors[0]);
+
+  // ...but a custom group may surface it, with a reason
+  const custom = C.validateStageOutput("ui", {
+    chat: "", groups: [{ id: "", title: "first-contact height", attribute: "custom", description: "",
+      members: JSON.stringify([{ level: "brush", elementId: "el_2", slot: "fill", option: "baseZ", note: "how hard the first layer is pressed in" }]) }],
+  }, s);
+  assert.deepEqual(custom.errors, []);
+  assert.equal(custom.value.groups[0].members[0].note, "how hard the first layer is pressed in");
+
+  // a control range outside the option's own range is refused
+  const wide = C.validateStageOutput("ui", {
+    chat: "", groups: [{ id: "", title: "density", attribute: "density", description: "",
+      members: JSON.stringify([{ level: "pattern", elementId: "el_2", slot: "fill", option: "gap", control: { min: 0, max: 500 } }]) }],
+  }, s);
+  assert.equal(wide.errors.length, 2, wide.errors.join("; "));
+  assert.ok(wide.errors.every((e) => /outside/.test(e)));
+
+  // a texture change drops the controls that pointed at what is gone
+  C.mergeTextures(s, { textures: [{ elementId: "el_2", slot: "fill", fn: "solid", pattern: { kind: "hatch", gap: 4 }, options: {}, patternOptions: {} }] });
+  assert.ok(!s.groups.some((g) => g.members.some((m) => m.option === "spacing")), "the hairy-only control is gone");
+  assert.ok(s.groups.some((g) => g.members.some((m) => m.option === "gap")), "the hatch control survives");
 
   const r = C.compileScene(s);
   assert.deepEqual(r.errors, []);
   assert.ok(C.sceneSummary(s).includes("el_2"));
   assert.ok(C.optionSpecsText(s).includes("segLen"));
-  const route = C.validateStageOutput("route", { route: "texture", instruction: "densify el_2", targets: ["el_2", "nope"], reply: "" }, s);
+  const route = C.validateStageOutput("route", { route: "texture", instruction: "densify el_2", targets: ["el_2", "nope"], acceptance: ["el_2 reads denser", ""], reply: "" }, s);
   assert.deepEqual(route.value.targets, ["el_2"]);
+  assert.deepEqual(route.value.acceptance, ["el_2 reads denser"], "blank criteria dropped");
+});
+
+test("the influence table only names parameters that really exist", () => {
+  for (const [key, a] of Object.entries(C.ATTRIBUTES)) {
+    assert.ok(a.description && a.aliases.length, `${key} needs a description and aliases`);
+    for (const inf of a.influences) {
+      assert.ok([-1, 1].includes(inf.direction), `${key}.${inf.option} needs a direction`);
+      assert.ok(["primary", "secondary"].includes(inf.strength), `${key}.${inf.option} needs a strength`);
+      let known = false;
+      if (inf.level === "graphic") known = inf.option in C.GRAPHIC_OPTIONS;
+      else if (inf.level === "pattern") known = Object.values(C.PATTERN_OPTIONS).some((spec) => inf.option in spec);
+      else known = [...C.BRUSH_NAMES, ...C.STAMP_NAMES].some((fn) => inf.option in C.optionSpecFor(fn));
+      assert.ok(known, `${key}: no ${inf.level} has an option called "${inf.option}"`);
+    }
+  }
+});
+
+test("expandAttribute offers only what this scene actually has", () => {
+  const s = barChart();
+  // bar 1 is a solid hatch fill, bar 2 a hairy hatch fill, bar 3 a blob grid
+  const density = C.expandAttribute(s, "density");
+  const keys = density.map((m) => `${m.level}:${m.elementId || "graphic"}:${m.option}`);
+  assert.ok(keys.includes("pattern:el_2:gap"), "the hatch row spacing");
+  assert.ok(keys.includes("brush:el_3:spacing"), "the hairy brush's strand spacing");
+  assert.ok(keys.includes("pattern:el_4:dx") && keys.includes("pattern:el_4:dy"), "the grid spacing");
+  assert.ok(keys.includes("graphic:graphic:scale"), "and the graphic's own scale");
+  assert.ok(!keys.some((k) => k.includes("el_1")), "a solid axis brush has no density parameter");
+  assert.equal(density[0].strength, "primary", "primary controls come first");
+
+  const hairiness = C.expandAttribute(s, "hairiness");
+  assert.ok(hairiness.every((m) => m.elementId === "el_3"), "only the hairy fill has hair parameters");
+  assert.ok(hairiness.some((m) => m.option === "bigLift"));
+
+  // narrowing to one element narrows the offer
+  assert.ok(C.expandAttribute(s, "density", ["el_4"]).every((m) => !m.elementId || m.elementId === "el_4"));
+  assert.deepEqual(C.expandAttribute(s, "nonsense"), []);
+
+  // the generated guide names every attribute and its parameters
+  const guide = C.attributeGuideText();
+  for (const key of C.ATTRIBUTE_KEYS) assert.ok(guide.includes(key), `${key} missing from the guide`);
+  assert.ok(guide.includes("custom"), "and says how to surface something the table does not name");
 });
 
 test("normalizeScene discards old formats", () => {
@@ -588,34 +564,34 @@ test("a boundary closed by a straight edge always warns, point lists included", 
 test("an out-of-range option value is rejected, not stored", () => {
   const s = C.defaultScene();
   s.elements = [{ id: "b", label: "bar", kind: "region", boundary: [rect(40, 40, 20, 20)] }];
-  s.textures = { b: { fill: { fn: "solid", options: {}, pattern: { kind: "hatch", angleDeg: 0, gap: 4 } } } };
+  const tex = (options) => ({ chat: "", textures: [{ elementId: "b", slot: "fill", fn: "solid", pattern: JSON.stringify({ kind: "hatch", angleDeg: 0, gap: 4 }), options: JSON.stringify(options) }] });
 
   // hatch gap's range is 0.3..20; 100 would silently produce a fill with a
   // single stroke (or none) in a 20mm bar.
-  const bad = C.validateStageOutput("parameters", {
-    chat: "denser", abstractions: [],
-    options: [{ elementId: "b", slot: "fill", options: JSON.stringify({ gap: 100, width: 0.5 }) }],
-  }, s);
+  const bad = C.validateStageOutput("texture", tex({ gap: 100, width: 0.5 }), s);
   assert.equal(bad.errors.length, 1, bad.errors.join("; "));
   assert.ok(/within 0\.3\.\.20/.test(bad.errors[0]), bad.errors[0]);
-  assert.deepEqual(bad.value.options[0].patternOptions, {}, "the bad value is not stored");
-  assert.deepEqual(bad.value.options[0].options, { width: 0.5 }, "the good value alongside it still is");
+  assert.deepEqual(bad.value.textures[0].patternOptions, {}, "the bad value is not stored");
+  assert.deepEqual(bad.value.textures[0].options, { width: 0.5 }, "the good value alongside it still is");
 
   // the boundary values themselves are in range
-  const edge = C.validateStageOutput("parameters", {
-    chat: "", abstractions: [],
-    options: [{ elementId: "b", slot: "fill", options: JSON.stringify({ gap: 20 }) }],
-  }, s);
+  const edge = C.validateStageOutput("texture", tex({ gap: 20 }), s);
   assert.deepEqual(edge.errors, []);
-  assert.equal(edge.value.options[0].patternOptions.gap, 20);
+  assert.equal(edge.value.textures[0].patternOptions.gap, 20);
 
   // an int option rounds first, then range-checks
-  const low = C.validateStageOutput("parameters", {
-    chat: "", abstractions: [],
-    options: [{ elementId: "b", slot: "fill", options: JSON.stringify({ nLayers: 0 }) }],
-  }, s);
+  const low = C.validateStageOutput("texture", tex({ nLayers: 0 }), s);
   assert.equal(low.errors.length, 1);
   assert.ok(/within 1\.\.10/.test(low.errors[0]), low.errors[0]);
+
+  // an empty or null value means "leave it alone", not "store a blank"
+  const blank = C.validateStageOutput("texture", tex({ width: "", nLayers: null, speed: "400", gap: "" }), s);
+  assert.deepEqual(blank.errors, []);
+  assert.deepEqual(blank.value.textures[0].options, { speed: 400 }, "empty keys omitted; a numeric string coerces");
+  assert.deepEqual(blank.value.textures[0].patternOptions, {});
+  const garbage = C.validateStageOutput("texture", tex({ width: "wide", gap: "loose" }), s);
+  assert.equal(garbage.errors.length, 2, "non-numeric garbage is a real error, not silently dropped");
+  assert.ok(garbage.errors.every((e) => /must be a number/.test(e)));
 });
 
 test("diamond fillGap below the over-extrusion floor is a hard error", () => {

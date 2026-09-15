@@ -17,7 +17,7 @@ different `localStorage` key, and its own copy of the texture library below
 | `stage-geometry-check.md` | System prompt for the optional **geometry-check** pass — reviews a just-proposed element list against a report the app computes deterministically and can return a patch. |
 | `stage-texture.md` | System prompt for **texture** — assigns a brush/stamp and, for a region's fill, a pattern to each element slot. |
 | `stage-texture-check.md` | System prompt for the optional **texture-check** pass — same idea as geometry-check, for hand-placed fill coordinates only. |
-| `stage-parameters.md` | System prompt for **parameters** — sets option values and defines the weighted high-level knobs (abstractions). Has a marker for a future fuller abstraction guide. |
+| `stage-ui.md` | System prompt for **ui** — decides which parameters the panel surfaces and under which heading. Sets no values (the texture stage does). Its attribute guide is generated from `../attributes.js`. |
 | `ref-coordinates.md` | Bed, safe area, the global transform, material. |
 | `ref-expressions.md` | The formula grammar and what sampling does to a curve. |
 | `ref-geometry-language.md` | Pieces, elements, grouping repeated features, and solved (`between`) regions. |

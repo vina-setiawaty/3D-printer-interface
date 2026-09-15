@@ -103,10 +103,12 @@ test("each stage carries only the reference it needs", () => {
   assert.ok(/between/.test(geometry), "geometry needs the solved-region form");
   assert.ok(!/orbitLoops/.test(geometry), "geometry does not choose brush options");
 
-  const parameters = sys("parameters");
-  assert.ok(!/Grouping repeated features/.test(parameters));
-  assert.ok(!/start\/end sequence/.test(parameters), "parameters does not need the machine's start sequence");
-  assert.ok(/two independently-named/.test(parameters), "parameters does need the two-option-space rule");
+  const ui = sys("ui");
+  assert.ok(!/Grouping repeated features/.test(ui), "the ui stage does not lay out geometry");
+  assert.ok(!/start\/end sequence/.test(ui), "nor does it need the machine's start sequence");
+  assert.ok(!/orbitLoops/.test(ui), "nor the brush menu -- it is given the specs actually in use");
+  assert.ok(/ATTRIBUTES AND WHAT AFFECTS THEM/.test(ui), "it does need the influence table");
+  assert.ok(/density/.test(ui) && /hairiness/.test(ui));
 
   const route = sys("route");
   assert.ok(!/blobDotted/.test(route) && !/Grouping repeated/.test(route), "the manager picks a stage, it does not do the work");
@@ -116,10 +118,10 @@ test("each stage carries only the reference it needs", () => {
 // Note on sizes: geometry and geometry-check are BIGGER than they were
 // (3797 and 2805 chars), because what they used to receive was mostly the
 // 712-char remnant of a truncated reference -- they were cheap by being
-// wrong. texture-check and parameters did get smaller. The budget below is
+// wrong. texture-check and the third stage did get smaller. The budget below is
 // about keeping each call proportionate to its job, not about shrinking.
 test("each stage's prompt stays within its budget", () => {
-  const budget = { route: 6000, geometry: 15000, "geometry-check": 15000, texture: 13000, "texture-check": 13000, parameters: 12000 };
+  const budget = { route: 6000, geometry: 15000, "geometry-check": 15000, texture: 14000, "texture-check": 13000, ui: 12000 };
   const sizes = {};
   for (const stage of STAGES) {
     const n = composeSystemPrompt(stage, { docs, scene: scene(), C }).length;
@@ -161,8 +163,12 @@ test("only the router sees the conversation, and only a capped slice", () => {
   assert.ok(tex.includes("printed size"), "texture needs measured sizes");
   assert.ok(tex.includes("TARGET ELEMENTS: (whole scene)"));
 
-  const par = composeUserMessage("parameters", { scene: s, C, instruction: "denser", targets: [] });
-  assert.ok(par.includes("OPTION SPECS") && /spacing/.test(par), "parameters gets the specs for the brushes in use");
+  assert.ok(tex.includes("OPTION SPECS") && /spacing/.test(tex), "texture sets the numbers, so it gets the specs");
+
+  const ui = composeUserMessage("ui", { scene: s, C, instruction: "surface the density", targets: [] });
+  assert.ok(ui.includes("OPTION SPECS") && ui.includes("CURRENTLY SURFACED GROUPS"));
+  assert.ok(/PARAMETERS IN THIS SCENE THAT AFFECT EACH ATTRIBUTE/.test(ui), "the ui stage is offered resolved candidates");
+  assert.ok(/"option":"gap"/.test(ui.replace(/\s/g, "")), "including the hatch row spacing of the bar it can see");
 
   // the router's own transcript is merged by role and capped
   s.messages = [];
