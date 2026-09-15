@@ -13,7 +13,8 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import * as C from "../../sewingeditor/parametric-with-tool/parametric-catalog-with-tool.js";
 import {
-  DOC_PATHS, STAGE_DOCS, docText, composeSystemPrompt, composeUserMessage, composeRouteMessages, compileStatusText,
+  DOC_PATHS, STAGE_DOCS, docText, composeSystemPrompt, composeUserMessage, composeRouteMessages,
+  composeJudgeMessage, composeRefineMessage, compileStatusText,
 } from "../../sewingeditor/parametric-with-tool/prompt-assembly.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../sewingeditor/parametric-with-tool");
@@ -121,7 +122,7 @@ test("each stage carries only the reference it needs", () => {
 // wrong. texture-check and the third stage did get smaller. The budget below is
 // about keeping each call proportionate to its job, not about shrinking.
 test("each stage's prompt stays within its budget", () => {
-  const budget = { route: 6000, geometry: 15000, "geometry-check": 15000, texture: 14000, "texture-check": 13000, ui: 12000 };
+  const budget = { route: 6000, geometry: 15000, "geometry-check": 15000, texture: 14000, "texture-check": 13000, ui: 12000, judge: 4000 };
   const sizes = {};
   for (const stage of STAGES) {
     const n = composeSystemPrompt(stage, { docs, scene: scene(), C }).length;
@@ -192,6 +193,35 @@ test("a broken scene's errors reach the next call", () => {
 
   assert.ok(/compiles cleanly/.test(compileStatusText(C.compileScene(scene()))));
   assert.ok(/not been compiled/.test(compileStatusText(null)));
+});
+
+test("the judge is given the criteria and the app's own numbers", () => {
+  const s = scene();
+  const msg = composeJudgeMessage({
+    scene: s, C, instruction: "a bar chart with one bar 12mm tall",
+    acceptance: ["one bar", "the bar is 12mm tall"],
+    compiled: C.compileScene(s), notes: ["built one bar", "shaded it"],
+  });
+  assert.ok(msg.includes("1. one bar") && msg.includes("2. the bar is 12mm tall"));
+  assert.ok(msg.includes("DETERMINISTIC REPORT") && /"height":12/.test(msg.replace(/\s/g, "")), "the measured height is there to check against");
+  assert.ok(msg.includes("SCENE NOW") && msg.includes("COMPILE STATUS"));
+  assert.ok(msg.includes("built one bar"), "and what the stages claimed");
+
+  const sys = composeSystemPrompt("judge", { docs, scene: s, C });
+  assert.ok(/TRUST THESE NUMBERS/.test(sys), "the judge is told to trust the report over its own arithmetic");
+  assert.ok(/suspectedStage/.test(sys), "and to name which stage can fix a failure");
+});
+
+test("a refine round tells the manager what failed and what already ran", () => {
+  const msg = composeRefineMessage({
+    failures: [{ criterion: "the shading lies between the two curves", evidence: "solvedXRange [40,100] covers the whole span", suspectedStage: "geometry" }],
+    ranStages: ["geometry", "texture", "ui"],
+  });
+  assert.ok(msg.startsWith("REFINE:"));
+  assert.ok(msg.includes("the shading lies between the two curves"));
+  assert.ok(msg.includes("solvedXRange") && msg.includes("likely stage: geometry"));
+  assert.ok(msg.includes("geometry -> texture -> ui"), "and which specialists have already run");
+  assert.ok(/Route to chat instead if this needs the user/.test(msg));
 });
 
 test("a repair call hands the stage its own errors and its own last answer", () => {

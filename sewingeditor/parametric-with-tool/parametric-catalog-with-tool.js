@@ -1741,6 +1741,19 @@ export function validateStageOutput(stage, out, scene) {
     return { value: { chat: String(out.chat || ""), groups }, errors };
   }
 
+  if (stage === "judge") {
+    // The judge reads the scene rather than writing to it, so there is
+    // nothing to resolve against -- only its own shape to normalize.
+    const failures = (Array.isArray(out.failures) ? out.failures : []).map((f) => ({
+      criterion: String(f.criterion || ""),
+      evidence: String(f.evidence || ""),
+      suspectedStage: ["geometry", "texture", "ui"].includes(f.suspectedStage) ? f.suspectedStage : "geometry",
+    })).filter((f) => f.criterion);
+    // "pass with failures listed" is a contradiction; trust the list.
+    const pass = !!out.pass && !failures.length;
+    return { value: { pass, failures, note: String(out.note || "") }, errors: [] };
+  }
+
   return { value: null, errors: [`unknown stage "${stage}"`] };
 }
 

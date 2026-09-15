@@ -3,7 +3,7 @@
 
 <head>
   <meta charset="UTF-8">
-  <title>3dp sewing machine - parametric tactile graphics (4-stage pipeline, experimental)</title>
+  <title>3dp sewing machine - parametric tactile graphics (staged pipeline, experimental)</title>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.3.1/p5.js"></script>
   <script src="../lib/p5.fab.sewing.js" type="text/javascript"></script>
@@ -256,6 +256,13 @@
   .pg-notok { color: #c00; font-weight: 600; }
   .pg-errs { color: #c00; }
   .pg-warns { color: #a70; }
+  /* What the manager decided "done" meant for this turn, and whether the
+     app's own measured numbers agreed. */
+  #pg-verdict { flex: 0 0 auto; }
+  .pg-crits { margin: 0.2em 0 0.4em 0; padding-left: 1.1em; font-size: 0.85em; }
+  .pg-crits li { margin: 0.1em 0; }
+  .pg-crit-ok { color: #2a7; }
+  .pg-crit-bad { color: #c00; }
   .pg-errs ul, .pg-warns ul { margin: 0.2em 0 0.4em 1.2em; }
 
   #raw-gcode-textarea {
@@ -332,7 +339,7 @@
 
       <!-- Column 1: chat -->
       <div class="pg-col" id="pg-col-chat">
-        <h1>Describe the graphic <span class="pg-experimental-badge">4-stage pipeline</span>
+        <h1>Describe the graphic <span class="pg-experimental-badge">staged pipeline</span>
           <span style="float:right;">
             <span class="btn" id="pg-save-log-btn" title="Download every stage call's raw LLM response for this session (user input + each function call's output), for debugging" style="font-size:0.85em;padding:0.3em 0.6em;">save log</span>
             <span class="btn" id="pg-clear-log-btn" title="Clear the saved debug log (keeps the conversation and scene)" style="font-size:0.85em;padding:0.3em 0.6em;">clear log</span>
@@ -415,6 +422,7 @@
           <pre id="pg-report"></pre>
         </details>
         <div id="pg-digest"></div>
+        <div id="pg-verdict"></div>
         <textarea id="raw-gcode-textarea" spellcheck="false"></textarea>
         <div class="ui-group" id="pg-gcode-menu">
           <div class="ui-item"><div class="btn" id="run-gcode-btn">run gcode</div></div>

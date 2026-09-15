@@ -1,9 +1,12 @@
 # parametric-with-tool docs
 
-Reference set for the **4-stage pipeline page**
-(`../parametric-with-tool.html`) — route → geometry [→ geometry-check] →
-texture [→ texture-check] → parameters, over a scene model (elements,
-per-slot textures, weighted parameter knobs). Fully separate from
+Reference set for the **pipeline page** (`../parametric-with-tool.html`) —
+a manager (route) that picks one of three specialists (geometry, texture,
+ui), a deterministic gate between calls, and a judge at the end whose
+failures go back to the manager. Over a scene model: elements, per-slot
+textures with their values, and the parameter groups the panel surfaces.
+
+Fully separate from
 `../../parametric/` (the older single-call prototype): different HTML/JS,
 different endpoint (`api/parametric-stage.js` vs `api/generate-parametric.js`),
 different `localStorage` key, and its own copy of the texture library below
@@ -12,11 +15,10 @@ different `localStorage` key, and its own copy of the texture library below
 | File | What it is |
 |---|---|
 | `texture_functions-with-tool.js` | The texture library restructured as brushes / patterns / stamps (every texture is "what happens between two points"). Verified byte-identical to the original library's output by `tests/parametric/golden-brushes.mjs`. |
-| `stage-route.md` | System prompt for the **route** call — the only one that sees the full chat history; picks the entry stage and rewrites the request as a self-contained instruction. |
+| `stage-route.md` | System prompt for **route**, the manager — the only call that sees the chat history. Picks the specialist, rewrites the request as a self-contained instruction, and writes the turn's acceptance criteria. Also runs in refine mode after a failed evaluation. |
 | `stage-geometry.md` | System prompt for **geometry** — defines or changes elements (lines, regions, points) and the global transform. |
-| `stage-geometry-check.md` | System prompt for the optional **geometry-check** pass — reviews a just-proposed element list against a report the app computes deterministically and can return a patch. |
-| `stage-texture.md` | System prompt for **texture** — assigns a brush/stamp and, for a region's fill, a pattern to each element slot. |
-| `stage-texture-check.md` | System prompt for the optional **texture-check** pass — same idea as geometry-check, for hand-placed fill coordinates only. |
+| `stage-texture.md` | System prompt for **texture** — assigns a brush/stamp, a fill pattern, and their option values to each element slot. |
+| `stage-judge.md` | System prompt for **judge** — reads the finished scene against the turn's acceptance criteria and the app's measured report, and names which specialist can fix each unmet one. |
 | `stage-ui.md` | System prompt for **ui** — decides which parameters the panel surfaces and under which heading. Sets no values (the texture stage does). Its attribute guide is generated from `../attributes.js`. |
 | `ref-coordinates.md` | Bed, safe area, the global transform, material. |
 | `ref-expressions.md` | The formula grammar and what sampling does to a curve. |
@@ -50,7 +52,7 @@ builds every stage's real prompt offline and guards against it recurring.
 - Limit changes → edit `PRINT_LIMITS` / `GEOMETRY_LIMITS` /
   `LEGIBILITY_GUIDE` in `../parametric-catalog-with-tool.js` and nothing
   else: the prompt section (`limitsText()` / `legibilityText()`, appended to
-  the texture and parameters prompts by `systemPromptFor()`) and the
+  the texture and ui prompts by `../prompt-assembly.js`) and the
   `PARAMETER_CONSTRAINTS.md` form (`node tests/parametric/print-constraints.mjs`)
   are both generated from those objects. Never hand-write a limit into a doc.
 - Legibility limits are **not enforced** — none of the numbers has been
@@ -58,3 +60,6 @@ builds every stage's real prompt offline and guards against it recurring.
   warnings; the code path exists and is tested, waiting on real numbers.
 - Library changes → run `node tests/parametric/golden-brushes.mjs` (must
   stay byte-identical) and `node tests/parametric/compile-fixtures.mjs`.
+- Loop or prompt-shape changes → `node tests/parametric/pipeline.mjs` and
+  `node tests/parametric/prompt-assembly.mjs`. Both run offline, with a
+  scripted fake model, so there is no reason not to.

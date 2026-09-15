@@ -1,5 +1,5 @@
 // Per-stage JSON schemas and generation settings for the parametric-with-tool
-// 4-stage pipeline. Shared between api/parametric-stage.js (the legacy
+// staged pipeline. Shared between api/parametric-stage.js (the legacy
 // server-proxied path, kept as a fallback) and parametric-with-tool.js
 // (which now calls the providers directly from the browser) so the two
 // never drift. Pure data/ES module -- no Node-only or DOM-only APIs -- so it
@@ -12,8 +12,7 @@
 
 export const chat = (what) => ({ type: "string", description: `conversational reply: ${what}` });
 
-// Shared by "geometry" (the full ordered list) and "geometry-check" (a
-// patch of just the elements that need fixing) -- same per-element shape.
+// The geometry stage's per-element shape.
 export const GEOMETRY_ELEMENT_ITEM = {
   type: "object",
   properties: {
@@ -27,8 +26,7 @@ export const GEOMETRY_ELEMENT_ITEM = {
   additionalProperties: false,
 };
 
-// Shared by "texture" (one entry per slot set/cleared) and "texture-check"
-// (a patch of just the slots that need fixing).
+// One entry per element slot the texture stage sets or clears.
 export const TEXTURE_ITEM = {
   type: "object",
   properties: {
@@ -77,25 +75,7 @@ export const STAGES = {
     },
     maxOutputTokens: 32768, effort: "medium", thinking: true, codeExecution: false,
   },
-  "geometry-check": {
-    schemaName: "parametric_geometry_check",
-    schema: {
-      type: "object",
-      properties: {
-        chat: chat("what you checked, and what (if anything) you fixed"),
-        ok: { type: "boolean", description: "true if the proposed elements are correct and printable as given" },
-        elements: {
-          type: "array",
-          description: "ONLY the elements that need a fix, each a full corrected replacement (same id) -- empty array when ok is true",
-          items: GEOMETRY_ELEMENT_ITEM,
-        },
-      },
-      required: ["chat", "ok", "elements"],
-      additionalProperties: false,
-    },
-    maxOutputTokens: 8192, effort: "low", thinking: false, codeExecution: false,
-  },
-  texture: {
+texture: {
     schemaName: "parametric_texture",
     schema: {
       type: "object",
@@ -112,23 +92,32 @@ export const STAGES = {
     },
     maxOutputTokens: 16384, effort: "medium", thinking: true, codeExecution: false,
   },
-  "texture-check": {
-    schemaName: "parametric_texture_check",
+judge: {
+    schemaName: "parametric_judge",
     schema: {
       type: "object",
       properties: {
-        chat: chat("what you checked, and what (if anything) you fixed"),
-        ok: { type: "boolean", description: "true if every free-form fill actually covers its region as intended" },
-        textures: {
+        pass: { type: "boolean", description: "true when every acceptance criterion is met by the scene as measured" },
+        failures: {
           type: "array",
-          description: "ONLY the slots that need a fix, each a full corrected replacement -- empty array when ok is true",
-          items: TEXTURE_ITEM,
+          description: "one entry per criterion NOT met -- empty when pass is true",
+          items: {
+            type: "object",
+            properties: {
+              criterion: { type: "string", description: "the acceptance criterion, quoted" },
+              evidence: { type: "string", description: "the number or fact from the report that shows it is not met" },
+              suspectedStage: { type: "string", enum: ["geometry", "texture", "ui"], description: "which specialist can fix it: geometry for shapes, sizes, positions and which area is shaded; texture for which brush/pattern and its numbers; ui for what the panel surfaces" },
+            },
+            required: ["criterion", "evidence", "suspectedStage"],
+            additionalProperties: false,
+          },
         },
+        note: { type: "string", description: "one line for the user: what you checked and what, if anything, is off" },
       },
-      required: ["chat", "ok", "textures"],
+      required: ["pass", "failures", "note"],
       additionalProperties: false,
     },
-    maxOutputTokens: 6144, effort: "low", thinking: false, codeExecution: false,
+    maxOutputTokens: 2048, effort: "low", thinking: false, codeExecution: false,
   },
   ui: {
     schemaName: "parametric_ui",

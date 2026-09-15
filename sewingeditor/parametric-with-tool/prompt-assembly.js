@@ -23,18 +23,15 @@
 export const STAGE_DOCS = {
   route: ["docs/stage-route.md"],
   geometry: ["docs/stage-geometry.md", "docs/ref-coordinates.md", "docs/ref-expressions.md", "docs/ref-geometry-language.md"],
-  "geometry-check": ["docs/stage-geometry-check.md", "docs/ref-coordinates.md", "docs/ref-geometry-language.md"],
   texture: ["docs/stage-texture.md", "docs/ref-coordinates.md", "docs/ref-expressions.md", "docs/ref-patterns.md", "docs/ref-brush-menu.md"],
-  "texture-check": ["docs/stage-texture-check.md", "docs/ref-patterns.md"],
   ui: ["docs/stage-ui.md"],
+  judge: ["docs/stage-judge.md"],
 };
 
 // Generated sections, by name, appended after the docs.
 export const STAGE_GENERATED = {
   geometry: ["limits"],
-  "geometry-check": ["limits"],
   texture: ["limits", "legibility"],
-  "texture-check": ["limits", "legibility"],
   ui: ["attributes"],
 };
 
@@ -123,6 +120,36 @@ export function composeRouteMessages(scene, { maxTurns = 12 } = {}) {
   return out;
 }
 
+/** The manager's user message on a REFINE round: what the evaluation
+ * found, and which specialists have already run this turn. The manager
+ * decides which one to send it back to -- that decision is its job, not
+ * the judge's, which is why the judge only names a suspect. */
+export function composeRefineMessage({ failures = [], ranStages = [] }) {
+  const lines = failures.map((f) => `  - ${f.criterion}\n      evidence: ${f.evidence}\n      likely stage: ${f.suspectedStage}`);
+  return [
+    "REFINE: the work just done did not meet every acceptance criterion.",
+    "",
+    `WHAT FAILED:\n${lines.join("\n") || "  (none given)"}`,
+    "",
+    `ALREADY RUN THIS TURN: ${ranStages.join(" -> ") || "(none)"}`,
+    "",
+    "Decide which specialist should run again and say exactly what to change",
+    "and what to leave alone. Route to chat instead if this needs the user.",
+  ].join("\n");
+}
+
+/** The judge's user message: the criteria, the scene as it now stands, and
+ * the app's own measured numbers. */
+export function composeJudgeMessage({ scene, C, instruction, acceptance = [], compiled = null, notes = [] }) {
+  return [
+    `INSTRUCTION:\n${instruction}`,
+    `ACCEPTANCE CRITERIA:\n${acceptance.map((a, i) => `  ${i + 1}. ${a}`).join("\n") || "  (none)"}`,
+    `SCENE NOW:\n${C.sceneSummary(scene)}`,
+    `DETERMINISTIC REPORT (measured by the app from the exact geometry that will print):\n${C.reportText(scene.lastReport)}`,
+    `COMPILE STATUS:\n${compileStatusText(compiled)}`,
+    `WHAT THE SPECIALISTS SAID THEY DID:\n${notes.map((n) => `  - ${n}`).join("\n") || "  (nothing)"}`,
+  ].join("\n\n");
+}
 /** The user message for one generating stage. `repair` (the errors a
  * previous attempt produced, plus that attempt's own output) turns this
  * into a repair call for the same stage -- same schema, same settings. */
@@ -142,7 +169,7 @@ export function composeUserMessage(stage, { scene, C, instruction, targets = [],
   parts.push(`INSTRUCTION:\n${instruction}`);
   parts.push(`TARGET ELEMENTS: ${targets.length ? targets.join(", ") : "(whole scene)"}`);
 
-  if (stage === "geometry" || stage === "geometry-check") {
+  if (stage === "geometry") {
     parts.push(`CURRENT ELEMENTS (JSON):\n${jsonLines(C.elementsJson(scene))}`);
     parts.push(`CURRENT TRANSFORM: ${JSON.stringify(scene.transform)}`);
   } else {
