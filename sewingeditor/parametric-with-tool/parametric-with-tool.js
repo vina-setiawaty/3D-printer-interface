@@ -39,6 +39,16 @@ const STAGE_DOCS = {
   "texture-check": ["docs/stage-texture-check.md", "docs/reference-machine.md", "docs/reference-brushes.md"],
   parameters: ["docs/stage-parameters.md", "docs/reference-brushes.md"],
 };
+// Prompt sections GENERATED from the catalog's constraint objects rather
+// than written in a doc, so what the model is told can never drift from
+// what the code enforces (these two used to be hand-copied tables at the
+// end of reference-brushes.md). "limits" is what the page blocks or warns
+// on; "legibility" is explicitly-unenforced perceptual guidance.
+const STAGE_GENERATED = {
+  texture: ["limits", "legibility"],
+  "texture-check": ["limits", "legibility"],
+  parameters: ["limits", "legibility"],
+};
 const CHAIN = { geometry: ["geometry", "texture", "parameters"], texture: ["texture", "parameters"], parameters: ["parameters"], chat: [] };
 const STAGE_LABEL = { route: "routing", geometry: "geometry", texture: "texture", parameters: "parameters" };
 // A *-check call reuses the "geometry"/"texture" output validator (same
@@ -182,7 +192,8 @@ async function loadDeps() {
 
 function systemPromptFor(stage) {
   const mat = scene.config.material || "TPU";
-  const body = STAGE_DOCS[stage].map((p) => docs[p]).join("\n\n---\n\n");
+  const generated = (STAGE_GENERATED[stage] || []).map((k) => (k === "limits" ? C.limitsText() : C.legibilityText()));
+  const body = [...STAGE_DOCS[stage].map((p) => docs[p]), ...generated].join("\n\n---\n\n");
   const session = `\n\n---\n\nSESSION: material = ${mat}.` + (mat === "PLA" ? " Use PLA numbers; the page emits a PLA start sequence." : " Use TPU numbers (the library defaults).");
   if (stage === "route") return `${body}\n\n---\n\nSCENE SUMMARY:\n${C.sceneSummary(scene)}`;
   return body + session;

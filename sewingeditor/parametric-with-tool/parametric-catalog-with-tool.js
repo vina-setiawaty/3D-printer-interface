@@ -28,27 +28,121 @@ import * as TF from "./docs/texture_functions-with-tool.js";
 
 export const SCENE_VERSION = 2;
 
-// Runtime limits: only what has a physical consequence. Perceptual limits
-// ("reads as scattered dots") live in the prompt docs and the option
-// min/max below, not here.
-export const CONSTRAINTS = {
-  bed: 220,
-  safeMin: 15, safeMax: 205,   // safe area for every printed coordinate
-  closureSnapMm: 0.5,          // boundary end within this of its start snaps closed
-  minDomeDiameter: 0.8,        // hard: blob / hairy-root / disc / 2*dotRadius
-  minDiscHeight: 0.4,          // hard
-  minLayers: 2,                // hard: relief floor 0.4mm
-  zGapFloor: 0.25,             // hard
-  minSolidSheetGap: 0.35,      // hard: hatch gap with the solid brush
-  minBeadWidth: 0.4,           // warn
-  blobDottedGapOverDiameter: 1.0,  // warn: gap >= diameter + this
-  hairyDottedGapOverRoot: 2.0,     // warn: gap >= rootDiameter + this
-  minDottedGapOverDot: 1.0,        // warn: gap >= 2*dotRadius + this
-  minHairSpacing: 2.5,             // warn
-  minHairyFillRowGap: 4.0,         // warn: hatch gap with the hairy brush
-  retractCyclesWarn: 250,
-  retractCyclesHard: 2000,
+// ------------------------------------------------------------ constraints --
+//
+// Three groups, kept separate because they answer different questions and
+// have different provenance:
+//
+//   PRINT_LIMITS     physical -- what the printer and the filament can do.
+//                    Violating one damages the print or the machine.
+//   GEOMETRY_LIMITS  the coordinate system and shape rules the compiler
+//                    itself needs (bed size, safe area, closure snap).
+//   LEGIBILITY_GUIDE tactile perception -- past these a "line" stops
+//                    reading as a line and a "fill" as a filled area.
+//                    NONE of these have been tested on hardware, so they
+//                    are NOT enforced: they reach the model as prompt
+//                    guidance only. Flip `enforced` once the numbers are
+//                    confirmed and they become warnings in the rule checks.
+//
+// Every PRINT_LIMITS value is still a PLACEHOLDER guessed from the library
+// defaults and the TPU cautions -- docs/PARAMETER_CONSTRAINTS.md is the
+// fill-in form generated from these objects. Flip a row's `status` to
+// "confirmed" here once a print confirms it; the form and the prompt text
+// both follow automatically.
+
+const hard = (value, applies, note = "", extra = {}) => ({ value, kind: "hard", status: "placeholder", applies, note, ...extra });
+const warn = (value, applies, note = "", extra = {}) => ({ value, kind: "warn", status: "placeholder", applies, note, ...extra });
+
+export const PRINT_LIMITS = {
+  minDomeDiameter: hard(0.8, "blob / directionalBlob dome diameter, hairy root diameter, disc diameter, 2*dotRadius", "below this the dome does not clear the 0.4mm relief floor"),
+  minDiscHeight: hard(0.4, "disc height", "two 0.2mm layers; already floored in the library"),
+  minLayers: hard(2, "any line brush's nLayers", "0.4mm relief floor -- thinner cannot be felt"),
+  zGapFloor: hard(0.25, "variableThickness zGap", "user-validated; lower prints flat"),
+  minSolidSheetGap: hard(0.35, "hatch gap with the solid brush, and diamond fillGap", "below this is severe over-extrusion"),
+  retractCyclesHard: hard(2000, "retraction cycles in one job", "TPU drive-gear damage; deliberately high -- a diamond fill alone does hundreds of small in-place retracts"),
+  netExtrusionTrip: hard(-20, "running sum of E deltas across the job", "a dip this far negative is a retraction-math bug in a brush, not a real move", { internal: true }),
+  minBeadWidth: warn(0.4, "width / beadWidth / thinWidth", "about one nozzle width"),
+  blobDottedGapOverDiameter: warn(1.0, "blobDotted gap, required as gap >= diameter + this", "closer and adjacent domes fuse into a ridge"),
+  hairyDottedGapOverRoot: warn(2.0, "hairyDotted gap, required as gap >= rootDiameter + this"),
+  minDottedGapOverDot: warn(1.0, "dotted gap, required as gap >= 2*dotRadius + this"),
+  minHairSpacing: warn(2.5, "hairy strand spacing", "closer and strands fuse"),
+  minHairyFillRowGap: warn(4.0, "hatch gap with the hairy brush", "closer and the hair rows fuse"),
+  retractCyclesWarn: warn(250, "retraction cycles in one job", "TPU can flat-spot at the drive gear; the count is surfaced to the user"),
 };
+
+export const GEOMETRY_LIMITS = {
+  bed: { value: 220, applies: "bed size in mm, both axes", note: "absolute bound on any emitted coordinate" },
+  safeMin: { value: 15, applies: "minimum X/Y for every printed coordinate", note: "margin the prime line and the bed clips need" },
+  safeMax: { value: 205, applies: "maximum X/Y for every printed coordinate", note: "" },
+  closureSnapMm: { value: 0.5, applies: "a region boundary's end vs. its start", note: "within this snaps closed; a larger gap is closed with a straight edge and warned about" },
+};
+
+// Not enforced -- see the header comment. `enforced` is flipped by tests
+// (and, once the numbers are confirmed, here) to route these into the rule
+// checks as warnings.
+export const LEGIBILITY_GUIDE = {
+  enforced: false,
+  status: "untested",
+  rules: {
+    maxDottedGapOverDiameter: { value: 4.0, applies: "dotted / blobDotted / directionalBlobDotted / hairyDotted gap, as a multiple of the dot diameter", note: "past this it reads as scattered dots, not a line" },
+    maxDashGapOverSegLen: { value: 3.0, applies: "dashed gapLen, as a multiple of segLen", note: "past this it reads as isolated dashes" },
+    minDashLen: { value: 2.0, applies: "dashed segLen", note: "shorter dashes are indistinct by touch" },
+    minDashGap: { value: 2.0, applies: "dashed gapLen", note: "" },
+    minSegmentLen: { value: 3.0, applies: "segmented thinLen / fatLen", note: "" },
+    maxHairSpacing: { value: 12.0, applies: "hairy strand spacing", note: "past this the strands stop reading as one hairy line" },
+    maxShadeFillGap: { value: 8.0, applies: "hatch row gap with a continuous brush", note: "past this the area no longer reads as shaded, just as spaced lines" },
+    maxDottedFillRowGap: { value: 12.0, applies: "hatch row gap with a dotted or hairy brush", note: "past this it reads as separate rows, not a filled patch" },
+    minDiamondDiag: { value: 4.0, applies: "diamond diag", note: "smaller cells blur together" },
+  },
+};
+
+// Flat numeric view -- what every check below (and the page's "fit to safe
+// area" button, via C.CONSTRAINTS) actually reads, so a number lives in
+// exactly one place.
+export const CONSTRAINTS = Object.fromEntries([
+  ...Object.entries(PRINT_LIMITS).map(([k, r]) => [k, r.value]),
+  ...Object.entries(GEOMETRY_LIMITS).map(([k, r]) => [k, r.value]),
+]);
+
+const LEG = (name) => LEGIBILITY_GUIDE.rules[name].value;
+
+/** The enforced-limits section of a stage prompt, generated from
+ * PRINT_LIMITS + GEOMETRY_LIMITS so the prompt can never drift from what
+ * the code checks (it used to be hand-copied into reference-brushes.md).
+ * `internal` rows are about library bugs, not model choices -- omitted. */
+export function limitsText() {
+  const rows = (kind) => Object.values(PRINT_LIMITS)
+    .filter((r) => r.kind === kind && !r.internal)
+    .map((r) => `  ${r.applies}: ${r.value}${r.note ? ` -- ${r.note}` : ""}`);
+  return [
+    "LIMITS THE PAGE ENFORCES (physical; every number is a placeholder pending hardware confirmation)",
+    "",
+    "Hard -- the page refuses to mark the job safe:",
+    ...rows("hard"),
+    `  every printed coordinate: inside X/Y ${CONSTRAINTS.safeMin}-${CONSTRAINTS.safeMax}`,
+    "  a region boundary: simple (never self-crossing) and closed",
+    "  a path: not too steep to print at any sampling resolution",
+    "",
+    "Warned -- surfaced to the user, not blocking:",
+    ...rows("warn"),
+    `  a boundary whose ends are more than ${CONSTRAINTS.closureSnapMm}mm apart: closed with a straight edge`,
+    "  two elements' fills overlapping, or a stroke printed over another element's fill",
+  ].join("\n");
+}
+
+/** The perceptual-guidance section. Explicitly marked as untested and
+ * unenforced so the model treats it as judgement, not as a rule it can
+ * point at. */
+export function legibilityText() {
+  return [
+    "TACTILE LEGIBILITY (guidance, NOT enforced -- these numbers are not yet hardware-tested)",
+    "",
+    ...Object.values(LEGIBILITY_GUIDE.rules).map((r) => `  ${r.applies}: ${r.value}${r.note ? ` -- ${r.note}` : ""}`),
+    "",
+    "Pick textures that feel DISTINCT by touch when they encode different",
+    "meanings (a ridge vs. dots vs. hair), not merely different to look at.",
+  ].join("\n");
+}
 
 // ---------------------------------------------------------------- options --
 
@@ -679,9 +773,10 @@ export function generatePattern(pattern, polygon, tf, what) {
 
 // ------------------------------------------------------------------ rules --
 
-// Physical checks on one brush/stamp's options (see CONSTRAINTS). `ctx`
-// carries the pattern gap in bed mm for hatch fills.
-export function checkBrushRules(fn, opts, ctx = {}, tag = fn) {
+// Physical checks on one brush/stamp's options (see PRINT_LIMITS). Rules
+// that belong to a fill's PATTERN rather than to the brush walking it live
+// in checkPatternRules() below.
+export function checkBrushRules(fn, opts, tag = fn) {
   const errors = [], warnings = [];
   const g = (k, d) => (opts[k] === undefined || opts[k] === null ? d : opts[k]);
   const spec = optionSpecFor(fn);
@@ -696,10 +791,6 @@ export function checkBrushRules(fn, opts, ctx = {}, tag = fn) {
   if (fn === "disc" && g("height", 0.4) < CONSTRAINTS.minDiscHeight) errors.push(`${tag}: height below ${CONSTRAINTS.minDiscHeight}mm.`);
   if ("nLayers" in spec && g("nLayers", 2) < CONSTRAINTS.minLayers) errors.push(`${tag}: nLayers ${g("nLayers")} is below ${CONSTRAINTS.minLayers} -- relief will not be felt.`);
   if (fn === "variableThickness" && g("zGap", 0.25) < CONSTRAINTS.zGapFloor) errors.push(`${tag}: zGap below the ${CONSTRAINTS.zGapFloor}mm floor (prints flat).`);
-  if (ctx.hatchGap != null) {
-    if (fn === "solid" && ctx.hatchGap < CONSTRAINTS.minSolidSheetGap) errors.push(`${tag}: hatch gap ${ctx.hatchGap.toFixed(2)}mm below ${CONSTRAINTS.minSolidSheetGap}mm -- severe over-extrusion.`);
-    if (fn === "hairy" && ctx.hatchGap < CONSTRAINTS.minHairyFillRowGap) warnings.push(`${tag}: hairy hatch row gap ${ctx.hatchGap.toFixed(1)}mm below ${CONSTRAINTS.minHairyFillRowGap}mm -- rows may fuse.`);
-  }
 
   for (const k of ["width", "beadWidth", "thinWidth"]) {
     if (k in spec && g(k, def(k, 0.5)) < CONSTRAINTS.minBeadWidth) warnings.push(`${tag}: ${k} below ${CONSTRAINTS.minBeadWidth}mm.`);
@@ -721,6 +812,73 @@ export function checkBrushRules(fn, opts, ctx = {}, tag = fn) {
     if (gap < 2 * dr + CONSTRAINTS.minDottedGapOverDot) warnings.push(`${tag}: gap ${gap}mm is tight for dotRadius ${dr}mm.`);
   }
   if (fn === "hairy" && g("spacing", 5) < CONSTRAINTS.minHairSpacing) warnings.push(`${tag}: strand spacing ${g("spacing")}mm below ${CONSTRAINTS.minHairSpacing}mm -- strands may fuse.`);
+
+  // Tactile legibility -- the "stops reading as a line / as a fill" family
+  // the older single-call page enforced. OFF by default: none of these
+  // numbers have been printed and confirmed, so enforcing them would
+  // manufacture authority the project does not have. The path exists (and
+  // is tested with the flag on) so confirming the numbers is a one-line
+  // change rather than a rewrite.
+  if (LEGIBILITY_GUIDE.enforced) {
+    const dotty = { blobDotted: "diameter", directionalBlobDotted: "diameter", hairyDotted: "rootDiameter" };
+    if (fn in dotty) {
+      const dia = g(dotty[fn], def(dotty[fn], 1.6)), gap = g("gap", fn === "directionalBlobDotted" ? dia : 10);
+      if (gap > dia * LEG("maxDottedGapOverDiameter")) warnings.push(`${tag}: gap ${gap}mm is large for ${dotty[fn]} ${dia}mm -- reads as scattered dots, not a line (want <= ${(dia * LEG("maxDottedGapOverDiameter")).toFixed(1)}mm).`);
+    }
+    if (fn === "dotted") {
+      const dia = 2 * g("dotRadius", 0.8), gap = g("gap", 10);
+      if (gap > dia * LEG("maxDottedGapOverDiameter")) warnings.push(`${tag}: gap ${gap}mm is large for dotRadius ${g("dotRadius", 0.8)}mm -- reads as scattered dots, not a line (want <= ${(dia * LEG("maxDottedGapOverDiameter")).toFixed(1)}mm).`);
+    }
+    if (fn === "dashed") {
+      const segLen = g("segLen", 8), gapLen = g("gapLen", 4);
+      if (segLen < LEG("minDashLen")) warnings.push(`${tag}: segLen ${segLen}mm below ${LEG("minDashLen")}mm -- dashes are indistinct.`);
+      if (gapLen < LEG("minDashGap")) warnings.push(`${tag}: gapLen ${gapLen}mm below ${LEG("minDashGap")}mm.`);
+      if (gapLen > segLen * LEG("maxDashGapOverSegLen")) warnings.push(`${tag}: gapLen ${gapLen}mm is large vs segLen ${segLen}mm -- reads as isolated dashes (want <= ${(segLen * LEG("maxDashGapOverSegLen")).toFixed(1)}mm).`);
+    }
+    if (fn === "segmented" && (g("thinLen", 8) < LEG("minSegmentLen") || g("fatLen", 4) < LEG("minSegmentLen"))) {
+      warnings.push(`${tag}: a segment length is below ${LEG("minSegmentLen")}mm -- the alternation stops being felt.`);
+    }
+    if (fn === "hairy" && g("spacing", 5) > LEG("maxHairSpacing")) warnings.push(`${tag}: strand spacing ${g("spacing")}mm above ${LEG("maxHairSpacing")}mm -- the strands stop reading as one hairy line.`);
+  }
+  return { errors, warnings };
+}
+
+/** Physical checks on a fill PATTERN's own numbers, given the brush that
+ * will walk it and the graphic's scale (pattern spacing is written in
+ * graphic units and scales with the transform; a brush's mm do not).
+ *
+ * Separate from checkBrushRules because these are properties of the
+ * pattern, not of the brush -- and because almost nothing checked them
+ * before: only hatch's gap ever reached a rule, through an ad-hoc context
+ * field, and diamond's fillGap (an over-extrusion limit the older
+ * single-call page did enforce) was lost entirely in the move to this
+ * page. */
+export function checkPatternRules(pattern, fn, scale, tag) {
+  const errors = [], warnings = [];
+  const kind = pattern?.kind;
+  const num = (k, fallback) => {
+    const v = Number(pattern?.[k]);
+    return Number.isFinite(v) ? v : fallback;
+  };
+
+  if (kind === "hatch") {
+    const gap = num("gap", PATTERN_OPTIONS.hatch.gap.def) * scale;
+    if (fn === "solid" && gap < CONSTRAINTS.minSolidSheetGap) errors.push(`${tag}: hatch gap ${gap.toFixed(2)}mm below ${CONSTRAINTS.minSolidSheetGap}mm -- severe over-extrusion.`);
+    if (fn === "hairy" && gap < CONSTRAINTS.minHairyFillRowGap) warnings.push(`${tag}: hairy hatch row gap ${gap.toFixed(1)}mm below ${CONSTRAINTS.minHairyFillRowGap}mm -- rows may fuse.`);
+    if (LEGIBILITY_GUIDE.enforced) {
+      const dottedRows = ["dotted", "blobDotted", "directionalBlobDotted", "hairyDotted", "hairy"].includes(fn);
+      const max = dottedRows ? LEG("maxDottedFillRowGap") : LEG("maxShadeFillGap");
+      if (gap > max) warnings.push(`${tag}: hatch row gap ${gap.toFixed(1)}mm above ${max}mm -- reads as separate rows, not a filled area.`);
+    }
+  }
+  if (kind === "diamond") {
+    const fillGap = num("fillGap", PATTERN_OPTIONS.diamond.fillGap.def) * scale;
+    if (fillGap < CONSTRAINTS.minSolidSheetGap) errors.push(`${tag}: diamond fillGap ${fillGap.toFixed(2)}mm below ${CONSTRAINTS.minSolidSheetGap}mm -- severe over-extrusion.`);
+    if (LEGIBILITY_GUIDE.enforced) {
+      const diag = num("diag", PATTERN_OPTIONS.diamond.diag.def) * scale;
+      if (diag < LEG("minDiamondDiag")) warnings.push(`${tag}: diamond diag ${diag.toFixed(1)}mm below ${LEG("minDiamondDiag")}mm -- cells blur together.`);
+    }
+  }
   return { errors, warnings };
 }
 
@@ -742,7 +900,17 @@ function coerceOptionValue(meta, v) {
   if (meta.kind === "bool") return { value: !!v };
   const n = Number(v);
   if (!Number.isFinite(n)) return { error: "must be a number" };
-  return { value: meta.kind === "int" ? Math.round(n) : n };
+  const out = meta.kind === "int" ? Math.round(n) : n;
+  // An option's range is part of its contract, not just a slider hint. A
+  // value outside it (a 100mm hatch gap on a 15mm bar, a 40mm dome) is a
+  // real mistake, and storing it silently produced textures nobody asked
+  // for -- the option range was previously consulted only to size the UI
+  // input and to clamp knob-driven values, never to check what a stage
+  // wrote directly. Rejecting here gives the stage its own mistake back.
+  if (meta.min != null && meta.max != null && (out < meta.min || out > meta.max)) {
+    return { error: `must be within ${meta.min}..${meta.max}` };
+  }
+  return { value: out };
 }
 
 function cleanOptions(fn, options) {
@@ -763,6 +931,9 @@ export function compileScene(scene) {
   const jobs = [];
   const report = { transform: { scale: tf.scale, origin: tf.origin.map((v) => +v.toFixed(2)) }, elements: [], chart: {} };
   const fillPolys = [];
+  // Every line stroke / point stamp in bed space, for the
+  // stroke-over-another-element's-fill check after the element loop.
+  const marks = [];
   let bedBbox = null;
 
   const outOfSafe = (points) => points.some(([x, y]) => x < CONSTRAINTS.safeMin || x > CONSTRAINTS.safeMax || y < CONSTRAINTS.safeMin || y > CONSTRAINTS.safeMax);
@@ -777,11 +948,11 @@ export function compileScene(scene) {
     const entry = { id: el.id, label, kind: el.kind, role: el.role || "" };
     report.elements.push(entry);
 
-    const addBrushJob = (slot, fn, options, pts, extra = {}, ctx = {}) => {
+    const addBrushJob = (slot, fn, options, pts, extra = {}) => {
       const tag = `"${label}" ${slot}`;
       if (!isBrush(fn)) { errors.push(`${tag}: "${fn}" is not a line brush (${BRUSH_NAMES.join(", ")}).`); return false; }
       const opts = cleanOptions(fn, options);
-      const rule = checkBrushRules(fn, opts, ctx, tag);
+      const rule = checkBrushRules(fn, opts, tag);
       errors.push(...rule.errors); warnings.push(...rule.warnings);
       jobs.push({ elementId: el.id, slot, label, kind: "brush", fn, options: { ...opts, ...(extra.brushOverride || {}) }, pts, newPattern: extra.newPattern ?? true });
       return true;
@@ -790,7 +961,7 @@ export function compileScene(scene) {
       const tag = `"${label}" ${slot}`;
       if (!isStamp(fn)) { errors.push(`${tag}: "${fn}" is not a stamp (${STAMP_NAMES.join(", ")}).`); return false; }
       const opts = cleanOptions(fn, options);
-      const rule = checkBrushRules(fn, opts, {}, tag);
+      const rule = checkBrushRules(fn, opts, tag);
       errors.push(...rule.errors); warnings.push(...rule.warnings);
       jobs.push({ elementId: el.id, slot, label, kind: "stamp", fn, options: opts, at, newPattern: true });
       return true;
@@ -806,7 +977,7 @@ export function compileScene(scene) {
         entry.count = pts.length;
         bedBbox = mergeBbox(bedBbox, bboxOf(pts));
         if (pts.some((p) => outOfSafe([p]))) errors.push(`"${label}": a point is outside the safe area (${CONSTRAINTS.safeMin}-${CONSTRAINTS.safeMax}mm).`);
-        if (tex.brush?.fn) for (const p of pts) addStampJob("brush", tex.brush.fn, tex.brush.options, p);
+        if (tex.brush?.fn) { marks.push({ id: el.id, label, points: pts }); for (const p of pts) addStampJob("brush", tex.brush.fn, tex.brush.options, p); }
       } else if (r.kind === "line") {
         // strokes has one entry for a plain line, several for a GROUP
         // (repeated disconnected strokes -- axis ticks, gridlines --
@@ -832,6 +1003,7 @@ export function compileScene(scene) {
         bedBbox = mergeBbox(bedBbox, bb);
         if (strokeSets.some((pts) => outOfSafe(pts))) errors.push(`"${label}": path leaves the safe area (${CONSTRAINTS.safeMin}-${CONSTRAINTS.safeMax}mm).`);
         if (tex.brush?.fn) {
+          marks.push({ id: el.id, label, points: strokeSets.flat() });
           for (const pts of strokeSets) addBrushJob("brush", tex.brush.fn, tex.brush.options, TF.polylineToPts(pts, r.dense ? null : SAMPLE_STEP));
         }
       } else if (r.kind === "region") {
@@ -847,16 +1019,24 @@ export function compileScene(scene) {
           const pat = tex.fill.pattern || { kind: "hatch" };
           const gen = generatePattern(pat, poly, tf, `"${label}" fill`);
           entry.fill = { kind: pat.kind, strokes: gen.strokes.length, stamps: gen.stamps.length, strokeLength: rnd(gen.strokes.reduce((s, st) => s + polylineLength(st.points), 0)) };
+          const patRule = checkPatternRules(pat, tex.fill.fn, tf.scale, `"${label}" fill`);
+          errors.push(...patRule.errors); warnings.push(...patRule.warnings);
+          // The checkerboard parity is the one thing about a diamond fill
+          // that cannot be eyeballed, and the library ships the explicit
+          // verifier for exactly this -- it was simply never called here.
+          if (pat.kind === "diamond" && gen.diamonds) {
+            const v = TF.verifyCheckerboard(gen.diamonds, (Number(pat.diag) || PATTERN_OPTIONS.diamond.diag.def) * tf.scale);
+            if (v.violations !== 0) errors.push(`"${label}" fill: diamond checkerboard has ${v.violations} adjacency violation(s) of ${v.checked} checked -- neighbouring cells share a fill state.`);
+          }
           const needsStamp = STAMP_PATTERNS.includes(pat.kind);
           if (needsStamp && !isStamp(tex.fill.fn)) errors.push(`"${label}" fill: pattern "${pat.kind}" places stamps, so the fill brush must be a stamp (${STAMP_NAMES.join(", ")}), not "${tex.fill.fn}".`);
           else if (!needsStamp && !isBrush(tex.fill.fn)) errors.push(`"${label}" fill: pattern "${pat.kind}" draws strokes, so the fill brush must be a line brush (${BRUSH_NAMES.join(", ")}), not "${tex.fill.fn}".`);
           else if (needsStamp) {
             for (const at of gen.stamps) addStampJob("fill", tex.fill.fn, tex.fill.options, at);
           } else {
-            const ctx = pat.kind === "hatch" ? { hatchGap: (Number(pat.gap) || 4) * tf.scale } : {};
             gen.strokes.forEach((st, i) => {
               addBrushJob("fill", tex.fill.fn, tex.fill.options, TF.polylineToPts(st.points, st.sparse ? null : SAMPLE_STEP),
-                { brushOverride: st.brushOverride, newPattern: gen.newPatternOnce ? i === 0 : true }, i === 0 ? ctx : {});
+                { brushOverride: st.brushOverride, newPattern: gen.newPatternOnce ? i === 0 : true });
             });
             if (gen.strokes.length && !gen.strokes.some((st) => st.points.length > 1)) warnings.push(`"${label}" fill: pattern produced no printable strokes inside the region.`);
           }
@@ -872,6 +1052,28 @@ export function compileScene(scene) {
   for (let i = 0; i < fillPolys.length; i++) {
     for (let j = i + 1; j < fillPolys.length; j++) {
       if (polygonsOverlap(fillPolys[i].poly, fillPolys[j].poly)) warnings.push(`fills of "${fillPolys[i].label}" and "${fillPolys[j].label}" overlap -- double deposition where they share area.`);
+    }
+  }
+
+  // A stroke or stamp printed on top of ANOTHER element's fill -- the
+  // nozzle passing over already-deposited material. The older single-call
+  // page caught this with a bbox layout check over every call; this page
+  // checked only fill-against-fill, so a marker or curve sitting inside a
+  // shaded area went unflagged. Subsampled and bbox-prefiltered: a dense
+  // curve can carry thousands of points and a sampled boundary hundreds of
+  // edges, and one interior point is enough to prove the case.
+  for (const m of marks) {
+    for (const f of fillPolys) {
+      if (m.id === f.id) continue;            // a region's own outline/fill is expected
+      const fb = bboxOf(f.poly);
+      const stride = Math.max(1, Math.ceil(m.points.length / 200));
+      let hit = false;
+      for (let i = 0; i < m.points.length && !hit; i += stride) {
+        const [x, y] = m.points[i];
+        if (x < fb.minX || x > fb.maxX || y < fb.minY || y > fb.maxY) continue;
+        if (pointInPolygon(m.points[i], f.poly)) hit = true;
+      }
+      if (hit) warnings.push(`"${m.label}" prints over the fill of "${f.label}" -- fine if it is meant to stand taller, a nozzle collision risk if they print at the same height.`);
     }
   }
 
@@ -895,6 +1097,10 @@ export function compileScene(scene) {
 // and the footer emit G91 relative moves). Counts retraction cycles.
 export function scanGcode(lines) {
   let retractCycles = 0, absolute = true, px = null, py = null;
+  // Running sum of E deltas. Not a machine-accurate filament model (it
+  // ignores G92 resets) but a tripwire for a gross retraction-math bug in
+  // a brush: real printing never drives the net this far negative.
+  let eSum = 0, eMin = 0;
   const outOfBounds = [];
   const num = (line, axis) => {
     const m = line.match(new RegExp(`(?:^|\\s)${axis}(-?\\d+(?:\\.\\d+)?)`));
@@ -909,14 +1115,18 @@ export function scanGcode(lines) {
     if (cmd === "G92") { const gx = num(line, "X"), gy = num(line, "Y"); if (gx !== null) px = gx; if (gy !== null) py = gy; continue; }
     if (cmd !== "G0" && cmd !== "G1" && cmd !== "G2" && cmd !== "G3") continue;
     const e = num(line, "E");
-    if (e !== null && e < 0) retractCycles++;
+    if (e !== null) {
+      eSum += e;
+      if (eSum < eMin) eMin = eSum;
+      if (e < 0) retractCycles++;
+    }
     const mx = num(line, "X"), my = num(line, "Y");
     if (absolute) { if (mx !== null) px = mx; if (my !== null) py = my; }
     else { if (mx !== null && px !== null) px += mx; if (my !== null && py !== null) py += my; }
     if (px !== null && (px < 0 || px > CONSTRAINTS.bed)) outOfBounds.push(`X${px.toFixed(2)} (line: ${line})`);
     if (py !== null && (py < 0 || py > CONSTRAINTS.bed)) outOfBounds.push(`Y${py.toFixed(2)} (line: ${line})`);
   }
-  return { retractCycles, outOfBounds };
+  return { retractCycles, outOfBounds, eSum, eMin, negTrip: eMin < CONSTRAINTS.netExtrusionTrip };
 }
 
 // ---------------------------------------------------------------- runJobs --
@@ -940,9 +1150,13 @@ export function runJobs(jobs, { material = "TPU" } = {}) {
   const gcode = TF.stripComments(lines.join("\n") + "\n");
   const scan = scanGcode(lines);
   for (const oob of scan.outOfBounds.slice(0, 5)) errors.push(`coordinate out of bed bounds: ${oob}`);
+  if (scan.negTrip) errors.push(`net extrusion dips to ${scan.eMin.toFixed(2)}mm -- a retraction-math bug in one of the brushes, not a printable job.`);
   if (scan.retractCycles >= CONSTRAINTS.retractCyclesHard) errors.push(`${scan.retractCycles} retraction cycles -- over the ${CONSTRAINTS.retractCyclesHard} cap (TPU drive-gear damage risk).`);
   else if (scan.retractCycles >= CONSTRAINTS.retractCyclesWarn) warnings.push(`${scan.retractCycles} retraction cycles (soft cap ${CONSTRAINTS.retractCyclesWarn}) -- TPU can flat-spot; consider wider spacing.`);
-  const digest = { lineCount: lines.length, retractCycles: scan.retractCycles, boundsOk: scan.outOfBounds.length === 0 };
+  const digest = {
+    lineCount: lines.length, retractCycles: scan.retractCycles, boundsOk: scan.outOfBounds.length === 0,
+    netExtrusionMm: +scan.eSum.toFixed(1), minNetExtrusionMm: +scan.eMin.toFixed(1),
+  };
   return { gcode, digest, errors, warnings, ok: errors.length === 0 };
 }
 

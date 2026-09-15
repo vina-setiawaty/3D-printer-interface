@@ -417,4 +417,145 @@ test("normalizeScene discards old formats", () => {
   assert.equal(C.normalizeScene(null).version, C.SCENE_VERSION);
 });
 
+// ------------------------------------------------- guardrails / constraints --
+
+test("an out-of-range option value is rejected, not stored", () => {
+  const s = C.defaultScene();
+  s.elements = [{ id: "b", label: "bar", kind: "region", boundary: [rect(40, 40, 20, 20)] }];
+  s.textures = { b: { fill: { fn: "solid", options: {}, pattern: { kind: "hatch", angleDeg: 0, gap: 4 } } } };
+
+  // hatch gap's range is 0.3..20; 100 would silently produce a fill with a
+  // single stroke (or none) in a 20mm bar.
+  const bad = C.validateStageOutput("parameters", {
+    chat: "denser", abstractions: [],
+    options: [{ elementId: "b", slot: "fill", options: JSON.stringify({ gap: 100, width: 0.5 }) }],
+  }, s);
+  assert.equal(bad.errors.length, 1, bad.errors.join("; "));
+  assert.ok(/within 0\.3\.\.20/.test(bad.errors[0]), bad.errors[0]);
+  assert.deepEqual(bad.value.options[0].patternOptions, {}, "the bad value is not stored");
+  assert.deepEqual(bad.value.options[0].options, { width: 0.5 }, "the good value alongside it still is");
+
+  // the boundary values themselves are in range
+  const edge = C.validateStageOutput("parameters", {
+    chat: "", abstractions: [],
+    options: [{ elementId: "b", slot: "fill", options: JSON.stringify({ gap: 20 }) }],
+  }, s);
+  assert.deepEqual(edge.errors, []);
+  assert.equal(edge.value.options[0].patternOptions.gap, 20);
+
+  // an int option rounds first, then range-checks
+  const low = C.validateStageOutput("parameters", {
+    chat: "", abstractions: [],
+    options: [{ elementId: "b", slot: "fill", options: JSON.stringify({ nLayers: 0 }) }],
+  }, s);
+  assert.equal(low.errors.length, 1);
+  assert.ok(/within 1\.\.10/.test(low.errors[0]), low.errors[0]);
+});
+
+test("diamond fillGap below the over-extrusion floor is a hard error", () => {
+  const s = C.defaultScene();
+  s.elements = [{ id: "d", label: "box", kind: "region", boundary: [rect(60, 60, 40, 30)] }];
+  s.textures = { d: { fill: { fn: "solid", options: {}, pattern: { kind: "diamond", diag: 8, fillGap: 0.2 } } } };
+  let r = C.compileScene(s);
+  assert.ok(r.errors.some((e) => /diamond fillGap .* over-extrusion/.test(e)), r.errors.join("; "));
+
+  // a valid diamond fill is clean, and its checkerboard parity verifies --
+  // the verifier is wired into compileScene and must not false-alarm
+  s.textures.d.fill.pattern.fillGap = 0.6;
+  r = C.compileScene(s);
+  assert.deepEqual(r.errors, []);
+  assert.ok(!r.errors.some((e) => /checkerboard/.test(e)));
+
+  // fillGap is in graphic units: scaling the graphic down scales it below
+  // the floor even though the written number is unchanged
+  s.transform = { scale: 0.4, origin: [40, 40] };
+  r = C.compileScene(s);
+  assert.ok(r.errors.some((e) => /diamond fillGap .* over-extrusion/.test(e)), "scaled fillGap 0.24mm is checked in bed mm");
+});
+
+test("net extrusion dipping far negative is a hard error", () => {
+  const clean = C.scanGcode(["G90", "G1 X20 Y20 E1", "G1 X30 Y20 E1", "G1 E-1.3"]);
+  assert.equal(clean.retractCycles, 1);
+  assert.equal(clean.negTrip, false);
+  assert.ok(Math.abs(clean.eSum - 0.7) < 1e-9);
+
+  const buggy = C.scanGcode(["G90", ...Array.from({ length: 20 }, () => "G1 X20 Y20 E-1.3")]);
+  assert.equal(buggy.negTrip, true, `eMin ${buggy.eMin}`);
+  assert.ok(buggy.eMin < -20);
+});
+
+test("a stroke printed over another element's fill warns; its own outline does not", () => {
+  const s = C.defaultScene();
+  s.elements = [
+    { id: "a", label: "shaded area", kind: "region", boundary: [rect(40, 40, 40, 40)] },
+    { id: "c", label: "curve across it", kind: "line", role: "curve", path: { points: [[45, 60], [75, 60]] } },
+    { id: "m", label: "marker inside", kind: "point", role: "marker", at: [60, 50] },
+  ];
+  s.textures = {
+    a: { outline: { fn: "solid", options: {} }, fill: { fn: "solid", options: {}, pattern: { kind: "hatch", gap: 4 } } },
+    c: { brush: { fn: "solid", options: {} } },
+    m: { brush: { fn: "blob", options: {} } },
+  };
+  let r = C.compileScene(s);
+  assert.ok(r.warnings.some((w) => /"curve across it" prints over the fill of "shaded area"/.test(w)), r.warnings.join("; "));
+  assert.ok(r.warnings.some((w) => /"marker inside" prints over the fill of "shaded area"/.test(w)));
+  assert.ok(!r.warnings.some((w) => /"shaded area" prints over the fill of "shaded area"/.test(w)), "a region's own outline is expected, not a collision");
+
+  // moved clear of the region, nothing is flagged
+  s.elements[1].path = { points: [[100, 60], [130, 60]] };
+  s.elements[2].at = [110, 50];
+  r = C.compileScene(s);
+  assert.ok(!r.warnings.some((w) => /prints over the fill/.test(w)), r.warnings.join("; "));
+});
+
+test("legibility limits are guidance only until enforced is flipped", () => {
+  const s = C.defaultScene();
+  // gap 40mm on a 1.6mm dome: 25x the diameter, far past "reads as a line"
+  s.elements = [{ id: "l", label: "dotty", kind: "line", role: "curve", path: { points: [[40, 40], [160, 40]] } }];
+  s.textures = { l: { brush: { fn: "blobDotted", options: { gap: 40, diameter: 1.6 } } } };
+
+  let r = C.compileScene(s);
+  assert.deepEqual(r.errors, []);
+  assert.ok(!r.warnings.some((w) => /scattered dots/.test(w)), "not enforced by default -- the numbers are untested");
+  assert.equal(C.LEGIBILITY_GUIDE.enforced, false);
+
+  C.LEGIBILITY_GUIDE.enforced = true;
+  try {
+    r = C.compileScene(s);
+    assert.deepEqual(r.errors, [], "legibility never blocks, even when enforced");
+    assert.ok(r.warnings.some((w) => /scattered dots/.test(w)), r.warnings.join("; "));
+
+    // the fill-row-gap rule reads the pattern, and knows a dotted row from
+    // a continuous one (12mm vs 8mm)
+    const f = C.defaultScene();
+    f.elements = [{ id: "p", label: "patch", kind: "region", boundary: [rect(40, 40, 60, 60)] }];
+    f.textures = { p: { fill: { fn: "solid", options: {}, pattern: { kind: "hatch", gap: 10 } } } };
+    assert.ok(C.compileScene(f).warnings.some((w) => /reads as separate rows/.test(w)), "10mm rows of solid are past the 8mm shade limit");
+    f.textures.p.fill.fn = "blobDotted";
+    assert.ok(!C.compileScene(f).warnings.some((w) => /reads as separate rows/.test(w)), "10mm rows of dots are inside the 12mm limit");
+  } finally {
+    C.LEGIBILITY_GUIDE.enforced = false;
+  }
+});
+
+test("the prompt's limit text is generated from the limit objects", () => {
+  const limits = C.limitsText();
+  for (const [key, rule] of Object.entries(C.PRINT_LIMITS)) {
+    if (rule.internal) continue;
+    assert.ok(limits.includes(String(rule.value)), `${key}'s value ${rule.value} is missing from limitsText()`);
+    assert.ok(limits.includes(rule.applies), `${key}'s description is missing from limitsText()`);
+  }
+  assert.ok(limits.includes("15-205"), "the safe area comes from GEOMETRY_LIMITS");
+  assert.ok(!limits.includes("running sum of E deltas"), "internal rules are not addressed to the model");
+  assert.ok(/placeholder/i.test(limits), "the text says the numbers are unconfirmed");
+
+  const leg = C.legibilityText();
+  for (const rule of Object.values(C.LEGIBILITY_GUIDE.rules)) assert.ok(leg.includes(rule.applies), `${rule.applies} missing from legibilityText()`);
+  assert.ok(/NOT enforced/.test(leg) && /not yet hardware-tested/.test(leg), "the text says these are guidance, not rules");
+
+  // the flat view every check reads stays in step with the structured one
+  assert.equal(C.CONSTRAINTS.minSolidSheetGap, C.PRINT_LIMITS.minSolidSheetGap.value);
+  assert.equal(C.CONSTRAINTS.safeMax, C.GEOMETRY_LIMITS.safeMax.value);
+});
+
 console.log(`${passed} passed${process.exitCode ? ", with failures" : ""}`);

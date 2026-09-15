@@ -19,14 +19,21 @@ different `localStorage` key, and its own copy of the texture library below
 | `stage-texture-check.md` | System prompt for the optional **texture-check** pass — same idea as geometry-check, for hand-placed fill coordinates only. |
 | `stage-parameters.md` | System prompt for **parameters** — sets option values and defines the weighted high-level knobs (abstractions). Has a marker for a future fuller abstraction guide. |
 | `reference-machine.md` | Shared facts: bed/material, the expression syntax, the piece/element geometry language, worked examples (grouping repeated features, a region between two curves). |
-| `reference-brushes.md` | Shared facts: the brush/stamp/pattern menu, their options, and the physically-enforced limits. |
+| `reference-brushes.md` | Shared facts: the brush/stamp/pattern menu and their options. The limit tables that used to live here are now generated — see below. |
+| `PARAMETER_CONSTRAINTS.md` | **Generated fill-in form** (`node tests/parametric/print-constraints.mjs`) listing every enforced print limit, the geometry limits, and the unenforced tactile-legibility guesses. Edit the values you know and send it back; they get transcribed into the catalog. |
 
 ## Keeping things in sync
 
 - Prompt text changes → update the matching `stage-*.md` / `reference-*.md`
   file **and** the matching section of `../../docs/llm-api-data-flow.md`.
-- Enforced-limit changes → `reference-brushes.md` **and**
-  `../parametric-catalog-with-tool.js`'s `CONSTRAINTS`/`checkBrushRules`
-  together.
+- Limit changes → edit `PRINT_LIMITS` / `GEOMETRY_LIMITS` /
+  `LEGIBILITY_GUIDE` in `../parametric-catalog-with-tool.js` and nothing
+  else: the prompt section (`limitsText()` / `legibilityText()`, appended to
+  the texture and parameters prompts by `systemPromptFor()`) and the
+  `PARAMETER_CONSTRAINTS.md` form (`node tests/parametric/print-constraints.mjs`)
+  are both generated from those objects. Never hand-write a limit into a doc.
+- Legibility limits are **not enforced** — none of the numbers has been
+  printed and confirmed. `LEGIBILITY_GUIDE.enforced = true` turns them into
+  warnings; the code path exists and is tested, waiting on real numbers.
 - Library changes → run `node tests/parametric/golden-brushes.mjs` (must
   stay byte-identical) and `node tests/parametric/compile-fixtures.mjs`.

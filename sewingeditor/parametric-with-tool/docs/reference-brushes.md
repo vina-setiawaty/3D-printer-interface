@@ -56,22 +56,11 @@ shading is `hatch` + `solid` with `gap` 3–6; dotted/hairy shading is
 `hatch` + that brush with `gap` 6–10, or `grid`/`stamps` + a stamp.
 Pattern spacing scales with the graphic; brush mm values do not.
 
-## Limits the page enforces (placeholders pending hardware confirmation)
+<!-- The enforced limits and the tactile-legibility guidance used to be
+hand-copied tables here. They are now GENERATED from `PRINT_LIMITS` /
+`GEOMETRY_LIMITS` / `LEGIBILITY_GUIDE` in `../parametric-catalog-with-tool.js`
+(`limitsText()` / `legibilityText()`) and appended to this file by
+`systemPromptFor()`, so the prompt cannot drift from what the code checks.
+`docs/PARAMETER_CONSTRAINTS.md` is the fill-in form generated from the same
+objects. To change a limit, change it in the catalog. -->
 
-Hard (blocks the print): any coordinate outside 15–205; a region boundary
-that crosses itself; a path too steep to print; dome/disc diameter < 0.8;
-disc height < 0.4; `nLayers` < 2; `zGap` < 0.25; `hatch`+`solid` gap
-< 0.35; more than 2000 retraction cycles in the job.
-
-Warned: blob-dotted `gap` < `diameter` + 1; hairy-dotted `gap` <
-`rootDiameter` + 2; dotted `gap` < 2·`dotRadius` + 1; hairy `spacing` < 2.5;
-hairy hatch row gap < 4; bead width < 0.4; two different regions' fills
-overlapping; more than 250 retraction cycles.
-
-Perceptual guidance (not enforced): a dotted line stops reading as a line
-past `gap` ≈ 4× diameter; a dashed line past `gapLen` ≈ 3× `segLen`; a
-hatch stops reading as shading past ≈ 8 mm row gap (12 mm for dotted or
-hairy rows); dashes and segments shorter than 2–3 mm are indistinct;
-diamond cells below 4 mm diagonal blur together. Pick textures that feel
-**distinct by touch** when they encode different meanings (ridge vs.
-dots vs. hair), not just visually different.
