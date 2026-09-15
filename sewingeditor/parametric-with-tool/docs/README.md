@@ -18,14 +18,35 @@ different `localStorage` key, and its own copy of the texture library below
 | `stage-texture.md` | System prompt for **texture** — assigns a brush/stamp and, for a region's fill, a pattern to each element slot. |
 | `stage-texture-check.md` | System prompt for the optional **texture-check** pass — same idea as geometry-check, for hand-placed fill coordinates only. |
 | `stage-parameters.md` | System prompt for **parameters** — sets option values and defines the weighted high-level knobs (abstractions). Has a marker for a future fuller abstraction guide. |
-| `reference-machine.md` | Shared facts: bed/material, the expression syntax, the piece/element geometry language, worked examples (grouping repeated features, a region between two curves). |
-| `reference-brushes.md` | Shared facts: the brush/stamp/pattern menu and their options. The limit tables that used to live here are now generated — see below. |
+| `ref-coordinates.md` | Bed, safe area, the global transform, material. |
+| `ref-expressions.md` | The formula grammar and what sampling does to a curve. |
+| `ref-geometry-language.md` | Pieces, elements, grouping repeated features, and solved (`between`) regions. |
+| `ref-brush-menu.md` | The brush and stamp menu with their options. |
+| `ref-patterns.md` | Fill patterns, the pattern/brush pairing, and a fill's two option spaces. |
 | `PARAMETER_CONSTRAINTS.md` | **Generated fill-in form** (`node tests/parametric/print-constraints.mjs`) listing every enforced print limit, the geometry limits, and the unenforced tactile-legibility guesses. Edit the values you know and send it back; they get transcribed into the catalog. |
+
+## How a doc becomes a prompt
+
+`../prompt-assembly.js` owns this — which docs each stage gets, which
+generated sections are appended, and how a file is read:
+
+- a **`stage-*.md`** file contributes only its ``` fenced block (the prose
+  outside the fence is notes to us, not prompt);
+- a **`ref-*.md`** file is used **whole**, fenced examples included.
+
+That distinction is load-bearing. The page previously took "the first
+fenced block, if any" from every file alike, which cut `reference-machine.md`
+down to the 712-character JSON example that happened to come first — the
+machine table, the safe-area rule, the expression grammar and the element
+tables never reached any stage. `tests/parametric/prompt-assembly.mjs`
+builds every stage's real prompt offline and guards against it recurring.
 
 ## Keeping things in sync
 
-- Prompt text changes → update the matching `stage-*.md` / `reference-*.md`
+- Prompt text changes → update the matching `stage-*.md` / `ref-*.md`
   file **and** the matching section of `../../docs/llm-api-data-flow.md`.
+  Changing which docs a stage gets is a change to `../prompt-assembly.js`,
+  not to this folder.
 - Limit changes → edit `PRINT_LIMITS` / `GEOMETRY_LIMITS` /
   `LEGIBILITY_GUIDE` in `../parametric-catalog-with-tool.js` and nothing
   else: the prompt section (`limitsText()` / `legibilityText()`, appended to

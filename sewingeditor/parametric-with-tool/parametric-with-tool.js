@@ -24,31 +24,12 @@
 // initParametricEditor on window for parametric-with-tool-compat.js.
 
 import { STAGES } from "./stage-schemas.js";
+import { DOC_PATHS, docText, composeSystemPrompt, composeUserMessage, composeRouteMessages } from "./prompt-assembly.js";
 
 const STORAGE_KEY = "parametricWithToolSessionState";
 const DEBUG_LOG_KEY = "parametricWithToolDebugLog";
 const DEBUG_LOG_MAX_TURNS = 15;   // localStorage is finite; keep the most recent turns
 
-// Prompt docs per stage. A doc wrapped in a ``` fence contributes only the
-// fenced block; a plain doc is used whole.
-const STAGE_DOCS = {
-  route: ["docs/stage-route.md"],
-  geometry: ["docs/stage-geometry.md", "docs/reference-machine.md"],
-  "geometry-check": ["docs/stage-geometry-check.md", "docs/reference-machine.md"],
-  texture: ["docs/stage-texture.md", "docs/reference-machine.md", "docs/reference-brushes.md"],
-  "texture-check": ["docs/stage-texture-check.md", "docs/reference-machine.md", "docs/reference-brushes.md"],
-  parameters: ["docs/stage-parameters.md", "docs/reference-brushes.md"],
-};
-// Prompt sections GENERATED from the catalog's constraint objects rather
-// than written in a doc, so what the model is told can never drift from
-// what the code enforces (these two used to be hand-copied tables at the
-// end of reference-brushes.md). "limits" is what the page blocks or warns
-// on; "legibility" is explicitly-unenforced perceptual guidance.
-const STAGE_GENERATED = {
-  texture: ["limits", "legibility"],
-  "texture-check": ["limits", "legibility"],
-  parameters: ["limits", "legibility"],
-};
 const CHAIN = { geometry: ["geometry", "texture", "parameters"], texture: ["texture", "parameters"], parameters: ["parameters"], chat: [] };
 const STAGE_LABEL = { route: "routing", geometry: "geometry", texture: "texture", parameters: "parameters" };
 // A *-check call reuses the "geometry"/"texture" output validator (same
@@ -168,13 +149,10 @@ async function loadDeps() {
   debugLog = loadDebugLog();
   $("#pg-material").value = scene.config.material;
   try {
-    const paths = [...new Set(Object.values(STAGE_DOCS).flat())];
-    await Promise.all(paths.map(async (path) => {
+    await Promise.all(DOC_PATHS.map(async (path) => {
       const r = await fetch(path);
       if (!r.ok) throw new Error(`${path} → HTTP ${r.status}`);
-      const text = await r.text();
-      const fenced = text.match(/```([\s\S]*?)```/);
-      docs[path] = fenced ? fenced[1].trim() : text;
+      docs[path] = docText(path, await r.text());
     }));
   } catch (e) {
     status.textContent = "";
@@ -189,62 +167,20 @@ async function loadDeps() {
 }
 
 // ------------------------------------------------------- stage requests --
+//
+// Prompt text is assembled by prompt-assembly.js -- a DOM-free module, so
+// the same code that builds a live call is what the offline prompt tests
+// exercise. This file only supplies the scene and the catalog.
 
-function systemPromptFor(stage) {
-  const mat = scene.config.material || "TPU";
-  const generated = (STAGE_GENERATED[stage] || []).map((k) => (k === "limits" ? C.limitsText() : C.legibilityText()));
-  const body = [...STAGE_DOCS[stage].map((p) => docs[p]), ...generated].join("\n\n---\n\n");
-  const session = `\n\n---\n\nSESSION: material = ${mat}.` + (mat === "PLA" ? " Use PLA numbers; the page emits a PLA start sequence." : " Use TPU numbers (the library defaults).");
-  if (stage === "route") return `${body}\n\n---\n\nSCENE SUMMARY:\n${C.sceneSummary(scene)}`;
-  return body + session;
-}
-
-// The router sees the whole transcript (consecutive same-role turns merged
-// so both providers accept it). Other stages are single-turn.
-function routeMessages() {
-  const out = [];
-  for (const m of scene.messages) {
-    const content = m.stage && m.role === "assistant" ? `[${m.stage}] ${m.content}` : m.content;
-    if (out.length && out[out.length - 1].role === m.role) out[out.length - 1].content += "\n\n" + content;
-    else out.push({ role: m.role, content });
-  }
-  return out;
-}
-
-function recentConversation(n = 3) {
-  const turns = scene.messages.slice(-n - 1, -1);   // exclude the current user turn
-  if (!turns.length) return "(none)";
-  return turns.map((m) => `${m.role}${m.stage ? ` (${m.stage})` : ""}: ${m.content}`).join("\n");
-}
+const systemPromptFor = (stage) => composeSystemPrompt(stage, { docs, scene, C });
+const routeMessages = () => composeRouteMessages(scene);
+const stageUserMessage = (stage, instruction, targets) => composeUserMessage(stage, { scene, C, instruction, targets });
 
 // One array item per line, each compact -- readable for the model without
 // pretty-printing every coordinate onto its own line.
 function jsonLines(arr) {
   if (!Array.isArray(arr) || !arr.length) return "[]";
   return "[\n" + arr.map((x) => "  " + JSON.stringify(x)).join(",\n") + "\n]";
-}
-
-function stageUserMessage(stage, instruction, targets) {
-  const ids = targets.length ? targets : null;
-  const parts = [`INSTRUCTION:\n${instruction}`, `TARGET ELEMENTS: ${targets.length ? targets.join(", ") : "(whole scene)"}`];
-  parts.push(`RECENT CONVERSATION:\n${recentConversation()}`);
-  if (stage === "geometry") {
-    parts.push(`CURRENT ELEMENTS (JSON):\n${jsonLines(C.elementsJson(scene))}`);
-    parts.push(`CURRENT TRANSFORM: ${JSON.stringify(scene.transform)}`);
-  } else {
-    const els = C.elementsJson(scene).map((e) => {
-      const rep = scene.lastReport?.elements?.find((r) => r.id === e.id);
-      return { ...e, size: rep ? { bbox: rep.bbox, length: rep.length, area: rep.area, width: rep.width, height: rep.height } : undefined };
-    });
-    parts.push(`ELEMENTS (JSON, geometry + printed size):\n${jsonLines(els)}`);
-    parts.push(`CURRENT TEXTURES (JSON):\n${jsonLines(C.texturesJson(scene))}`);
-  }
-  if (stage === "parameters") {
-    parts.push(`OPTION SPECS for the brushes/stamps in use:\n${C.optionSpecsText(scene, ids) || "(no textures yet)"}`);
-    parts.push(`CURRENT ABSTRACTIONS (JSON):\n${jsonLines(scene.abstractions)}`);
-  }
-  parts.push(`LATEST GEOMETRY REPORT:\n${C.reportText(scene.lastReport)}`);
-  return parts.join("\n\n");
 }
 
 // `contextScene` defaults to the live scene; a *-check call passes a

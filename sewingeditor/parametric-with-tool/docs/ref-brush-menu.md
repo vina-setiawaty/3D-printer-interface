@@ -1,4 +1,4 @@
-# Brushes, stamps and fill patterns
+# Brushes and stamps — the texture menu
 
 Every texture is **what happens between two points**. A line element, a
 region outline, and each stroke of a fill pattern is a point list that a
@@ -34,33 +34,3 @@ mm/min, ms. Defaults apply for anything omitted.
 | `disc` | flat precise disc, diameter and height independent | `diameter` (1.6), `height` (0.4, steps of 0.2), `speed` (250) |
 | `directionalBlob` | leaning dome | `diameter` (2.0), `azimuthDeg` (absolute heading), `dragSpeed` |
 | `hairyDot` | dome + one pulled strand | `rootDiameter` (2), `hairLength` (3), `hairDirection`, … as hairyDotted |
-
-## Fill patterns — `slot: fill` on a region, `pattern` JSON
-
-A pattern says **where** the texture goes inside the region; the page clips
-everything to the boundary and transforms it with the graphic. Any pattern
-whose coordinates you write yourself is in the graphic's own coordinates.
-
-| kind | spec | brush type |
-|---|---|---|
-| `hatch` | `{"kind": "hatch", "angleDeg": 0, "gap": 4}` parallel strokes, recomputed from the region | line brush |
-| `grid` | `{"kind": "grid", "dx": 6, "dy": 6, "angleDeg": 0}` stamp lattice | stamp |
-| `diamond` | `{"kind": "diamond", "diag": 8, "fillGap": 0.6}` lattice + checkerboard-filled cells; **rectangular region only**; always this kind, never two angled hatches | `solid` |
-| `stamps` | `{"kind": "stamps", "points": [[x, y], ...]}` explicit stamp positions | stamp |
-| `strokes` | `{"kind": "strokes", "strokes": [[[x, y], [x, y], ...], ...]}` explicit polylines, corners allowed | line brush |
-| `curves` | `{"kind": "curves", "curves": [{"x": ..., "y": ..., "tEnd": n}, ...]}` a collection of formula strokes | line brush |
-| `family` | `{"kind": "family", "x": "<expr in t,u>", "y": "<expr in t,u>", "tEnd": n, "uEnd": n, "uStep": n}` one stroke per `u` — radial (`x: cx + t*cos(u)`), concentric (`x: cx + u*cos(t)`), wavy hatch, … | line brush |
-
-Guidance: a solid sheet is `hatch` + `solid` with `gap` ≈ 0.45; line
-shading is `hatch` + `solid` with `gap` 3–6; dotted/hairy shading is
-`hatch` + that brush with `gap` 6–10, or `grid`/`stamps` + a stamp.
-Pattern spacing scales with the graphic; brush mm values do not.
-
-<!-- The enforced limits and the tactile-legibility guidance used to be
-hand-copied tables here. They are now GENERATED from `PRINT_LIMITS` /
-`GEOMETRY_LIMITS` / `LEGIBILITY_GUIDE` in `../parametric-catalog-with-tool.js`
-(`limitsText()` / `legibilityText()`) and appended to this file by
-`systemPromptFor()`, so the prompt cannot drift from what the code checks.
-`docs/PARAMETER_CONSTRAINTS.md` is the fill-in form generated from the same
-objects. To change a limit, change it in the catalog. -->
-

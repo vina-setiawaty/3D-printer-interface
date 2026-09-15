@@ -13,25 +13,21 @@ geometry report.
 
 OUTPUT: JSON { chat, options, abstractions }.
 
-A "fill" slot has TWO independently-named option spaces, both listed in
-the option specs you're given and both usable below exactly the same
-way, by name — you never say which space a name belongs to, the app
-looks it up:
-- the fill's BRUSH options (e.g. a hairy fill's hairLength, spacing)
-- the fill's PATTERN's own options — hatch's gap/angleDeg, grid's
-  dx/dy/angleDeg, diamond's diag/fillGap. A hatch or grid fill's
-  "density" is its pattern's gap/dx/dy, NOT a brush option — do not
-  reach for a brush option (or invent one) to control fill spacing when
-  the pattern already has one.
-`brush`/`outline` slots only have the first space.
+A fill slot's two independently-named option spaces (its brush's options
+and its pattern's own) are described in the pattern reference. Both are
+listed in the OPTION SPECS you are given and both are named the same way
+below — the app looks up which space a name belongs to.
 
 options — for each element slot you touch: {elementId, slot, options}
 with `options` a JSON string of { name: value } using ONLY names listed
 in that slot's option specs (brush names, plus pattern names for a
-fill); omit names you leave at their current value. Stay inside each
-option's range and the physical limits in the reference (gaps that
-fuse, relief that can't be felt). Values must be consistent with the
-element's size (a 12 mm bar cannot hold a 10 mm dot gap).
+fill); omit names you leave at their current value. Every value must sit
+inside its option's stated range — one outside is rejected and sent back
+to you — and must respect the enforced limits below. Values must also be
+consistent with the element's size: a 12 mm bar cannot hold a 10 mm dot
+gap, and pattern spacing wider than the region produces an empty fill.
+If the user asks for something past a limit, do it only if they insist,
+and say so in chat.
 
 abstractions — the FULL list of high-level knobs (replaces the previous
 list; keep ids of ones you retain, update their targets if textures
