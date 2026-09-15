@@ -417,6 +417,172 @@ test("normalizeScene discards old formats", () => {
   assert.equal(C.normalizeScene(null).version, C.SCENE_VERSION);
 });
 
+// ------------------------------------------------- app-solved regions (F) --
+
+test("between: two curves, no range given -- the app solves the crossings", () => {
+  // Same lens as the hand-written ref-boundary test above: y=x and y=x^2
+  // over 60mm, area 60*60/6 = 600. Here the model names only the bounds.
+  const s = C.defaultScene();
+  s.elements = [
+    { id: "a", label: "y=x", kind: "line", role: "curve", path: { x: "40 + 60*t", y: "40 + 60*t", tEnd: 1 } },
+    { id: "b", label: "y=x^2", kind: "line", role: "curve", path: { x: "40 + 60*t", y: "40 + 60*t^2", tEnd: 1 } },
+    { id: "r", label: "between", kind: "region", between: { upper: "a", lower: "b" } },
+  ];
+  s.textures = { r: { fill: { fn: "solid", options: {}, pattern: { kind: "hatch", angleDeg: 0, gap: 3 } } } };
+  const r = C.compileScene(s);
+  assert.deepEqual(r.errors, []);
+  const region = r.report.elements.find((e) => e.id === "r");
+  // 594, not 600: the sampler steps 0.1 in the MODEL'S OWN t, so a curve
+  // written with tEnd 1 is only ~10 chords and the polygon cuts the
+  // corners. That is a property of sampling, not of solving -- the
+  // hand-written boundary below lands on the same number, and at tEnd 20
+  // both are exactly 600. Worth knowing when reading a report's area.
+  assert.ok(Math.abs(region.area - 594) < 1, `lens area ${region.area}`);
+  assert.equal(region.closureGap, 0, "closed by construction, no straight-edge guess");
+  assert.deepEqual(region.solvedXRange, [40, 100]);
+  assert.deepEqual(region.bounds, { upper: "a", lower: "b" });
+  // These two only TOUCH, at their shared endpoints -- neither passes
+  // through the other -- so there is no interior crossing to solve and the
+  // span is the whole shared extent. Both ends still close exactly.
+  assert.deepEqual(region.intersections, []);
+  assert.ok(/shared x span/.test(region.rangeFrom));
+  assert.ok(region.fill.strokes > 5);
+  assert.ok(C.runJobs(r.jobs).ok);
+
+  // identical to writing the boundary by hand, which is what it replaces
+  const hand = C.defaultScene();
+  hand.elements = [s.elements[0], s.elements[1], { id: "r", label: "between", kind: "region", boundary: [{ ref: "a" }, { ref: "b", reverse: true }] }];
+  const handArea = C.compileScene(hand).report.elements.find((e) => e.id === "r").area;
+  assert.equal(handArea, region.area, "solving adds no error of its own");
+
+  // and with the same curves sampled finely, both reach the true 600
+  const fine = C.defaultScene();
+  fine.elements = [
+    { id: "a", label: "y=x", kind: "line", role: "curve", path: { x: "40 + 3*t", y: "40 + 3*t", tEnd: 20 } },
+    { id: "b", label: "y=x^2", kind: "line", role: "curve", path: { x: "40 + 3*t", y: "40 + 0.15*t^2", tEnd: 20 } },
+    { id: "r", label: "between", kind: "region", between: { upper: "a", lower: "b" } },
+  ];
+  const fineArea = C.compileScene(fine).report.elements.find((e) => e.id === "r").area;
+  assert.ok(Math.abs(fineArea - 600) < 0.05, `finely sampled area ${fineArea}, want 600`);
+});
+
+test("between: bounds that really cross -- the app solves for where", () => {
+  // The docs' worked example, the case that used to be 40 lines of
+  // hand-solved intersection arithmetic: a level and a parabola written
+  // over a WIDER domain than the shaded part, crossing inside it.
+  // (t-30)^2/10 = 30  ->  t = 30 +/- sqrt(300)  ->  x = 52.68 and 87.32
+  const s = C.defaultScene();
+  s.elements = [
+    { id: "lv", label: "y=70", kind: "line", role: "curve", path: { points: [[40, 70], [100, 70]] } },
+    { id: "pa", label: "parabola", kind: "line", role: "curve", path: { x: "40 + t", y: "40 + (t - 30)^2/10", tEnd: 60 } },
+    { id: "r", label: "shaded", kind: "region", between: { upper: "lv", lower: "pa" } },
+  ];
+  s.textures = { r: { fill: { fn: "solid", options: {}, pattern: { kind: "hatch", gap: 3 } } } };
+  const r = C.compileScene(s);
+  assert.deepEqual(r.errors, []);
+  const region = r.report.elements.find((e) => e.id === "r");
+  assert.equal(region.intersections.length, 2, "both crossings found");
+  assert.ok(Math.abs(region.solvedXRange[0] - 52.68) < 0.2, `x0 ${region.solvedXRange[0]}`);
+  assert.ok(Math.abs(region.solvedXRange[1] - 87.32) < 0.2, `x1 ${region.solvedXRange[1]}`);
+  assert.ok(/crossings/.test(region.rangeFrom));
+  assert.equal(region.closureGap, 0);
+  // exact area between the two: (4/3)*half-width*height = (4/3)*17.32*30
+  assert.ok(Math.abs(region.area - 692.8) < 4, `area ${region.area}`);
+  // the shading stays inside the lens, not the curves' full 60mm domain
+  assert.ok(region.bbox.minX > 52 && region.bbox.maxX < 88, JSON.stringify(region.bbox));
+  assert.ok(C.runJobs(r.jobs).ok);
+});
+
+test("between: a curve down to an axis, and to a bare y level", () => {
+  const s = C.defaultScene();
+  s.elements = [
+    // a hill that never touches the axis: the bounds never cross, so the
+    // span is everything they share in x
+    { id: "ax", label: "x axis", kind: "line", role: "axis", path: { points: [[40, 40], [140, 40]] } },
+    { id: "c", label: "hill", kind: "line", role: "curve", path: { x: "60 + 40*t", y: "60 + 10*t", tEnd: 1 } },
+    { id: "r", label: "under the hill", kind: "region", between: { upper: "c", lower: "ax" } },
+  ];
+  s.textures = { r: { fill: { fn: "solid", options: {}, pattern: { kind: "hatch", gap: 4 } } } };
+  let r = C.compileScene(s);
+  assert.deepEqual(r.errors, []);
+  let region = r.report.elements.find((e) => e.id === "r");
+  assert.deepEqual(region.solvedXRange, [60, 100], "clipped to the curve's span, not the whole axis");
+  assert.deepEqual(region.intersections, []);
+  assert.ok(/shared x span/.test(region.rangeFrom));
+  // trapezoid: width 40, heights 20 and 30 -> 1000
+  assert.ok(Math.abs(region.area - 1000) < 5, `area ${region.area}`);
+
+  // an explicit range narrows it, cutting the axis exactly where asked
+  s.elements[2].between = { upper: "c", lower: "ax", xFrom: 70, xTo: 90 };
+  region = C.compileScene(s).report.elements.find((e) => e.id === "r");
+  assert.deepEqual(region.solvedXRange, [70, 90]);
+  assert.ok(Math.abs(region.area - 500) < 5, `area ${region.area}`);
+
+  // a bare level works the same and spans the curve's own extent
+  s.elements[2].between = { upper: "c", lower: { y: 50 } };
+  region = C.compileScene(s).report.elements.find((e) => e.id === "r");
+  assert.deepEqual(region.solvedXRange, [60, 100]);
+  assert.deepEqual(region.bounds, { upper: "c", lower: "y=50" });
+  assert.ok(Math.abs(region.area - 600) < 5, `area ${region.area}`);
+});
+
+test("between: the cases that used to produce silently wrong shading are errors", () => {
+  const s = C.defaultScene();
+  s.elements = [
+    { id: "a", label: "left", kind: "line", role: "curve", path: { points: [[40, 60], [60, 60]] } },
+    { id: "b", label: "right", kind: "line", role: "curve", path: { points: [[80, 50], [100, 50]] } },
+    { id: "r", label: "nothing between", kind: "region", between: { upper: "a", lower: "b" } },
+  ];
+  assert.ok(C.compileScene(s).errors.some((e) => /never share an x range/.test(e)), "disjoint bounds");
+
+  // one crossing: the bounds swap sides, so "between" is two pieces
+  s.elements = [
+    { id: "a", label: "rising", kind: "line", role: "curve", path: { points: [[40, 40], [100, 100]] } },
+    { id: "b", label: "falling", kind: "line", role: "curve", path: { points: [[40, 100], [100, 40]] } },
+    { id: "r", label: "X", kind: "region", between: { upper: "a", lower: "b" } },
+  ];
+  assert.ok(C.compileScene(s).errors.some((e) => /cross once/.test(e)), "single crossing is ambiguous");
+  // ...and an explicit range resolves it
+  s.elements[2].between = { upper: "a", lower: "b", xFrom: 75, xTo: 100 };
+  assert.deepEqual(C.compileScene(s).errors, []);
+
+  // a bound that doubles back in x is not a function of x
+  s.elements = [
+    { id: "a", label: "circle", kind: "line", role: "curve", path: { x: "110 + 30*cos(t)", y: "110 + 30*sin(t)", tEnd: 6.283 } },
+    { id: "r", label: "bad", kind: "region", between: { upper: "a", lower: { y: 80 } } },
+  ];
+  assert.ok(C.compileScene(s).errors.some((e) => /doubles back in x/.test(e)));
+});
+
+test("a ref piece can be cut by x, on a formula path and a point list alike", () => {
+  const s = C.defaultScene();
+  s.elements = [
+    // a points-path axis: tFrom/tTo never worked on one of these
+    { id: "ax", label: "axis", kind: "line", role: "axis", path: { points: [[40, 40], [140, 40]] } },
+    { id: "c", label: "curve", kind: "line", role: "curve", path: { x: "40 + 100*t", y: "80", tEnd: 1 } },
+    { id: "r", label: "box", kind: "region", boundary: [{ ref: "c", xFrom: 60, xTo: 90 }, { ref: "ax", xFrom: 60, xTo: 90, reverse: true }] },
+  ];
+  const r = C.compileScene(s);
+  assert.deepEqual(r.errors, []);
+  const region = r.report.elements.find((e) => e.id === "r");
+  assert.deepEqual(region.bbox, { minX: 60, minY: 40, maxX: 90, maxY: 80 });
+  assert.ok(Math.abs(region.area - 30 * 40) < 1, `area ${region.area}`);
+
+  // asking for x outside the path's own extent says what the extent is
+  s.elements[2].boundary[0] = { ref: "c", xFrom: 300, xTo: 400 };
+  assert.ok(C.compileScene(s).errors.some((e) => /nothing of this path lies between x 300 and x 400/.test(e) && /40\.0\.\.140\.0/.test(e)));
+});
+
+test("a boundary closed by a straight edge always warns, point lists included", () => {
+  const s = C.defaultScene();
+  // three sides of a rectangle, hand-written: the fourth is invented by the
+  // compiler and used to be silent for a point list
+  s.elements = [{ id: "u", label: "open box", kind: "region", boundary: [{ points: [[40, 40], [80, 40], [80, 70]] }] }];
+  const r = C.compileScene(s);
+  assert.deepEqual(r.errors, []);
+  assert.ok(r.warnings.some((w) => /closed with a straight edge/.test(w)), r.warnings.join("; "));
+});
+
 // ------------------------------------------------- guardrails / constraints --
 
 test("an out-of-range option value is rejected, not stored", () => {

@@ -30,9 +30,22 @@ pieces / at). Rules that matter:
 - A formula piece is ONE smooth curve; corners need a points piece. A bar
   or a rectangle is a region with a single points boundary
   (5 points, last = first). An axis is a line with a 2-point path.
-- A region "between curve A and curve B" is [{"ref": A}, {"ref": B,
-  "reverse": true}] plus points edges where their ends don't meet — do
-  not copy the formulas. Regions must be simple (no self-crossing).
+- A shaded area BETWEEN or UNDER curves is always a `between` region:
+  {"between": {"upper": <line id>, "lower": <line id> or {"y": n}}}.
+  Draw the two bounding curves as line elements, then name them. The app
+  samples them, solves where they cross, cuts both to the same span and
+  closes the ends exactly — so do NOT solve intersections, pick matching
+  parameter ranges, or write a bound's edge as points. Add "xFrom"/"xTo"
+  only to shade a span narrower than the natural one, or when the bounds
+  cross more than once and you must say which span you mean.
+- Any other region is {"boundary": [<piece>, ...]}, concatenated in order
+  and closed. It must be simple (no self-crossing). If its ends don't meet,
+  the app closes the gap with a straight edge and says so — if you didn't
+  intend that edge, the pieces are wrong.
+- A bound of a `between`, like any curve used as one, must give one y per
+  x (it cannot double back); a shape that does needs an explicit boundary.
+- If the graphic won't fit the safe area at a sensible size, say so in
+  chat rather than emitting something that will be rejected.
 - Encode data faithfully: bar heights proportional to values, curve
   formulas exactly the function asked for (map data units to mm with an
   explicit scale you state in chat), ordering left-to-right as given.

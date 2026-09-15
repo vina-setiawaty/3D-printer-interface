@@ -681,6 +681,53 @@ function renderElementCard(el, idx) {
 // is several stamps/strokes sharing this one element's texture (ticks,
 // gridlines, a row of markers). `onToggle(isGroup)` swaps the element's
 // geometry field shape; the caller re-renders.
+// A "form" select: which shape of geometry this element is written in.
+// `options` is [[value, label], ...]; `onChange` gets the chosen value.
+function formToggle(options, current, onChange) {
+  const lbl = document.createElement("label");
+  lbl.className = "pg-field";
+  lbl.innerHTML = `<span>form</span>`;
+  const sel = document.createElement("select");
+  options.forEach(([v, text]) => {
+    const o = document.createElement("option");
+    o.value = v; o.textContent = text;
+    if (v === current) o.selected = true;
+    sel.appendChild(o);
+  });
+  sel.onchange = () => onChange(sel.value);
+  lbl.appendChild(sel);
+  return lbl;
+}
+
+// The bounds of an app-solved region. The crossings and the shaded span
+// are computed by the compiler, so the only things to edit here are which
+// curves bound it and (optionally) a narrower x range -- the solved range
+// itself is shown in the geometry report, not typed in.
+function renderBetweenEditor(el) {
+  const b = el.between;
+  const g = fieldsGrid();
+  const lineIds = scene.elements.filter((e) => e.kind === "line" && !Array.isArray(e.paths)).map((e) => e.id);
+  const LEVEL = "(a flat y level)";
+  const boundField = (which) => {
+    const cur = b[which];
+    const isLevel = cur && typeof cur === "object";
+    g.appendChild(renderField(`${which} bound`, { kind: "enum", options: [...(lineIds.length ? lineIds : [""]), LEVEL], def: lineIds[0] || "" }, isLevel ? LEVEL : cur, (v) => {
+      b[which] = v === LEVEL ? { y: 40 } : v;
+      commitGeometry(); renderPanel();
+    }));
+    if (isLevel) g.appendChild(numField(`${which} y (mm)`, cur.y, (v) => { if (v != null) { b[which] = { y: v }; commitGeometry(); } }));
+  };
+  boundField("upper");
+  boundField("lower");
+  const xField = (key) => renderField(`${key} (blank = solved)`, { kind: "nnum", step: 1 }, b[key] ?? null, (v) => {
+    if (v == null) delete b[key]; else b[key] = v;
+    commitGeometry();
+  });
+  g.appendChild(xField("xFrom"));
+  g.appendChild(xField("xTo"));
+  return g;
+}
+
 function groupToggle(isGroup, onToggle) {
   const lbl = document.createElement("label");
   lbl.className = "pg-field";
@@ -737,6 +784,23 @@ function renderGeometryEditor(el) {
       wrap.appendChild(renderPieceEditor(el.path, (p) => { el.path = p; commitGeometry(); renderPanel(); }, false));
     }
   } else if (el.kind === "region") {
+    const isBetween = !!el.between;
+    wrap.appendChild(formToggle(
+      [["boundary", "boundary (an explicit outline)"], ["between", "between (app-solved area under/between curves)"]],
+      isBetween ? "between" : "boundary",
+      (form) => {
+        if (form === "between") {
+          const lines = scene.elements.filter((e) => e.kind === "line" && !Array.isArray(e.paths)).map((e) => e.id);
+          el.between = { upper: lines[0] || "", lower: lines[1] || { y: 40 } };
+          delete el.boundary;
+        } else {
+          el.boundary = [{ points: [[40, 40], [80, 40], [80, 70], [40, 70], [40, 40]] }];
+          delete el.between;
+        }
+        commitGeometry(); renderPanel();
+      },
+    ));
+    if (isBetween) { wrap.appendChild(renderBetweenEditor(el)); return wrap; }
     el.boundary = Array.isArray(el.boundary) && el.boundary.length ? el.boundary : [{ points: [[40, 40], [80, 40], [80, 70], [40, 70], [40, 40]] }];
     const list = document.createElement("div");
     el.boundary.forEach((piece, i) => {
@@ -791,8 +855,11 @@ function renderPieceEditor(piece, onReplace, allowRef) {
     const lines = scene.elements.filter((e) => e.kind === "line").map((e) => e.id);
     g.appendChild(renderField("ref (line id)", { kind: "enum", options: lines.length ? lines : [""], def: piece.ref }, piece.ref, (v) => { piece.ref = v; commitGeometry(); }));
     g.appendChild(renderField("reverse", { kind: "bool", def: false }, !!piece.reverse, (v) => { piece.reverse = v; commitGeometry(); }));
-    g.appendChild(renderField("tFrom", { kind: "nnum", step: 0.1 }, piece.tFrom ?? null, (v) => { if (v == null) delete piece.tFrom; else piece.tFrom = v; commitGeometry(); }));
-    g.appendChild(renderField("tTo", { kind: "nnum", step: 0.1 }, piece.tTo ?? null, (v) => { if (v == null) delete piece.tTo; else piece.tTo = v; commitGeometry(); }));
+    // x range rather than the referenced path's own parameter: it means
+    // the same thing on a formula and on a point list, and it is the
+    // number anyone actually has in mind ("the axis from 60 to 90").
+    g.appendChild(renderField("xFrom (blank = whole path)", { kind: "nnum", step: 1 }, piece.xFrom ?? null, (v) => { if (v == null) delete piece.xFrom; else piece.xFrom = v; commitGeometry(); }));
+    g.appendChild(renderField("xTo (blank = whole path)", { kind: "nnum", step: 1 }, piece.xTo ?? null, (v) => { if (v == null) delete piece.xTo; else piece.xTo = v; commitGeometry(); }));
   }
   return g;
 }

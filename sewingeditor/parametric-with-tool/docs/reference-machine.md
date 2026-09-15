@@ -57,7 +57,7 @@ A **piece** is one run of geometry:
 |---|---|
 | `{"x": "<expr in t>", "y": "<expr in t>", "tEnd": n}` | a formula curve over `t ∈ [0, tEnd]` |
 | `{"points": [[x, y], [x, y], ...]}` | straight runs through the points, corners allowed |
-| `{"ref": "<line element id>", "tFrom": n, "tTo": n, "reverse": bool}` | a sub-range of another line element's path, optionally walked backwards (`tFrom`/`tTo` only apply to formula paths; omit for the whole path) |
+| `{"ref": "<line element id>", "xFrom": n, "xTo": n, "reverse": bool}` | another line element's path reused as an edge, optionally walked backwards. `xFrom`/`xTo` cut it to an x range — they work on a formula path and a hand-written point list alike, so "the axis under the shaded part" needs no retyping. Omit both for the whole path. |
 
 ## Elements
 
@@ -65,7 +65,8 @@ A **piece** is one run of geometry:
 |---|---|---|
 | `line`, one stroke | `{"path": <piece>}` | an axis, a curve, a polyline chart |
 | `line`, a **group** | `{"paths": [<piece>, <piece>, ...]}` | several disconnected strokes, printed as separate strokes but sharing this ONE element's texture — see "Grouping repeated features" below |
-| `region` | `{"boundary": [<piece>, ...]}` | the pieces are concatenated in order and must come back to the start (an end within 0.5 mm snaps; a larger gap is closed with a straight edge, which is the normal way to close a `points` boundary). The result must be a simple, non-self-intersecting shape. "The area between curve A and curve B" is `[{"ref": "A"}, {"ref": "B", "reverse": true}]` (plus `points` edges if their ends don't meet). |
+| `region`, between curves | `{"between": {"upper": "<line id>", "lower": "<line id>" \| {"y": n}, "xFrom": n, "xTo": n}}` | **the form for any shaded area between or under curves.** The app solves the crossings, cuts both bounds to one span and closes the ends; `xFrom`/`xTo` are optional and only narrow it. See below. |
+| `region`, any other shape | `{"boundary": [<piece>, ...]}` | the pieces are concatenated in order and must come back to the start (an end within 0.5 mm snaps; a larger gap is closed with a straight edge and warned about). The result must be a simple, non-self-intersecting shape. |
 | `point`, one stamp | `{"at": [x, y]}` | a single marker or data point |
 | `point`, a **group** | `{"at": [[x, y], [x, y], ...]}` | several stamps sharing this ONE element's texture — see below |
 
@@ -132,47 +133,41 @@ ticks"` and every tick prints identically; the parameters stage exposes
 exactly one set of numbers (and can attach one knob, e.g. "tick
 boldness") for the whole group.
 
-### Region between two curves — solve the intersections, don't guess a domain
+### Region between two curves — name the bounds, the app solves the rest
 
-A `ref` boundary only closes when the two curves' pieces span the exact
-same real range and **actually meet at both ends** — that means solving
-for where they cross, not picking two arbitrary-looking `tEnd`s and
-hoping. Skipping this produces exactly the two failures that show up
-most: the boundary crosses itself (the two refs don't meet, so the
-"closing" edge cuts back across the shape) and/or the curve swings
-outside 15–205 (an unbounded domain was used instead of the bounded one
-between the crossings).
+Draw each bounding curve over whatever domain suits it, then declare the
+area with `between`. The app samples both bounds, finds every crossing,
+picks the span, cuts both to it and closes the two ends exactly. You do
+not solve intersections, match parameter ranges, or write an edge by hand.
 
 Worked example — shade the area between `y = 8` and `y = (x-2)^2` (data
-units), printed at 8 mm per unit with the origin placed at data (0, 0):
+units) at 8 mm per unit, x=0 at mm 60 and y=0 at mm 150:
 
-1. **Solve the intersection first, in data units**: `8 = (x-2)^2` →
-   `x - 2 = ±2.83` → `x ≈ -0.83` or `x ≈ 4.83`. That real range,
-   `x ∈ [-0.83, 4.83]`, is the ONLY valid domain for both curves — not
-   the domain either curve would use alone.
-2. **Map to mm** with one consistent scale/offset for both curves (say
-   8 mm/unit, with x=0 landing at mm 60 and y=0 at mm 150 — chosen so
-   the whole shape, `y` up to 8 units = 64 mm above the baseline, stays
-   in 15–205): `x_mm = 60 + 8*x`, `y_mm = 150 - 8*y` (mm Y increases
-   downward from a data top, so this flips sign — check your own
-   orientation choice against the actual numbers, don't assume).
-3. **Give both curves the SAME parameter range** across that domain, so
-   their `path` pieces meet exactly at both ends:
-   ```json
-   { "id": "", "label": "y=8", "kind": "line", "role": "curve",
-     "geometry": "{\"path\": {\"x\": \"60 + 8*t\", \"y\": \"150 - 64\", \"tEnd\": 5.66}}" }
-   { "id": "", "label": "y=(x-2)^2", "kind": "line", "role": "curve",
-     "geometry": "{\"path\": {\"x\": \"60 + 8*(t - 0.83)\", \"y\": \"150 - 8*((t - 0.83 - 2)^2)\", \"tEnd\": 5.66}}" }
-   { "id": "", "label": "shaded region", "kind": "region",
-     "geometry": "{\"boundary\": [{\"ref\": \"<y=8 id>\"}, {\"ref\": \"<parabola id>\", \"reverse\": true}]}" }
-   ```
-   Here `t` runs 0 to 5.66 (= 4.83 − (−0.83)) on BOTH curves, and each
-   curve's own `x` formula shifts `t` so it lands on the real intersection
-   x-values at `t=0` and `t=5.66` — that's what makes the two refs meet.
-4. **Verify before finalizing**: evaluate both curves' `y` at `t=0` and
-   `t=5.66` — they must match each other (that's the closure) and land
-   inside 15–205 (here, 150−64=86 at both ends and the parabola's own
-   vertex y at its minimum, both comfortably inside range).
+```json
+{ "id": "", "label": "y=8", "kind": "line", "role": "curve",
+  "geometry": "{\"path\": {\"points\": [[20, 86], [140, 86]]}}" }
+{ "id": "", "label": "y=(x-2)^2", "kind": "line", "role": "curve",
+  "geometry": "{\"path\": {\"x\": \"20 + t\", \"y\": \"150 - 8*(((20 + t - 60)/8 - 2)^2)\", \"tEnd\": 120}}" }
+{ "id": "", "label": "shaded region", "kind": "region",
+  "geometry": "{\"between\": {\"upper\": \"<y=8 id>\", \"lower\": \"<parabola id>\"}}" }
+```
 
-The same solve-the-crossing-first approach applies to any "area between
-A and B" request, not just this pair of functions.
+The two crossings (`8 = (x-2)^2` → `x ≈ -0.83` and `x ≈ 4.83`) are found
+by the app, not by you; the report gives back the x range it used and the
+crossing points, so you can check the result rather than your arithmetic.
+
+What still matters on your side:
+
+- **Every point of each bound must land inside 15–205**, including the
+  parts outside the shaded span — they are drawn as curves in their own
+  right. Evaluate each formula at its endpoints and midpoint.
+- **A bound must give one y per x.** A circle or any shape that doubles
+  back is rejected; use an explicit `boundary` for those.
+- **If the bounds cross more than twice, or exactly once**, "the area
+  between them" is ambiguous and the app says so — add `xFrom`/`xTo` to
+  name the span you mean.
+- **"Under a curve"** is the same form with the axis (or a bare level) as
+  `lower`: `{"between": {"upper": "<curve id>", "lower": {"y": 150}}}`.
+- To reuse part of another line as an ordinary boundary edge, a `ref`
+  piece takes `xFrom`/`xTo` and cuts it there — on a formula path and a
+  hand-written point list alike.

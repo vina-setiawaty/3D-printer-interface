@@ -600,6 +600,39 @@ function sampleFormula(spec, what, tFrom = 0, tTo = null) {
   return TF.samplePath((t) => fx(t), (t) => fy(t), t0, t1, { step: SAMPLE_STEP }).map((p) => [p[0], p[1]]);
 }
 
+/** Cuts a polyline to an x range, interpolating a new vertex exactly on
+ * each cut. Works on a sampled formula and on a hand-written point list
+ * alike, which is the point: "the axis from x=40 to x=90" used to have to
+ * be retyped as its own point list because tFrom/tTo only ever applied to
+ * a formula's own parameter. */
+function cutPolylineByX(pts, x0, x1, what) {
+  const lerp = (a, b, x) => [x, a[1] + ((b[1] - a[1]) * (x - a[0])) / (b[0] - a[0])];
+  const out = [];
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i];
+    if (p[0] >= x0 - 1e-9 && p[0] <= x1 + 1e-9) out.push(p);
+    const q = pts[i + 1];
+    if (!q) continue;
+    for (const xc of [x0, x1]) if ((p[0] - xc) * (q[0] - xc) < 0) out.push(lerp(p, q, xc));
+  }
+  const cut = dedupeConsecutive(out.sort((a, b) => a[0] - b[0]));
+  if (cut.length < 2) {
+    const bb = bboxOf(pts);
+    throw new Error(`${what}: nothing of this path lies between x ${x0} and x ${x1} -- its own x range is ${bb.minX.toFixed(1)}..${bb.maxX.toFixed(1)}`);
+  }
+  return cut;
+}
+
+/** The vertex list of a single-stroke line element, in graphic space. */
+function linePolyline(id, scene, what) {
+  const target = scene.elements.find((e) => e.id === id);
+  if (!target) throw new Error(`${what}: "${id}" is not an element id`);
+  if (target.kind !== "line") throw new Error(`${what}: "${id}" must be a line element`);
+  if (Array.isArray(target.paths)) throw new Error(`${what}: "${id}" is a repeated group (multiple strokes) -- only a single-stroke line can bound a region`);
+  if (Array.isArray(target.path?.points)) return checkPointList(target.path.points, what);
+  return sampleFormula(target.path || {}, `${what} (${id})`);
+}
+
 /** A piece -> vertex list in graphic space (no arc-length tag yet). */
 function resolvePiece(piece, scene, what, depth = 0) {
   if (!piece || typeof piece !== "object") throw new Error(`${what}: missing piece`);
@@ -613,9 +646,125 @@ function resolvePiece(piece, scene, what, depth = 0) {
     let pts;
     if (Array.isArray(target.path?.points)) pts = checkPointList(target.path.points, what);
     else pts = sampleFormula(target.path || {}, `${what} (ref ${piece.ref})`, piece.tFrom ?? 0, piece.tTo ?? target.path?.tEnd);
+    // An x range is the sub-range anyone actually means ("the axis under
+    // the shaded part"), and unlike tFrom/tTo it means the same thing on a
+    // formula path and a point list.
+    const hasX = Number.isFinite(Number(piece.xFrom)) || Number.isFinite(Number(piece.xTo));
+    if (hasX) {
+      const bb = bboxOf(pts);
+      const x0 = Number.isFinite(Number(piece.xFrom)) ? Number(piece.xFrom) : bb.minX;
+      const x1 = Number.isFinite(Number(piece.xTo)) ? Number(piece.xTo) : bb.maxX;
+      if (!(x1 > x0)) throw new Error(`${what}: xFrom must be less than xTo (got ${x0}..${x1})`);
+      pts = cutPolylineByX(pts, x0, x1, `${what} (ref ${piece.ref})`);
+    }
     return piece.reverse ? pts.slice().reverse() : pts;
   }
   return sampleFormula(piece, what);
+}
+
+// ------------------------------------------------- app-solved "between" --
+
+/** Normalizes a bound to run left-to-right and rejects one that doubles
+ * back: "between" only means anything when each bound gives one y per x. */
+function ascendingInX(pts, what) {
+  let dir = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const dx = pts[i][0] - pts[i - 1][0];
+    if (Math.abs(dx) < 1e-9) continue;
+    const d = dx > 0 ? 1 : -1;
+    if (dir === 0) dir = d;
+    else if (d !== dir) throw new Error(`${what}: this bound doubles back in x, so it has no single y per x -- write the shape as an explicit boundary instead of "between"`);
+  }
+  return dir < 0 ? pts.slice().reverse() : pts;
+}
+
+/** Every proper crossing of two polylines, as [x, y], left to right. */
+function polylineCrossings(a, b) {
+  const hits = [];
+  for (let i = 0; i + 1 < a.length; i++) {
+    const aLo = Math.min(a[i][0], a[i + 1][0]), aHi = Math.max(a[i][0], a[i + 1][0]);
+    for (let j = 0; j + 1 < b.length; j++) {
+      if (Math.max(b[j][0], b[j + 1][0]) < aLo) continue;
+      if (Math.min(b[j][0], b[j + 1][0]) > aHi) break;   // b ascends in x
+      const c = segCross(a[i], a[i + 1], b[j], b[j + 1], true);
+      if (c) hits.push([a[i][0] + (a[i + 1][0] - a[i][0]) * c.t, a[i][1] + (a[i + 1][1] - a[i][1]) * c.t]);
+    }
+  }
+  hits.sort((p, q) => p[0] - q[0]);
+  const out = [];
+  for (const p of hits) if (!out.length || Math.abs(p[0] - out[out.length - 1][0]) > 1e-6) out.push(p);
+  return out;
+}
+
+/** Solves `{between: {upper, lower, xFrom?, xTo?}}` into a closed polygon.
+ *
+ * The model names the two bounds and, if it wants one, an x range; the app
+ * samples them, finds where they cross, cuts both to the same span and
+ * closes the ends. Previously all of that was the model's arithmetic --
+ * solve the intersection, pick matching parameter ranges, hope the ends
+ * meet -- which is where inaccurate shading came from: a boundary whose
+ * ends missed was silently closed with a straight edge across the shape.
+ *
+ * Returns { polygon, meta } where meta feeds the geometry report. */
+function solveBetween(spec, scene, what) {
+  if (!spec || typeof spec !== "object") throw new Error(`${what}: "between" needs {"upper": <line id>, "lower": <line id> | {"y": <mm>}}`);
+  const isLevel = (b) => b && typeof b === "object" && Number.isFinite(Number(b.y));
+  const { upper, lower } = spec;
+  if (isLevel(upper) && isLevel(lower)) throw new Error(`${what}: at least one bound must be a line element -- two levels have no x range of their own`);
+
+  // Resolve whichever bound is a real path first; a {"y": n} level then
+  // spans exactly that path's x extent.
+  const anchorIsUpper = !isLevel(upper);
+  const anchor = ascendingInX(linePolyline(anchorIsUpper ? upper : lower, scene, `${what} ${anchorIsUpper ? "upper" : "lower"} bound`), `${what} ${anchorIsUpper ? "upper" : "lower"} bound`);
+  const anchorBox = bboxOf(anchor);
+  const other = isLevel(anchorIsUpper ? lower : upper)
+    ? [[anchorBox.minX, Number((anchorIsUpper ? lower : upper).y)], [anchorBox.maxX, Number((anchorIsUpper ? lower : upper).y)]]
+    : ascendingInX(linePolyline(anchorIsUpper ? lower : upper, scene, `${what} ${anchorIsUpper ? "lower" : "upper"} bound`), `${what} ${anchorIsUpper ? "lower" : "upper"} bound`);
+
+  let up = anchorIsUpper ? anchor : other;
+  let lo = anchorIsUpper ? other : anchor;
+
+  const crossings = polylineCrossings(up, lo);
+  const upBox = bboxOf(up), loBox = bboxOf(lo);
+  const overlap = { min: Math.max(upBox.minX, loBox.minX), max: Math.min(upBox.maxX, loBox.maxX) };
+  if (!(overlap.max > overlap.min)) throw new Error(`${what}: the two bounds never share an x range (upper spans ${upBox.minX.toFixed(1)}..${upBox.maxX.toFixed(1)}, lower ${loBox.minX.toFixed(1)}..${loBox.maxX.toFixed(1)}) -- there is no area between them`);
+
+  const given = Number.isFinite(Number(spec.xFrom)) || Number.isFinite(Number(spec.xTo));
+  let x0, x1;
+  if (given) {
+    x0 = Number.isFinite(Number(spec.xFrom)) ? Number(spec.xFrom) : overlap.min;
+    x1 = Number.isFinite(Number(spec.xTo)) ? Number(spec.xTo) : overlap.max;
+    if (!(x1 > x0)) throw new Error(`${what}: xFrom must be less than xTo (got ${x0}..${x1})`);
+  } else if (crossings.length >= 2) {
+    // The classic lens: shade between the first and last crossing.
+    x0 = crossings[0][0];
+    x1 = crossings[crossings.length - 1][0];
+    if (crossings.length > 2) throw new Error(`${what}: the bounds cross ${crossings.length} times, so "the area between them" is ambiguous -- give xFrom and xTo to say which span you mean`);
+  } else if (crossings.length === 1) {
+    throw new Error(`${what}: the bounds cross once (at x ${crossings[0][0].toFixed(2)}), so they swap sides and the area between them is two separate pieces -- give xFrom and xTo to pick one`);
+  } else {
+    // Never cross (a curve over an axis): the whole shared span.
+    x0 = overlap.min;
+    x1 = overlap.max;
+  }
+
+  up = cutPolylineByX(up, x0, x1, `${what} upper bound`);
+  lo = cutPolylineByX(lo, x0, x1, `${what} lower bound`);
+
+  // Walk the upper left-to-right, then the lower back right-to-left; the
+  // two vertical edges at x0 and x1 close it. A zero-height end (the
+  // bounds meet there) collapses to a single vertex via dedupe.
+  const polygon = dedupeConsecutive([...up, ...lo.slice().reverse()]);
+  if (polygon.length < 3) throw new Error(`${what}: the two bounds coincide over this span -- there is no area between them`);
+  return {
+    polygon,
+    meta: {
+      solvedXRange: [+x0.toFixed(2), +x1.toFixed(2)],
+      bounds: { upper: isLevel(upper) ? `y=${Number(upper.y)}` : upper, lower: isLevel(lower) ? `y=${Number(lower.y)}` : lower },
+      intersections: crossings.map(([x, y]) => [+x.toFixed(2), +y.toFixed(2)]),
+      rangeFrom: given ? "given" : (crossings.length >= 2 ? "solved from the crossings" : "the bounds' shared x span"),
+    },
+  };
 }
 
 /** Resolves every element to vertex lists in GRAPHIC space and validates
@@ -656,20 +805,31 @@ export function resolveScene(scene) {
         resolved[el.id] = { kind: "line", strokes, dense: pieces.every((p) => !Array.isArray(p.points)) };
         for (const pts of strokes) bbox = mergeBbox(bbox, bboxOf(pts));
       } else if (el.kind === "region") {
-        if (!Array.isArray(el.boundary) || !el.boundary.length) throw new Error(`${what}: region needs a boundary piece list`);
-        let poly = [];
-        el.boundary.forEach((piece, i) => { poly.push(...resolvePiece(piece, scene, `${what} boundary piece ${i + 1}`)); });
-        poly = dedupeConsecutive(poly);
-        // Closure: an end within closureSnapMm of the start snaps onto it;
-        // a larger gap is closed with a straight edge (natural for point
-        // lists; reported as closureGap so a formula boundary that was
-        // meant to close shows up in the report and gets a warning).
-        const closureGap = poly.length > 1 ? dist2(poly[0], poly[poly.length - 1]) : Infinity;
-        if (closureGap <= CONSTRAINTS.closureSnapMm) poly.pop();
-        else if (el.boundary.some((p) => !Array.isArray(p.points))) warnings.push(`${what}: boundary end is ${closureGap.toFixed(1)}mm from its start -- closed with a straight edge.`);
+        let poly, closureGap = 0, meta = null;
+        if (el.between) {
+          // App-solved: the model named the bounds, the compiler did the
+          // intersecting and closing. Closed by construction, so there is
+          // no closure gap to report.
+          const solved = solveBetween(el.between, scene, what);
+          poly = solved.polygon;
+          meta = solved.meta;
+        } else {
+          if (!Array.isArray(el.boundary) || !el.boundary.length) throw new Error(`${what}: region needs a boundary piece list, or a "between" spec`);
+          poly = [];
+          el.boundary.forEach((piece, i) => { poly.push(...resolvePiece(piece, scene, `${what} boundary piece ${i + 1}`)); });
+          poly = dedupeConsecutive(poly);
+          // Closure: an end within closureSnapMm of the start snaps onto
+          // it; a larger gap is closed with a straight edge. That edge is
+          // now ALWAYS warned about, point lists included -- a boundary
+          // silently closed across the middle of the shape is exactly how
+          // inaccurate shading used to get through unnoticed.
+          closureGap = poly.length > 1 ? dist2(poly[0], poly[poly.length - 1]) : Infinity;
+          if (closureGap <= CONSTRAINTS.closureSnapMm) poly.pop();
+          else warnings.push(`${what}: the boundary's end is ${closureGap.toFixed(1)}mm from its start -- closed with a straight edge. If that edge is not meant to be part of the shape, the pieces do not meet.`);
+        }
         if (poly.length < 3) throw new Error(`${what}: boundary needs at least 3 distinct points`);
         if (!isSimplePolygon(poly)) throw new Error(`${what}: boundary crosses itself -- a fill region must be a simple, single-contour shape`);
-        resolved[el.id] = { kind: "region", polygon: poly, closureGap };
+        resolved[el.id] = { kind: "region", polygon: poly, closureGap, meta };
         bbox = mergeBbox(bbox, bboxOf(poly));
       } else {
         throw new Error(`${what}: unknown kind "${el.kind}"`);
@@ -1010,6 +1170,11 @@ export function compileScene(scene) {
         const poly = r.polygon.map(tf.map);
         const bb = bboxOf(poly);
         entry.bbox = rndBox(bb); entry.area = rnd(polygonArea(poly)); entry.closureGap = rnd(r.closureGap);
+        // For an app-solved region: the x span actually used, where the
+        // bounds were found to cross, and how the span was decided -- so
+        // "shade between x=1 and x=3" is checkable against numbers rather
+        // than against what the model said it did.
+        if (r.meta) Object.assign(entry, r.meta);
         entry.width = rnd(bb.maxX - bb.minX); entry.height = rnd(bb.maxY - bb.minY);
         bedBbox = mergeBbox(bedBbox, bb);
         if (outOfSafe(poly)) errors.push(`"${label}": boundary leaves the safe area (${CONSTRAINTS.safeMin}-${CONSTRAINTS.safeMax}mm).`);
@@ -1322,7 +1487,8 @@ export function elementsJson(scene, ids = null) {
     .map((el) => ({
       id: el.id, label: el.label, kind: el.kind, role: el.role || "",
       geometry: el.kind === "line" ? (Array.isArray(el.paths) ? { paths: el.paths } : { path: el.path })
-        : el.kind === "region" ? { boundary: el.boundary } : { at: el.at },
+        : el.kind === "region" ? (el.between ? { between: el.between } : { boundary: el.boundary })
+          : { at: el.at },
     }));
 }
 
@@ -1418,7 +1584,7 @@ export function validateStageOutput(stage, out, scene) {
       seen.add(id);
       const el = { id, label: String(e.label || id), kind: e.kind, role: String(e.role || "") };
       if (e.kind === "line") { if (Array.isArray(g.paths)) el.paths = g.paths; else el.path = g.path; }
-      else if (e.kind === "region") el.boundary = g.boundary;
+      else if (e.kind === "region") { if (g.between) el.between = g.between; else el.boundary = g.boundary; }
       else if (e.kind === "point") el.at = g.at;
       else errors.push(`${what}: kind must be line|region|point (got "${e.kind}")`);
       elements.push(el);
