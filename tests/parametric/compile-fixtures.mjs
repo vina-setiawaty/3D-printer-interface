@@ -140,7 +140,7 @@ test("diamond needs a rectangle; one newPattern for the whole fill", () => {
   assert.ok(r.errors.some((e) => /rectangular/.test(e)));
 });
 
-test("verification: closure warning, self-intersection, brush/pattern mismatch, relief floor", () => {
+test("verification: closure warning, self-intersection, brush/pattern mismatch, over-extrusion", () => {
   const s = C.defaultScene();
   s.elements = [{ id: "z", label: "bow", kind: "region", boundary: [{ points: [[40, 40], [80, 80], [80, 40], [40, 80], [40, 40]] }] }];
   let r = C.compileScene(s);
@@ -157,7 +157,7 @@ test("verification: closure warning, self-intersection, brush/pattern mismatch, 
 
   s.textures = { o: { outline: { fn: "solid", options: { nLayers: 1 } } } };
   r = C.compileScene(s);
-  assert.ok(r.errors.some((e) => /nLayers/.test(e)));
+  assert.deepEqual(r.errors, [], "relief floor is guidance now, not a hard error -- see the legibility-guidance test");
 
   s.textures = { o: { fill: { fn: "solid", options: {}, pattern: { kind: "hatch", gap: 0.2 } } } };
   r = C.compileScene(s);
@@ -666,6 +666,16 @@ test("legibility limits are guidance only until enforced is flipped", () => {
     r = C.compileScene(s);
     assert.deepEqual(r.errors, [], "legibility never blocks, even when enforced");
     assert.ok(r.warnings.some((w) => /scattered dots/.test(w)), r.warnings.join("; "));
+
+    // relief-floor rules (nLayers / dome diameter / disc height) moved out
+    // of PRINT_LIMITS into LEGIBILITY_GUIDE: guidance-only by default, and
+    // still only a warning -- never an error -- once enforced.
+    const thin = C.defaultScene();
+    thin.elements = [{ id: "o", label: "box", kind: "region", boundary: [rect(40, 40, 30, 30)] }];
+    thin.textures = { o: { outline: { fn: "solid", options: { nLayers: 1 } } } };
+    let rt = C.compileScene(thin);
+    assert.deepEqual(rt.errors, []);
+    assert.ok(rt.warnings.some((w) => /relief-floor guidance/.test(w)), rt.warnings.join("; "));
 
     // the fill-row-gap rule reads the pattern, and knows a dotted row from
     // a continuous one (12mm vs 8mm)

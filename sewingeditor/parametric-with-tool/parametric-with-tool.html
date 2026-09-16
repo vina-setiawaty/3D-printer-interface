@@ -273,7 +273,8 @@
     font-size: 0.8em;
   }
 
-  #pg-gcode-menu { flex: 0 0 auto; margin-top: 0.4em; }
+  #pg-gcode-menu { flex: 0 0 auto; margin-top: 0.4em; display: flex; align-items: center; flex-wrap: wrap; }
+  #pg-gcode-menu .ui-item { float: none; }
 
   #pg-report-wrap { flex: 0 0 auto; margin-bottom: 0.4em; max-height: 30%; overflow-y: auto; }
   #pg-report-wrap summary { cursor: pointer; font-family: monospace; font-size: 0.8em; color: #666; }
@@ -427,6 +428,7 @@
         <div class="ui-group" id="pg-gcode-menu">
           <div class="ui-item"><div class="btn" id="run-gcode-btn">run gcode</div></div>
           <div class="ui-item"><div class="btn" id="save-gcode-btn">save gcode</div></div>
+          <div class="ui-item"><span class="label">filename</span> <input type="text" id="gcode-filename-input" placeholder="output.gcode"></div>
         </div>
       </div>
 

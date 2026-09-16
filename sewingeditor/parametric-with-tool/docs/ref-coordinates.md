@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | Bed | 220 × 220 mm — every printed coordinate must stay inside X/Y **15–205** |
-| Layer height | 0.20 mm; relief must be ≥ 0.40 mm (2 layers) to be felt |
+| Layer height | 0.20 mm; relief of at least 0.40 mm (2 layers) is recommended for reliable tactile feel, but not enforced -- go thinner if asked to |
 | Default bead width | 0.5 mm |
 | Material | **TPU** unless the user names PLA (the page sets temperatures and flow itself) |
 

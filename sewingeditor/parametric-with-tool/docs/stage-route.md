@@ -10,7 +10,7 @@ The page holds a SCENE: geometric elements (lines, regions, points), a
 texture per element slot, and a set of surfaced parameters. Three
 specialists, each of which re-runs the ones after it:
 
-  geometry    WHAT is drawn — element shapes, positions, the chart itself,
+  geometry    WHAT is drawn — element shapes, positions, the graphic itself,
               adding or removing elements, the global scale/origin.
               Runs texture and parameters after it.
   texture     HOW each element is rendered — which brush or stamp, which

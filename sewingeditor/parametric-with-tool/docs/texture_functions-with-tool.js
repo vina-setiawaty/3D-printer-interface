@@ -41,8 +41,6 @@ export const LINE_START_PRIME_MM = 0.3; // extra one-time prime per top-level pr
 export const TRAVEL_SPEED = 3000;
 export const Z_HOP = 0.4;
 export const LAYER_HEIGHT = 0.20;
-export const MIN_LAYERS = 2;      // 0.4mm floor -- see "Relief Height Floor"
-export const DEFAULT_WIDTH = 0.5;
 export const FLOW_PERCENT = 180;
 
 export const BED_X = 220.0;
@@ -1126,10 +1124,14 @@ export function stampDirectionalBlob(em, cx, cy, options = {}) {
  * an ALTERNATIVE to the default stampBlob() when a flat, precisely
  * diameter'd disc is needed (diameter and height are independently
  * controlled, unlike the blob's derived-from-diameter dome). height
- * should be a multiple of LAYER_HEIGHT (0.2mm). No hollow-centre
- * ("donut") shape is implemented. */
+ * should be a multiple of LAYER_HEIGHT (0.2mm). The 0.4mm/2-layer default
+ * is a tactile-legibility RECOMMENDATION, not an enforced floor -- pass a
+ * smaller `height` for a shorter disc if that's what's wanted; only the
+ * 1-layer physical minimum (there has to be at least one layer to print
+ * anything) is enforced here. No hollow-centre ("donut") shape is
+ * implemented. */
 export function stampDisc(em, cx, cy, { diameter = 1.6, height = 0.4, speed = 250 } = {}) {
-  const nLayers = Math.max(MIN_LAYERS, Math.round(height / LAYER_HEIGHT));
+  const nLayers = Math.max(1, Math.round(height / LAYER_HEIGHT));
   const pts = spiralDisc([cx, cy], diameter / 2.0);
   brushSolid(em, polylineToPts(pts, null), { width: 0.42, nLayers, speed });
 }

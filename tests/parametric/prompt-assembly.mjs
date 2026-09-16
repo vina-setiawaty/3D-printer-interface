@@ -121,6 +121,14 @@ test("each stage carries only the reference it needs", () => {
 // 712-char remnant of a truncated reference -- they were cheap by being
 // wrong. texture-check and the third stage did get smaller. The budget below is
 // about keeping each call proportionate to its job, not about shrinking.
+//
+// texture is no longer guaranteed to stay leaner than geometry: the relief-
+// floor rules (nLayers / dome diameter / disc height) moved from
+// PRINT_LIMITS ("limits", read by both geometry and texture) into
+// LEGIBILITY_GUIDE ("legibility", texture-only) -- correctly, since geometry
+// never picks brush options -- which shrinks geometry's prompt and grows
+// texture's by the same rules. Each stage's own absolute budget below is
+// still what actually guards against bloat.
 test("each stage's prompt stays within its budget", () => {
   const budget = { route: 6000, geometry: 15000, "geometry-check": 15000, texture: 14000, "texture-check": 13000, ui: 12000, judge: 4000 };
   const sizes = {};
@@ -129,8 +137,6 @@ test("each stage's prompt stays within its budget", () => {
     sizes[stage] = n;
     assert.ok(n <= budget[stage], `${stage} prompt is ${n} chars, over its ${budget[stage]} budget`);
   }
-  // texture used to carry the whole machine + geometry reference (~18KB)
-  assert.ok(sizes.texture < sizes.geometry, `texture ${sizes.texture} should now be leaner than geometry ${sizes.geometry}`);
   console.log("     sizes:", Object.entries(sizes).map(([k, v]) => `${k} ${v}`).join(", "));
 });
 

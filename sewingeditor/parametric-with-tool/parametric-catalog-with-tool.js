@@ -61,9 +61,6 @@ const hard = (value, applies, note = "", extra = {}) => ({ value, kind: "hard", 
 const warn = (value, applies, note = "", extra = {}) => ({ value, kind: "warn", status: "placeholder", applies, note, ...extra });
 
 export const PRINT_LIMITS = {
-  minDomeDiameter: hard(0.8, "blob / directionalBlob dome diameter, hairy root diameter, disc diameter, 2*dotRadius", "below this the dome does not clear the 0.4mm relief floor"),
-  minDiscHeight: hard(0.4, "disc height", "two 0.2mm layers; already floored in the library"),
-  minLayers: hard(2, "any line brush's nLayers", "0.4mm relief floor -- thinner cannot be felt"),
   zGapFloor: hard(0.25, "variableThickness zGap", "user-validated; lower prints flat"),
   minSolidSheetGap: hard(0.35, "hatch gap with the solid brush, and diamond fillGap", "below this is severe over-extrusion"),
   retractCyclesHard: hard(2000, "retraction cycles in one job", "TPU drive-gear damage; deliberately high -- a diamond fill alone does hundreds of small in-place retracts"),
@@ -91,6 +88,9 @@ export const LEGIBILITY_GUIDE = {
   enforced: false,
   status: "untested",
   rules: {
+    minDomeDiameter: { value: 0.8, applies: "blob / directionalBlob dome diameter, hairy root diameter, disc diameter, 2*dotRadius", note: "below this the dome does not clear the 0.4mm relief floor -- may be hard to feel" },
+    minDiscHeight: { value: 0.4, applies: "disc height", note: "two 0.2mm layers -- thinner relief may be hard to feel" },
+    minLayers: { value: 2, applies: "any line brush's nLayers", note: "0.4mm relief floor -- thinner relief may be hard to feel" },
     maxDottedGapOverDiameter: { value: 4.0, applies: "dotted / blobDotted / directionalBlobDotted / hairyDotted gap, as a multiple of the dot diameter", note: "past this it reads as scattered dots, not a line" },
     maxDashGapOverSegLen: { value: 3.0, applies: "dashed gapLen, as a multiple of segLen", note: "past this it reads as isolated dashes" },
     minDashLen: { value: 2.0, applies: "dashed segLen", note: "shorter dashes are indistinct by touch" },
@@ -950,13 +950,6 @@ export function checkBrushRules(fn, opts, tag = fn) {
   const def = (k, fallback) => (spec[k] && spec[k].def != null ? spec[k].def : fallback);
 
   const diaKey = fn === "hairyDotted" || fn === "hairyDot" ? "rootDiameter" : (fn === "dotted" ? null : "diameter");
-  if (diaKey && diaKey in spec) {
-    const dia = g(diaKey, def(diaKey, 1.6));
-    if (dia < CONSTRAINTS.minDomeDiameter) errors.push(`${tag}: ${diaKey} ${dia}mm is below the ${CONSTRAINTS.minDomeDiameter}mm minimum.`);
-  }
-  if (fn === "dotted" && 2 * g("dotRadius", 0.8) < CONSTRAINTS.minDomeDiameter) errors.push(`${tag}: dotRadius ${g("dotRadius")}mm makes a disc below the ${CONSTRAINTS.minDomeDiameter}mm minimum.`);
-  if (fn === "disc" && g("height", 0.4) < CONSTRAINTS.minDiscHeight) errors.push(`${tag}: height below ${CONSTRAINTS.minDiscHeight}mm.`);
-  if ("nLayers" in spec && g("nLayers", 2) < CONSTRAINTS.minLayers) errors.push(`${tag}: nLayers ${g("nLayers")} is below ${CONSTRAINTS.minLayers} -- relief will not be felt.`);
   if (fn === "variableThickness" && g("zGap", 0.25) < CONSTRAINTS.zGapFloor) errors.push(`${tag}: zGap below the ${CONSTRAINTS.zGapFloor}mm floor (prints flat).`);
 
   for (const k of ["width", "beadWidth", "thinWidth"]) {
@@ -987,6 +980,14 @@ export function checkBrushRules(fn, opts, tag = fn) {
   // is tested with the flag on) so confirming the numbers is a one-line
   // change rather than a rewrite.
   if (LEGIBILITY_GUIDE.enforced) {
+    if (diaKey && diaKey in spec) {
+      const dia = g(diaKey, def(diaKey, 1.6));
+      if (dia < LEG("minDomeDiameter")) warnings.push(`${tag}: ${diaKey} ${dia}mm is below the ${LEG("minDomeDiameter")}mm relief-floor guidance -- may be hard to feel.`);
+    }
+    if (fn === "dotted" && 2 * g("dotRadius", 0.8) < LEG("minDomeDiameter")) warnings.push(`${tag}: dotRadius ${g("dotRadius")}mm makes a disc below the ${LEG("minDomeDiameter")}mm relief-floor guidance -- may be hard to feel.`);
+    if (fn === "disc" && g("height", 0.4) < LEG("minDiscHeight")) warnings.push(`${tag}: height below the ${LEG("minDiscHeight")}mm relief-floor guidance -- may be hard to feel.`);
+    if ("nLayers" in spec && g("nLayers", 2) < LEG("minLayers")) warnings.push(`${tag}: nLayers ${g("nLayers")} is below the ${LEG("minLayers")}-layer relief-floor guidance -- may be hard to feel.`);
+
     const dotty = { blobDotted: "diameter", directionalBlobDotted: "diameter", hairyDotted: "rootDiameter" };
     if (fn in dotty) {
       const dia = g(dotty[fn], def(dotty[fn], 1.6)), gap = g("gap", fn === "directionalBlobDotted" ? dia : 10);

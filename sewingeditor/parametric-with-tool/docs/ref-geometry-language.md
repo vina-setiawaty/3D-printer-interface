@@ -14,7 +14,7 @@ A **piece** is one run of geometry:
 
 | kind | geometry | notes |
 |---|---|---|
-| `line`, one stroke | `{"path": <piece>}` | an axis, a curve, a polyline chart |
+| `line`, one stroke | `{"path": <piece>}` | an axis, a curve, a polyline |
 | `line`, a **group** | `{"paths": [<piece>, <piece>, ...]}` | several disconnected strokes, printed separately but sharing this ONE element's texture — see "Grouping repeated features" |
 | `region`, between curves | `{"between": {"upper": "<line id>", "lower": "<line id>" \| {"y": n}, "xFrom": n, "xTo": n}}` | **the form for any shaded area between or under curves** — see "Solved regions" |
 | `region`, any other shape | `{"boundary": [<piece>, ...]}` | pieces concatenated in order, coming back to the start (an end within 0.5 mm snaps; a larger gap is closed with a straight edge and warned about). Must be a simple, non-self-intersecting shape. |
@@ -22,9 +22,12 @@ A **piece** is one run of geometry:
 | `point`, a **group** | `{"at": [[x, y], [x, y], ...]}` | several stamps sharing this ONE element's texture |
 
 Elements are printed in list order. Give every element a short `label`
-and a chart `role` (`axis`, `tick`, `curve`, `bar`, `marker`, `label`,
-`other`) — the page's geometry report uses roles to tabulate bar heights,
-axis extents and curve ranges.
+and a `role` — a semantic tag for the report (`axis`, `tick`, `curve`,
+`bar`, `marker`, `label`, `other`, or any other label that fits the
+element). When the roles it recognizes are present, the page's geometry
+report uses them to tabulate measurements like bar heights, axis extents
+and curve ranges; any other role still gets the element's plain measured
+fields (bbox, length, area, ...), just not that extra table.
 
 ## Grouping repeated features
 

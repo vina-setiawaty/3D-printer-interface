@@ -138,9 +138,14 @@ function setup() {
     const gcode = document.querySelector("#raw-gcode-textarea").value;
     const blob = new Blob([gcode], { type: "text/plain" });
 
+    const filenameInput = document.querySelector("#gcode-filename-input");
+    let filename = filenameInput ? filenameInput.value.trim() : "";
+    if (!filename) filename = "output.gcode";
+    else if (!filename.includes(".")) filename += ".gcode";
+
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
-    link.download = "output.gcode";
+    link.download = filename;
 
     document.body.appendChild(link);
     link.click();

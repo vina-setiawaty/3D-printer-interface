@@ -106,7 +106,7 @@ lines.push(
   "|---|---|---|",
   "| Printer | Ender 3 V2, Sprite direct drive, 0.4 mm nozzle | — |",
   "| Layer height | 0.20 mm | `texture_functions-with-tool.js` `LAYER_HEIGHT` |",
-  "| Default bead width | 0.5 mm | `DEFAULT_WIDTH` |",
+  "| Default bead width | 0.5 mm | hardcoded per-brush `width` default (e.g. `brushSolid`) |",
   "| Nozzle / bed temp (TPU) | 220 / 50 °C | `NOZZLE_TEMP` / `BED_TEMP` |",
   "| Nozzle / bed temp (PLA) | 205 / 60 °C | `runJobs()` header options |",
   "| Default retraction | 1.3 mm @ 900 mm/min | `RETRACT_MM` / `RETRACT_SPEED` |",

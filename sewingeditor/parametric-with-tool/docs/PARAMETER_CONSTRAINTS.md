@@ -28,9 +28,6 @@ or the machine.
 
 | Key | Applies to | Value | Kind | Status | Why |
 | --- | --- | --- | --- | --- | --- |
-| `minDomeDiameter` | blob / directionalBlob dome diameter, hairy root diameter, disc diameter, 2*dotRadius | **0.8** | hard | placeholder | below this the dome does not clear the 0.4mm relief floor |
-| `minDiscHeight` | disc height | **0.4** | hard | placeholder | two 0.2mm layers; already floored in the library |
-| `minLayers` | any line brush's nLayers | **2** | hard | placeholder | 0.4mm relief floor -- thinner cannot be felt |
 | `zGapFloor` | variableThickness zGap | **0.25** | hard | placeholder | user-validated; lower prints flat |
 | `minSolidSheetGap` | hatch gap with the solid brush, and diamond fillGap | **0.35** | hard | placeholder | below this is severe over-extrusion |
 | `retractCyclesHard` | retraction cycles in one job | **2000** | hard | placeholder | TPU drive-gear damage; deliberately high -- a diamond fill alone does hundreds of small in-place retracts |
@@ -75,6 +72,9 @@ whether a graphic is readable by touch, and they are pure guesswork today.
 
 | Key | Applies to | Value | Why |
 | --- | --- | --- | --- |
+| `minDomeDiameter` | blob / directionalBlob dome diameter, hairy root diameter, disc diameter, 2*dotRadius | **0.8** | below this the dome does not clear the 0.4mm relief floor -- may be hard to feel |
+| `minDiscHeight` | disc height | **0.4** | two 0.2mm layers -- thinner relief may be hard to feel |
+| `minLayers` | any line brush's nLayers | **2** | 0.4mm relief floor -- thinner relief may be hard to feel |
 | `maxDottedGapOverDiameter` | dotted / blobDotted / directionalBlobDotted / hairyDotted gap, as a multiple of the dot diameter | **4** | past this it reads as scattered dots, not a line |
 | `maxDashGapOverSegLen` | dashed gapLen, as a multiple of segLen | **3** | past this it reads as isolated dashes |
 | `minDashLen` | dashed segLen | **2** | shorter dashes are indistinct by touch |
@@ -91,7 +91,7 @@ whether a graphic is readable by touch, and they are pure guesswork today.
 |---|---|---|
 | Printer | Ender 3 V2, Sprite direct drive, 0.4 mm nozzle | — |
 | Layer height | 0.20 mm | `texture_functions-with-tool.js` `LAYER_HEIGHT` |
-| Default bead width | 0.5 mm | `DEFAULT_WIDTH` |
+| Default bead width | 0.5 mm | hardcoded per-brush `width` default (e.g. `brushSolid`) |
 | Nozzle / bed temp (TPU) | 220 / 50 °C | `NOZZLE_TEMP` / `BED_TEMP` |
 | Nozzle / bed temp (PLA) | 205 / 60 °C | `runJobs()` header options |
 | Default retraction | 1.3 mm @ 900 mm/min | `RETRACT_MM` / `RETRACT_SPEED` |
