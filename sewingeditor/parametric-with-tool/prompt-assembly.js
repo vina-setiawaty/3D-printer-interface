@@ -32,7 +32,7 @@ export const STAGE_DOCS = {
 export const STAGE_GENERATED = {
   geometry: ["limits"],
   texture: ["limits", "legibility"],
-  ui: ["attributes"],
+  ui: [],
 };
 
 /** Every doc path the page must fetch, deduplicated. */
@@ -83,6 +83,17 @@ export function compileStatusText(compiled) {
   return out.join("\n");
 }
 
+/** The most recent thing the user actually typed, verbatim -- given to
+ * every generating stage alongside the router's rewritten instruction, so a
+ * specialist can notice when the instruction seems to have dropped or
+ * contradicted something the user said, without becoming a second source
+ * of instructions itself (see composeUserMessage's use of this). */
+function lastUserMessageText(scene) {
+  const msgs = scene?.messages || [];
+  for (let i = msgs.length - 1; i >= 0; i--) if (msgs[i].role === "user") return msgs[i].content;
+  return null;
+}
+
 /** `stage` -> the full system prompt. `docs` maps a path to its text. */
 export function composeSystemPrompt(stage, { docs, scene, C }) {
   const paths = STAGE_DOCS[stage];
@@ -92,7 +103,7 @@ export function composeSystemPrompt(stage, { docs, scene, C }) {
     if (text == null) throw new Error(`prompt doc "${p}" was not loaded`);
     return text;
   });
-  const GENERATE = { limits: () => C.limitsText(), legibility: () => C.legibilityText(), attributes: () => C.attributeGuideText() };
+  const GENERATE = { limits: () => C.limitsText(), legibility: () => C.legibilityText() };
   for (const name of STAGE_GENERATED[stage] || []) parts.push(GENERATE[name]());
   if (stage === "route") parts.push(`SCENE SUMMARY:\n${C.sceneSummary(scene)}`);
   else parts.push(materialText(scene));
@@ -167,6 +178,8 @@ export function composeUserMessage(stage, { scene, C, instruction, targets = [],
   }
 
   parts.push(`INSTRUCTION:\n${instruction}`);
+  const lastUser = lastUserMessageText(scene);
+  if (lastUser) parts.push(`USER'S LAST MESSAGE, VERBATIM (reference only -- the router already resolved this into the instruction above; use this only to notice if that resolution dropped or contradicts something, never as a second instruction to act on):\n${lastUser}`);
   parts.push(`TARGET ELEMENTS: ${targets.length ? targets.join(", ") : "(whole scene)"}`);
 
   if (stage === "geometry") {
@@ -190,17 +203,12 @@ export function composeUserMessage(stage, { scene, C, instruction, targets = [],
     parts.push(`OPTION SPECS for the brushes/stamps currently in use:\n${C.optionSpecsText(scene, ids) || "(no textures yet)"}`);
   }
   if (stage === "ui") {
-    parts.push(`OPTION SPECS for the brushes/stamps in use:\n${C.optionSpecsText(scene, ids) || "(no textures yet)"}`);
+    // The ui stage picks its group members straight from this real option
+    // list (each already tagged stroke/brush/pattern/graphic) -- no
+    // separate attribute-candidate block needed now that there's no fixed
+    // attribute table to expand against.
+    parts.push(`OPTION SPECS for the brushes in use:\n${C.optionSpecsText(scene, ids) || "(no textures yet)"}`);
     parts.push(`CURRENTLY SURFACED GROUPS (JSON):\n${jsonLines(scene.groups || [])}`);
-    // The real, already-resolved candidates for each attribute in THIS
-    // scene, so the stage confirms and prunes a list rather than authoring
-    // one from memory and having half of it rejected.
-    const offered = [];
-    for (const key of C.ATTRIBUTE_KEYS) {
-      const members = C.expandAttribute(scene, key, ids);
-      if (members.length) offered.push(`${key}:\n${members.map((m) => `  ${JSON.stringify(m)}`).join("\n")}`);
-    }
-    parts.push(`PARAMETERS IN THIS SCENE THAT AFFECT EACH ATTRIBUTE (pick from these; a member not listed for its attribute is rejected):\n${offered.join("\n") || "(no textures yet)"}`);
   }
 
   parts.push(`LATEST GEOMETRY REPORT:\n${C.reportText(scene.lastReport)}`);

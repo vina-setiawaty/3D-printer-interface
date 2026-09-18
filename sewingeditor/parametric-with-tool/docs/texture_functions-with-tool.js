@@ -43,6 +43,16 @@ export const Z_HOP = 0.4;
 export const LAYER_HEIGHT = 0.20;
 export const FLOW_PERCENT = 180;
 
+// Conservative placeholder pending a confirming print (same status as
+// every other PRINT_LIMITS number) -- the extruder's maximum volumetric
+// flow rate, for the Ender 3 V2 / Sprite direct-drive, 0.4mm nozzle, TPU.
+// Well under Takahashi & Miyashita's ~11mm3/s (UIST'16 Adjunct,
+// "Thickness Control Technique for Printing Tactile Sheets with FDM"),
+// which was measured on a different printer and not specifically TPU --
+// TPU buckles under back-pressure well before a rigid filament would, so
+// published safe rates for it on a standard hotend commonly sit lower.
+export const MAX_EXTRUSION_RATE_MM3_S = 4.0;
+
 export const BED_X = 220.0;
 export const BED_Y = 220.0;
 
@@ -362,15 +372,44 @@ export function polylineToPts(points, step = 0.1) {
  * ============================================================================
  * SECTION 3: BRUSHES -- what happens between two points
  * ============================================================================
- * Every brush is brush*(em, pts, options): `pts` is an arc-length-tagged
- * point list from samplePath() (a formula path) or polylineToPts() (an
- * explicit polyline); the brush only decides what is deposited along it.
- * A brush never calls em.newPattern() -- the caller does, once per
- * top-level printed element (each line, each hatch stroke, each dot, one
- * whole diamond fill), exactly as the pre-refactor functions did.
+ * Every PUBLIC brush is brush*(em, pts, options): `pts` is an arc-length-
+ * tagged point list from samplePath() (a formula path) or polylineToPts()
+ * (an explicit polyline). A brush never calls em.newPattern() -- the
+ * caller does, once per top-level printed element (each line, each hatch
+ * stroke, each dot, one whole diamond fill), exactly as the pre-refactor
+ * functions did.
+ *
+ * Internally, the continuous-ridge brushes (solid, dashed, segmented,
+ * variableThickness) are each split into two layers, matching the
+ * Shape -> Stroke -> Brush model: the exported function is the STROKE --
+ * it owns `pts`, any layer/pass looping, and retract/unretract sequencing
+ * -- which calls a private, non-exported BRUSH primitive per adjacent
+ * point pair. A Brush primitive is purely local: given two points and
+ * explicit options, it decides what is deposited between them, with no
+ * knowledge of layers, retraction, or the rest of the path. The `*Dotted`
+ * family below (and Section 5's stamps) already have this shape --
+ * walkArcLengthStops() is their Stroke, emit*Dot() their Brush -- and
+ * needed no change.
  */
 
-/** Continuous solid ridge. */
+/** BRUSH: one straight swept segment from p0 to p1, at a constant given
+ * width/height. Shared by brushSolid, brushDashed and brushSegmented --
+ * the three continuous-ridge brushes whose height is either constant for
+ * a whole pass or one of a small number of author-chosen discrete values,
+ * so no per-call speed safety check is needed (contrast
+ * emitVariableThicknessSegment below, whose height sweeps continuously
+ * and DOES need one). `z`, like printMove()'s own z argument, is optional
+ * -- omit it when the caller has already set height via goto() for a
+ * whole pass (solid, dashed); pass it when height changes every segment
+ * (segmented). */
+function emitSweptSegment(em, p0, p1, { width, height, speed, flowMult = 1.0, z = null }) {
+  const [x0, y0] = p0, [x1, y1] = p1;
+  const seg = Math.hypot(x1 - x0, y1 - y0);
+  if (seg < 1e-9) return;
+  em.printMove(x1, y1, seg * eRate(width, height, flowMult), speed, z);
+}
+
+/** STROKE: continuous solid ridge. */
 export function brushSolid(em, pts, {
   width = 0.5, nLayers = 2, speed = 400,
 } = {}) {
@@ -379,17 +418,21 @@ export function brushSolid(em, pts, {
     em.goto(pts[0][0], pts[0][1], z);
     em.unretract();
     for (let i = 1; i < pts.length; i++) {
-      const [x0, y0] = pts[i - 1], [x1, y1] = pts[i];
-      const seg = Math.hypot(x1 - x0, y1 - y0);
-      if (seg < 1e-9) continue;
-      em.printMove(x1, y1, seg * eRate(width, LAYER_HEIGHT), speed);
+      emitSweptSegment(em, pts[i - 1], pts[i], { width, height: LAYER_HEIGHT, speed });
     }
     em.retract();
   }
   return pts;
 }
 
-/** Dashes -- segLen/gapLen measured along actual arc length. */
+/** STROKE: dashes -- segLen/gapLen measured along actual arc length. A
+ * gap is not a Brush call at all, just travel: each "on" sub-range is
+ * walked with the exact same per-layer goto/unretract/walk/retract
+ * bracket as brushSolid's Stroke (reusing its Brush verbatim), and the
+ * gap between one dash and the next is entirely the next dash's own
+ * leading goto(). Because this loop only ever draws a dash (whatever
+ * length remains, even a shortened final one) and never renders a gap as
+ * its own step, it structurally cannot end on a gap. */
 export function brushDashed(em, pts, {
   segLen, gapLen, width = 0.5, nLayers = 2, speed = 400,
 } = {}) {
@@ -412,10 +455,7 @@ export function brushDashed(em, pts, {
       em.goto(subPts[0][0], subPts[0][1], z);
       em.unretract();
       for (let i = 1; i < subPts.length; i++) {
-        const [x0, y0] = subPts[i - 1], [x1, y1] = subPts[i];
-        const seg = Math.hypot(x1 - x0, y1 - y0);
-        if (seg < 1e-9) continue;
-        em.printMove(x1, y1, seg * eRate(width, LAYER_HEIGHT), speed);
+        emitSweptSegment(em, subPts[i - 1], subPts[i], { width, height: LAYER_HEIGHT, speed });
       }
       em.retract();
     }
@@ -546,9 +586,35 @@ export function brushDirectionalBlobDotted(em, pts, {
   });
 }
 
-/** Vertical-lift hair strands at regular arc-length intervals. CAUTION:
- * each strand is a retract/un-retract cycle -- mind the retraction-cycle
- * cap before using a dense spacing over a long path. */
+/** BRUSH: one vertical-lift strand at the nozzle's CURRENT XY position --
+ * a point-op, like the *Dotted family's emit*Dot() functions, not a
+ * between-two-points segment. No travel here: the Stroke below has
+ * already positioned the nozzle and stays un-retracted at `baseZ` between
+ * calls, trading the *Dotted family's full retract-travel-unretract cycle
+ * per stop for a bare G0 move -- cheaper over a dense line of strands, at
+ * the cost of the Emitter's own retract bookkeeping (deliberately left to
+ * the Stroke, not this function, since it spans multiple strands). */
+function emitHairyStrand(em, { esegmentMm, retractMm, dwellMs, smallLift, bigLift, baseZ }) {
+  em.a(`G1 E${esegmentMm.toFixed(4)} F500`);
+  em.eTotal += esegmentMm;
+  const z1 = baseZ + smallLift;
+  em.a(`G0 Z${z1.toFixed(3)}`);
+  em.z = z1;
+  em.dwell(dwellMs);
+  const z2 = z1 + bigLift;
+  em.a(`G0 Z${z2.toFixed(3)} F600`);
+  em.z = z2;
+  em.a(`G1 E${(-retractMm).toFixed(4)} F${RETRACT_SPEED}`);
+  em.eTotal -= retractMm;
+}
+
+/** STROKE: vertical-lift hair strands at regular arc-length intervals --
+ * one emitHairyStrand() call per root, with a plain G0 travel (not
+ * walkArcLengthStops(), which doesn't handle travel and whose callers
+ * each do a full goto() cycle per stop; this Stroke's cheaper single
+ * un-retract for the whole line is the point). CAUTION: each strand is
+ * still a retract/un-retract cycle -- mind the retraction-cycle cap
+ * before using a dense spacing over a long path. */
 export function brushHairy(em, pts, {
   spacing = 2.0, esegmentMm = 1.2, retractMm = 1.3, dwellMs = 400,
   smallLift = 0.2, bigLift = 4.0, baseZ = 0.3, speed = 200,
@@ -560,17 +626,10 @@ export function brushHairy(em, pts, {
   em.unretract();
   for (let i = 0; i < nRoots; i++) {
     const s = i * spacing;
-    em.a(`G1 E${esegmentMm.toFixed(4)} F500`);
-    em.eTotal += esegmentMm;
-    const z1 = baseZ + smallLift;
-    em.a(`G0 Z${z1.toFixed(3)}`);
-    em.z = z1;
-    em.dwell(dwellMs);
-    const z2 = z1 + bigLift;
-    em.a(`G0 Z${z2.toFixed(3)} F600`);
-    em.z = z2;
-    em.a(`G1 E${(-retractMm).toFixed(4)} F${RETRACT_SPEED}`);
-    em.eTotal -= retractMm;
+    emitHairyStrand(em, { esegmentMm, retractMm, dwellMs, smallLift, bigLift, baseZ });
+    // Travel while still lifted (at bigLift height), THEN descend to
+    // baseZ at the new position -- keeps the nozzle clear of the strand
+    // just placed instead of dragging through it at print height.
     if (i < nRoots - 1) {
       const [nx, ny] = pointAtArcLength(pts, s + spacing);
       em.a(`G0 X${nx.toFixed(3)} Y${ny.toFixed(3)} F${speed}`);
@@ -626,15 +685,26 @@ export function brushHairyDotted(em, pts, {
   });
 }
 
-/** Alternating thin/fat segments -- a continuous, single-layer line that
- * switches bead WIDTH between two segment types, each with its own LENGTH:
- * `thinWidth` x `thinLen`, then `fatWidth` x `fatLen`, repeating to the end
- * of the path. Each segment type also has its own bead HEIGHT (the nozzle
- * Z steps to it per segment) -- the fat segment sitting a little higher is
- * what lets its extra volume spread into a genuinely wider bead instead of
- * doming at a fixed low Z. No retract between segments (the line is
- * continuous); one prime at the start, one retract at the very end. Uses
- * G91 for the XY (and per-segment relative Z) segment walk. */
+/** STROKE: alternating thin/fat segments -- a continuous, single-layer
+ * line that switches bead WIDTH between two segment types, each with its
+ * own LENGTH: `thinWidth` x `thinLen`, then `fatWidth` x `fatLen`,
+ * repeating to the end of the path. Each segment type also has its own
+ * bead HEIGHT -- the fat segment sitting a little higher is what lets its
+ * extra volume spread into a genuinely wider bead instead of doming at a
+ * fixed low Z. No retract between segments (the line is continuous); one
+ * prime at the start, one retract at the very end.
+ *
+ * Absolute (G90) throughout, like every other brush in this file --
+ * height changes are embedded in each emitSweptSegment call's own `z`
+ * argument (one combined G1 X/Y/Z/E line per segment) instead of the
+ * separate relative-mode G91 XY move + standalone Z-delta line this used
+ * to hand-write. That removes three things the old G91 approach had:
+ * accumulated rounding drift from many small relative deltas, the
+ * Emitter's own em.x/em.y/em.z going stale mid-function (this used to
+ * track curX/curY itself and only re-sync at the very end), and the
+ * silent-failure risk of an exception leaving the machine stuck in
+ * relative mode. It also lets this share emitSweptSegment with
+ * brushSolid/brushDashed instead of needing its own deposition mechanics. */
 export function brushSegmented(em, pts, {
   thinLen = 8.0, thinWidth = 0.8, thinHeight = 0.2, thinSpeed = 130,
   fatLen = 4.0, fatWidth = 1.6, fatHeight = 0.3, fatSpeed = 60,
@@ -652,9 +722,7 @@ export function brushSegmented(em, pts, {
   em.dwell(primedwellS * 1000);
   em.retracted = false;
 
-  em.a("G91");
-  let [curX, curY] = first;
-  let curZ = thinHeight;
+  let curPt = first;
   let s = 0, i = 0;
   while (s < length - 1e-6) {
     const fat = i % 2 === 1;
@@ -663,35 +731,42 @@ export function brushSegmented(em, pts, {
     const height = fat ? fatHeight : thinHeight;
     const spd    = fat ? fatSpeed  : thinSpeed;
     const s1 = Math.min(s + segLen, length);
-    const [nx, ny] = pointAtArcLength(pts, s1);
-    const dx = nx - curX, dy = ny - curY;
-    const segDist = Math.hypot(dx, dy);
+    const nextPt = pointAtArcLength(pts, s1);
 
-    const dz = height - curZ;
-    if (Math.abs(dz) > 1e-6) {
-      em.a(`G1 Z${dz.toFixed(3)} F600`);
-      curZ = height;
-    }
     if (segDwellMs > 0) em.dwell(segDwellMs);
+    emitSweptSegment(em, curPt, nextPt, { width, height, speed: spd, flowMult, z: height });
 
-    if (segDist > 1e-9) {
-      const eAmt = eRate(width, height, flowMult) * segDist;
-      em.a(`G1 X${dx.toFixed(3)} Y${dy.toFixed(3)} E${eAmt.toFixed(4)} F${spd}`);
-      em.eTotal += eAmt;
-    }
-    curX = nx; curY = ny;
+    curPt = nextPt;
     s = s1; i++;
   }
-  em.a("G90");
   em.a(`G1 E${(-retractMm).toFixed(4)} F${retractSpeed}`);
   em.eTotal -= retractMm;
-  em.x = curX; em.y = curY; em.z = curZ;
   em.retracted = true;
   return pts;
 }
 
-/** The sine-wave bulge technique -- bead height varies as a function of
- * ARC LENGTH along the path. */
+/** BRUSH for brushVariableThickness ONLY -- not shared with
+ * emitSweptSegment. Height sweeps continuously along this Stroke's whole
+ * path (unlike solid's constant-per-layer height or segmented's two
+ * author-tuned discrete heights), so there's no discrete "type" to have
+ * pre-picked a safe speed for -- the cap has to be computed fresh per
+ * call. Follows Takahashi & Miyashita, "Thickness Control Technique for
+ * Printing Tactile Sheets with Fused Deposition Modeling" (UIST'16
+ * Adjunct): F <= MaxExtrusionRate / (Height x Width) x 60. */
+function emitVariableThicknessSegment(em, p0, p1, { width, height, speed, z }) {
+  const [x0, y0] = p0, [x1, y1] = p1;
+  const seg = Math.hypot(x1 - x0, y1 - y0);
+  if (seg < 1e-9) return;
+  const maxSpeed = (MAX_EXTRUSION_RATE_MM3_S / (width * height)) * 60;
+  const effectiveSpeed = Math.min(speed, maxSpeed);
+  em.printMove(x1, y1, seg * eRate(width, height), effectiveSpeed, z);
+}
+
+/** STROKE: the sine-wave bulge technique -- bead height varies as a
+ * function of ARC LENGTH along the path. Walks the given `pts` exactly as
+ * handed to it -- no new points are inserted here; resolution comes
+ * entirely from however finely samplePath()/polylineToPts() already
+ * sampled the path upstream. */
 export function brushVariableThickness(em, pts, {
   hMin = 0.16, hMax = 0.9, wavelength = 8.0, beadWidth = 0.8,
   zGap = 0.25, speed = 25, peakDwellMs = 300,
@@ -701,14 +776,16 @@ export function brushVariableThickness(em, pts, {
   const firstH = hAt(0);
   em.goto(pts[0][0], pts[0][1], firstH + zGap);
   em.unretract();
+  let prevPt = pts[0];
   let prevH = firstH;
   for (let i = 1; i < pts.length; i++) {
-    const [x0, y0] = pts[i - 1], [x1, y1, s1] = pts[i];
-    const seg = Math.hypot(x1 - x0, y1 - y0);
-    if (seg < 1e-9) continue;
+    const [x0, y0] = prevPt;
+    const [x1, y1, s1] = pts[i];
+    if (Math.hypot(x1 - x0, y1 - y0) < 1e-9) continue;
     const h1 = hAt(s1);
     const hAvg = (prevH + h1) / 2.0;
-    em.printMove(x1, y1, seg * eRate(beadWidth, hAvg), speed, h1 + zGap);
+    emitVariableThicknessSegment(em, prevPt, pts[i], { width: beadWidth, height: hAvg, speed, z: h1 + zGap });
+    prevPt = pts[i];
     prevH = h1;
   }
   em.retract();

@@ -40,14 +40,19 @@ stages face, and keeps them consistent by construction.
 **Recognize the pattern, don't just follow a keyword list.** Ask: are
 these instances of the *same visual feature*, repeated regularly, that a
 person would touch and read as ONE kind of mark rather than as N
-individually meaningful things? If yes, group them:
+individually meaningful things? If yes, group them into one element —
+whatever the feature is called. For example, not an exhaustive list:
 
-- **Axis tick marks** — ONE `line` element, `role: "tick"`, `paths`
+- **Axis tick marks** → ONE `line` element, `role: "tick"`, `paths`
   holding one short 2-point piece per tick. Not ten `tick` elements.
-- **A row of evenly-spaced data markers** — ONE `point` element,
+- **A row of evenly-spaced data markers** → ONE `point` element,
   `role: "marker"`, `at` holding one `[x, y]` per marker.
-- **Gridlines** across a chart area — ONE `line` element, one 2-point
+- **Gridlines** across a chart area → ONE `line` element, one 2-point
   piece per line.
+
+The same test applies to anything else built from a repeated mark —
+hatching, stitch dots, rivets, fence pickets, whatever the drawing calls
+for — even though it isn't named above.
 
 Do NOT group things that look alike but mean different things (three bars
 with three different heights encode three different values) — those stay

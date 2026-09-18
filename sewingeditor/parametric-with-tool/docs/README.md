@@ -17,9 +17,9 @@ different `localStorage` key, and its own copy of the texture library below
 | `texture_functions-with-tool.js` | The texture library restructured as brushes / patterns / stamps (every texture is "what happens between two points"). Verified byte-identical to the original library's output by `tests/parametric/golden-brushes.mjs`. |
 | `stage-route.md` | System prompt for **route**, the manager — the only call that sees the chat history. Picks the specialist, rewrites the request as a self-contained instruction, and writes the turn's acceptance criteria. Also runs in refine mode after a failed evaluation. |
 | `stage-geometry.md` | System prompt for **geometry** — defines or changes elements (lines, regions, points) and the global transform. |
-| `stage-texture.md` | System prompt for **texture** — assigns a brush/stamp, a fill pattern, and their option values to each element slot. |
+| `stage-texture.md` | System prompt for **texture** — assigns a brush, a fill pattern, and their option values to each element slot. |
 | `stage-judge.md` | System prompt for **judge** — reads the finished scene against the turn's acceptance criteria and the app's measured report, and names which specialist can fix each unmet one. |
-| `stage-ui.md` | System prompt for **ui** — decides which parameters the panel surfaces and under which heading. Sets no values (the texture stage does). Its attribute guide is generated from `../attributes.js`. |
+| `stage-ui.md` | System prompt for **ui** — decides which parameters the panel surfaces and under which heading, selecting freely from the scene's real options (no fixed attribute table). Sets no values (the texture stage does). |
 | `ref-coordinates.md` | Bed, safe area, the global transform, material. |
 | `ref-expressions.md` | The formula grammar and what sampling does to a curve. |
 | `ref-geometry-language.md` | Pieces, elements, grouping repeated features, and solved (`between`) regions. |

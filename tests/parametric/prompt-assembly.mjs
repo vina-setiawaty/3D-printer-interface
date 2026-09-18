@@ -108,8 +108,8 @@ test("each stage carries only the reference it needs", () => {
   assert.ok(!/Grouping repeated features/.test(ui), "the ui stage does not lay out geometry");
   assert.ok(!/start\/end sequence/.test(ui), "nor does it need the machine's start sequence");
   assert.ok(!/orbitLoops/.test(ui), "nor the brush menu -- it is given the specs actually in use");
-  assert.ok(/ATTRIBUTES AND WHAT AFFECTS THEM/.test(ui), "it does need the influence table");
-  assert.ok(/density/.test(ui) && /hairiness/.test(ui));
+  assert.ok(!/ATTRIBUTES AND WHAT AFFECTS THEM/.test(ui), "no fixed attribute table anymore -- selection is free-form, from the real option specs given per turn");
+  assert.ok(/label/.test(ui), "it does need to know members carry a short label");
 
   const route = sys("route");
   assert.ok(!/blobDotted/.test(route) && !/Grouping repeated/.test(route), "the manager picks a stage, it does not do the work");
@@ -174,8 +174,8 @@ test("only the router sees the conversation, and only a capped slice", () => {
 
   const ui = composeUserMessage("ui", { scene: s, C, instruction: "surface the density", targets: [] });
   assert.ok(ui.includes("OPTION SPECS") && ui.includes("CURRENTLY SURFACED GROUPS"));
-  assert.ok(/PARAMETERS IN THIS SCENE THAT AFFECT EACH ATTRIBUTE/.test(ui), "the ui stage is offered resolved candidates");
-  assert.ok(/"option":"gap"/.test(ui.replace(/\s/g, "")), "including the hatch row spacing of the bar it can see");
+  assert.ok(!/PARAMETERS IN THIS SCENE THAT AFFECT EACH ATTRIBUTE/.test(ui), "no separate attribute-candidate block anymore -- OPTION SPECS is the one list to pick from");
+  assert.ok(/gap/.test(ui), "including the hatch row spacing of the bar it can see, via the real option specs");
 
   // the router's own transcript is merged by role and capped
   s.messages = [];
@@ -184,6 +184,30 @@ test("only the router sees the conversation, and only a capped slice", () => {
   assert.equal(msgs.length, 12, "capped");
   assert.ok(msgs.every((m, i) => i === 0 || m.role !== msgs[i - 1].role), "roles alternate for both providers");
   assert.ok(msgs[msgs.length - 1].content.includes("turn 39"), "the cap keeps the most recent turns");
+});
+
+test("a specialist sees the user's own last message, verbatim and reference-only", () => {
+  const s = scene();
+  s.messages = [
+    { role: "user", content: "can you give me a 4x4cm square filled with blob dots" },
+    { role: "assistant", content: "I'll create the square.", stage: "route" },
+  ];
+  const geo = composeUserMessage("geometry", { scene: s, C, instruction: "make a 4x4cm square", targets: [] });
+  assert.ok(geo.includes("USER'S LAST MESSAGE"), "the raw message is included");
+  assert.ok(geo.includes("filled with blob dots"), "verbatim, not route's paraphrase");
+  assert.ok(/reference only/.test(geo), "framed as reference, not a second instruction");
+
+  const tex = composeUserMessage("texture", { scene: s, C, instruction: "shade it", targets: [] });
+  const ui = composeUserMessage("ui", { scene: s, C, instruction: "surface it", targets: [] });
+  assert.ok(tex.includes("filled with blob dots") && ui.includes("filled with blob dots"), "texture and ui get it too");
+
+  // No user message anywhere (e.g. a fresh scene, or the trailing message
+  // happens to be assistant-only) -- the section is left out entirely
+  // rather than shown empty.
+  const empty = scene();
+  empty.messages = [{ role: "assistant", content: "hello", stage: "chat" }];
+  const noUser = composeUserMessage("geometry", { scene: empty, C, instruction: "x", targets: [] });
+  assert.ok(!noUser.includes("USER'S LAST MESSAGE"), "omitted, not shown blank");
 });
 
 test("a broken scene's errors reach the next call", () => {

@@ -457,20 +457,61 @@ function rerunGcode() {
   digestEl.innerHTML = `${badge}<table class="pg-digest-table">${rows}</table>${errs}${warns}`;
 }
 
-// ---------------------------------------------------------------- panel --
+// -------------------------------- panel --
 
+// Order, top to bottom: printing settings (global, always visible) -- one
+// top-level card per scene.groups entry NOT scoped to exactly one element
+// (a graphic-level control, or a felt quality spanning several elements --
+// see topLevelGroups/groupsForElement in the catalog) -- then one card per
+// element, each holding its own slice of the relevant groups, its shape
+// editor, and a fully collapsible per-slot stroke/brush/pattern breakdown.
+// A group spanning several elements shows up BOTH as its own top-level card
+// AND inside each of those elements' own cards -- deliberate, not a
+// duplicate to remove (see the parameters-panel plan).
+//
+// Editing any field now re-renders this whole panel (so two displays of the
+// same value never drift), which would otherwise collapse every open
+// <details> back closed on every keystroke -- captureOpenKeys/applyOpenState
+// preserve open/closed state, at every nesting level, across each rebuild.
 function renderPanel() {
   const el = $("#pg-params");
+  const openKeys = captureOpenKeys(el);
   el.innerHTML = "";
   el.appendChild(renderGraphicCard());
-  const elsTitle = section("elements");
-  el.appendChild(elsTitle);
+
+  const topGroups = C.topLevelGroups(scene);
+  if (topGroups.length) {
+    el.appendChild(section("relevant parameters"));
+    topGroups.forEach((g) => el.appendChild(renderGroupCard(g)));
+  }
+
+  el.appendChild(section("elements"));
   if (!scene.elements.length) el.appendChild(note("elements appear here after the AI proposes a graphic"));
-  scene.elements.forEach((element, idx) => el.appendChild(renderElementCard(element, idx)));
-  el.appendChild(section("surfaced controls"));
-  if (!(scene.groups || []).length) el.appendChild(note("the controls stage groups the parameters that matter here, under the quality they affect"));
-  (scene.groups || []).forEach((g) => el.appendChild(renderGroupCard(g)));
-  el.appendChild(renderAllOptions());
+  const targeted = new Set(lastTurn?.plan?.targets || []);
+  const rank = (e) => (targeted.has(e.id) ? 0 : 1);
+  const ordered = scene.elements.map((e, idx) => [e, idx]).sort((a, b) => rank(a[0]) - rank(b[0]));
+  ordered.forEach(([element, idx]) => el.appendChild(renderElementCard(element, idx)));
+
+  applyOpenState(el, openKeys, targeted);
+}
+
+// Every collapsible <details> this panel builds (element cards, slot
+// breakdowns, stroke/brush/pattern subsections, an element's own
+// generated-ui section) carries a stable `data-open-key` -- see
+// collapsibleCard()'s callers. Captured before a rebuild, restored after.
+function captureOpenKeys(container) {
+  return new Set([...container.querySelectorAll("details[data-open-key][open]")].map((d) => d.dataset.openKey));
+}
+function applyOpenState(container, openKeys, targetedIds) {
+  const GEN_UI_SUFFIX = ":generated-ui";
+  for (const d of container.querySelectorAll("details[data-open-key]")) {
+    const key = d.dataset.openKey;
+    if (openKeys.has(key)) { d.open = true; continue; }
+    // A freshly-relevant generated-ui section defaults open even before the
+    // user has ever manually opened it -- but only as a default: an
+    // explicit prior close (captured above) always wins.
+    if (key.endsWith(GEN_UI_SUFFIX) && targetedIds.has(key.slice(0, -GEN_UI_SUFFIX.length))) d.open = true;
+  }
 }
 
 function section(title) {
@@ -494,17 +535,47 @@ function card(title, sub) {
   c.appendChild(head);
   return c;
 }
+// Same head shape as card(), but a native <details> so it starts closed --
+// used for per-element cards, which default to collapsed so a scene with
+// many elements doesn't bury the parameters the ui stage actually surfaced.
+function collapsibleCard(title, sub, openKey) {
+  const c = document.createElement("details");
+  c.className = "pg-call";
+  if (openKey) c.dataset.openKey = openKey;
+  const head = document.createElement("summary");
+  head.className = "pg-call-head";
+  head.innerHTML = `<span class="pg-call-label">${escapeHtml(title)}</span><span class="pg-call-fn">${escapeHtml(sub || "")}</span>`;
+  c.appendChild(head);
+  return c;
+}
 function fieldsGrid() {
   const w = document.createElement("div");
   w.className = "pg-fields";
   return w;
+}
+// A light-weight in-card heading -- same visual weight as a slot's own
+// "brush"/"pattern" title, used for things nested inside a card that aren't
+// worth a full top-level section() heading.
+function subLabel(text) {
+  const d = document.createElement("div");
+  d.className = "pg-fields-title";
+  d.textContent = text;
+  return d;
+}
+// One collapsible stroke/brush/pattern subsection inside a slot.
+function renderOptionSubsection(openKey, label, fields) {
+  const c = collapsibleCard(label, "", openKey);
+  const g = fieldsGrid();
+  fields.forEach((f) => g.appendChild(f));
+  c.appendChild(g);
+  return c;
 }
 function commitGeometry() { saveScene(); scheduleRerun(); }
 
 // --- graphic (global) ---
 
 function renderGraphicCard() {
-  const c = card("graphic", "global transform");
+  const c = card("printing settings", "scale, position, material — the whole print, not one element");
   const grid = fieldsGrid();
   grid.appendChild(renderField("scale %", { kind: "num", step: 5, min: 10, max: 400 }, +(scene.transform.scale * 100).toFixed(1), (v) => {
     if (v != null && v > 0) scene.transform.scale = v / 100;
@@ -521,6 +592,24 @@ function renderGraphicCard() {
   };
   grid.appendChild(renderField("origin x (min corner)", { kind: "nnum", step: 1 }, ox, (v) => setOrigin(0, v)));
   grid.appendChild(renderField("origin y (min corner)", { kind: "nnum", step: 1 }, oy, (v) => setOrigin(1, v)));
+  const matLbl = document.createElement("label");
+  matLbl.className = "pg-field";
+  matLbl.innerHTML = `<span>material</span>`;
+  const matSel = document.createElement("select");
+  for (const [v, text] of [["TPU", "TPU (default)"], ["PLA", "PLA"]]) {
+    const o = document.createElement("option");
+    o.value = v; o.textContent = text;
+    if (v === scene.config.material) o.selected = true;
+    matSel.appendChild(o);
+  }
+  matSel.onchange = () => {
+    scene.config.material = matSel.value;
+    const other = $("#pg-material");
+    if (other) other.value = matSel.value;
+    saveScene(); scheduleRerun();
+  };
+  matLbl.appendChild(matSel);
+  grid.appendChild(matLbl);
   c.appendChild(grid);
   const row = document.createElement("div");
   row.className = "pg-btn-row";
@@ -551,7 +640,7 @@ function smallBtn(label, onClick) {
 function renderElementCard(el, idx) {
   const groupCount = el.kind === "point" && Array.isArray(el.at) && Array.isArray(el.at[0]) ? el.at.length
     : el.kind === "line" && Array.isArray(el.paths) ? el.paths.length : null;
-  const c = card(el.label || el.id, `${el.id} · ${el.kind}${el.role ? ` · ${el.role}` : ""}${groupCount != null ? ` · group of ${groupCount}` : ""}`);
+  const c = collapsibleCard(el.label || el.id, `${el.id} · ${el.kind}${el.role ? ` · ${el.role}` : ""}${groupCount != null ? ` · group of ${groupCount}` : ""}`, el.id);
   const del = document.createElement("span");
   del.className = "pg-call-del";
   del.textContent = "remove";
@@ -563,10 +652,35 @@ function renderElementCard(el, idx) {
   };
   c.querySelector(".pg-call-head").appendChild(del);
 
+  const generatedUi = renderElementGeneratedUi(el);
+  if (generatedUi) c.appendChild(generatedUi);
+
+  c.appendChild(subLabel("shape"));
   c.appendChild(renderGeometryEditor(el));
 
   const tex = scene.textures[el.id] || (scene.textures[el.id] = {});
-  for (const slot of C.slotsFor(el.kind)) c.appendChild(renderSlotEditor(el, tex, slot));
+  if (el.kind === "region") c.appendChild(renderPatternEditor(el, tex));
+
+  for (const slot of C.slotsFor(el.kind)) {
+    const slotCard = collapsibleCard(slot, "", `${el.id}:${slot}`);
+    slotCard.appendChild(renderSlotEditor(el, tex, slot));
+    c.appendChild(slotCard);
+  }
+  return c;
+}
+
+// This element's own slice of every relevant scene.groups entry -- its own
+// single-element groups (shown complete), plus its own member from any
+// group that also spans other elements (that group's other members live in
+// their own elements' cards, and the whole group also has its own top-level
+// card -- see groupsForElement in the catalog for why that's intentional).
+// Returns null when there's nothing to show, so the caller can skip the
+// section entirely rather than rendering an empty heading.
+function renderElementGeneratedUi(el) {
+  const groups = C.groupsForElement(scene, el.id);
+  if (!groups.length) return null;
+  const c = collapsibleCard("generated ui", "", `${el.id}:generated-ui`);
+  for (const g of groups) c.appendChild(renderGroupCard(g, el.id));
   return c;
 }
 
@@ -761,69 +875,119 @@ function renderPieceEditor(piece, onReplace, allowRef) {
 
 function renderSlotEditor(el, tex, slot) {
   const wrap = document.createElement("div");
-  const title = document.createElement("div");
-  title.className = "pg-fields-title";
-  title.textContent = slot === "brush" ? (el.kind === "point" ? "stamp" : "brush") : slot;
-  wrap.appendChild(title);
   const g = fieldsGrid();
   const s = tex[slot];
   const isFill = slot === "fill";
-  const pat = isFill ? (s?.pattern || { kind: "hatch" }) : null;
-  const wantsStamp = el.kind === "point" || (isFill && C.STAMP_PATTERNS.includes(pat.kind));
-  const names = ["(none)", ...(wantsStamp ? C.STAMP_NAMES : C.BRUSH_NAMES)];
-  g.appendChild(renderField(wantsStamp ? "stamp" : "brush", { kind: "enum", options: names, def: "(none)" }, s?.fn || "(none)", (v) => {
+  // A point element or a points-placing fill pattern needs a brush that's
+  // point-safe (see POINT_SAFE_BRUSHES/isPointSafe) -- everything else can
+  // offer the full brush list. The pattern KIND itself is chosen under
+  // "shape" (renderPatternEditor) -- it decides the spatial arrangement,
+  // not how it's printed -- but this slot still reads it, since which
+  // brushes are even valid here depends on it (a stamp-style pattern needs
+  // a point-safe brush, a stroke-style one doesn't).
+  const patKind = isFill ? (s?.pattern?.kind || "hatch") : null;
+  const needsPointSafe = el.kind === "point" || (isFill && C.STAMP_PATTERNS.includes(patKind));
+  const names = ["(none)", ...(needsPointSafe ? [...C.POINT_SAFE_BRUSHES] : C.BRUSH_NAMES)];
+  g.appendChild(renderField("brush", { kind: "enum", options: names, def: "(none)" }, s?.fn || "(none)", (v) => {
     if (v === "(none)") delete tex[slot];
-    else if (!s || s.fn !== v) tex[slot] = { fn: v, options: {}, bases: {}, ...(isFill ? { pattern: pat } : {}) };
+    else if (!s || s.fn !== v) tex[slot] = { fn: v, options: {}, bases: {}, ...(isFill ? { pattern: s?.pattern || { kind: "hatch" } } : {}) };
     C.pruneGroups(scene);
     saveScene(); rerenderAll();
   }));
-  if (isFill) {
-    g.appendChild(renderField("pattern", { kind: "enum", options: C.PATTERN_KINDS, def: "hatch" }, pat.kind, (kind) => {
-      const next = { kind, ...(C.PATTERN_OPTIONS[kind] ? Object.fromEntries(Object.entries(C.PATTERN_OPTIONS[kind]).map(([k, m]) => [k, m.def])) : {}) };
-      if (kind === "stamps") next.points = [[60, 60], [70, 60]];
-      if (kind === "strokes") next.strokes = [[[40, 40], [80, 80]]];
-      if (kind === "curves") next.curves = [{ x: "40 + t", y: "60 + 5*sin(t/4)", tEnd: 60 }];
-      if (kind === "family") Object.assign(next, { x: "110 + t*cos(u)", y: "110 + t*sin(u)", tEnd: 40, uEnd: 6.28, uStep: 0.5 });
-      if (!s) tex[slot] = { fn: C.STAMP_PATTERNS.includes(kind) ? "blob" : "solid", options: {}, bases: {}, pattern: next };
-      else {
-        s.pattern = next;
-        const needStamp = C.STAMP_PATTERNS.includes(kind);
-        if (needStamp !== C.isStamp(s.fn)) { s.fn = needStamp ? "blob" : "solid"; s.options = {}; s.bases = {}; }
-      }
-      C.pruneGroups(scene);
-      saveScene(); rerenderAll();
-    }));
-    if (s) {
-      const spec = C.PATTERN_OPTIONS[pat.kind];
-      if (spec) {
-        // level "pattern" explicitly: a fill's brush and its pattern are
-        // separately-named spaces, and some names exist in both (a
-        // blobDotted fill and a hatch pattern both have "gap"). These
-        // fields are the pattern's.
-        for (const k of Object.keys(spec)) g.appendChild(optionField(k, spec[k], { level: "pattern", elementId: el.id, slot, option: k }, s));
-      } else {
-        const { kind, ...rest } = pat;
-        g.appendChild(jsonField(`${kind} spec (JSON)`, rest, (v) => { if (v && typeof v === "object") { s.pattern = { kind, ...v }; saveScene(); scheduleRerun(); } }));
-      }
+  wrap.appendChild(g);
+
+  // The brush dropdown above only picks WHICH brush is used; its own
+  // numeric options (width, nLayers, spacing, ...) get their own
+  // collapsible subsection per level, bucketed by the level S()/B() already
+  // tags each option with in BRUSH_OPTIONS -- stroke (the walk: layers,
+  // arc-length spacing, ...) vs brush (the local deposit: width, height,
+  // local speed, ...). Only shown once a brush is actually selected.
+  if (s) {
+    const spec = C.optionSpecFor(s.fn);
+    const strokeKeys = Object.keys(spec).filter((k) => spec[k].level === "stroke");
+    const brushKeys = Object.keys(spec).filter((k) => spec[k].level === "brush");
+    if (strokeKeys.length) {
+      wrap.appendChild(renderOptionSubsection(`${el.id}:${slot}:stroke`, "stroke",
+        strokeKeys.map((k) => optionField(k, spec[k], { level: "stroke", elementId: el.id, slot, option: k }, s))));
+    }
+    if (brushKeys.length) {
+      wrap.appendChild(renderOptionSubsection(`${el.id}:${slot}:brush`, "brush",
+        brushKeys.map((k) => optionField(k, spec[k], { level: "brush", elementId: el.id, slot, option: k }, s))));
     }
   }
+  return wrap;
+}
+
+// Fill pattern selection lives under "shape", not inside the fill slot's
+// own collapsible: which spatial arrangement fills a region (hatch, grid,
+// diamond, ...) is a geometric decision about what the shape looks like,
+// same as the boundary itself -- the fill slot's own stroke/brush
+// breakdown (renderSlotEditor) is purely about how that arrangement gets
+// printed, a separate concern. Region elements only; line/point elements
+// have no fill slot.
+function renderPatternEditor(el, tex) {
+  const wrap = document.createElement("div");
+  wrap.appendChild(subLabel("pattern"));
+  const s = tex.fill;
+  const pat = s?.pattern || { kind: "hatch" };
+  const g = fieldsGrid();
+  g.appendChild(renderField("pattern", { kind: "enum", options: C.PATTERN_KINDS, def: "hatch" }, pat.kind, (kind) => {
+    const next = { kind, ...(C.PATTERN_OPTIONS[kind] ? Object.fromEntries(Object.entries(C.PATTERN_OPTIONS[kind]).map(([k, m]) => [k, m.def])) : {}) };
+    if (kind === "stamps") next.points = [[60, 60], [70, 60]];
+    if (kind === "strokes") next.strokes = [[[40, 40], [80, 80]]];
+    if (kind === "curves") next.curves = [{ x: "40 + t", y: "60 + 5*sin(t/4)", tEnd: 60 }];
+    if (kind === "family") Object.assign(next, { x: "110 + t*cos(u)", y: "110 + t*sin(u)", tEnd: 40, uEnd: 6.28, uStep: 0.5 });
+    if (!s) tex.fill = { fn: C.STAMP_PATTERNS.includes(kind) ? "blob" : "solid", options: {}, bases: {}, pattern: next };
+    else {
+      s.pattern = next;
+      const needStamp = C.STAMP_PATTERNS.includes(kind);
+      if (needStamp !== C.isPointSafe(s.fn)) { s.fn = needStamp ? "blob" : "solid"; s.options = {}; s.bases = {}; }
+    }
+    C.pruneGroups(scene);
+    saveScene(); rerenderAll();
+  }));
   wrap.appendChild(g);
+
+  if (s) {
+    // level "pattern" explicitly: a fill's brush and its pattern are
+    // separately-named spaces, and some names exist in both (a
+    // blobDotted fill and a hatch pattern both have "gap").
+    const patSpec = C.PATTERN_OPTIONS[pat.kind];
+    if (patSpec) {
+      const fields = Object.keys(patSpec).map((k) => optionField(k, patSpec[k], { level: "pattern", elementId: el.id, slot: "fill", option: k }, s));
+      wrap.appendChild(renderOptionSubsection(`${el.id}:pattern`, "options", fields));
+    } else {
+      const { kind, ...rest } = pat;
+      const patCard = collapsibleCard("options", "", `${el.id}:pattern`);
+      patCard.appendChild(jsonField(`${kind} spec (JSON)`, rest, (v) => {
+        if (v && typeof v === "object") { s.pattern = { kind, ...v }; saveScene(); renderPanel(); scheduleRerun(); }
+      }));
+      wrap.appendChild(patCard);
+    }
+  }
   return wrap;
 }
 
 // --- surfaced parameter groups ---
 
-// A group is a heading plus the parameters that affect the quality it
-// names. Each control edits its own option directly: no knob, no weights,
-// nothing between the number shown and the number printed. The direction
-// arrow says which way the quality goes as the value rises, which is the
-// part a weighted knob used to hide.
-function renderGroupCard(group) {
-  const c = card(group.title, group.attribute === C.CUSTOM_ATTRIBUTE ? "custom" : group.attribute);
+// A group is a heading plus whichever real parameters the ui stage judged
+// relevant to this turn. Each control edits its own option directly: no
+// knob, no weights, nothing between the number shown and the number
+// printed.
+// `forElementId`: when this card is being rendered nested inside that
+// element's own card (renderElementGeneratedUi), each member's label drops
+// the redundant "element name" part -- the enclosing card already says
+// which element this is. Omitted for the top-level rendering, where a
+// group can span several elements and each row needs to say which one.
+function renderGroupCard(group, forElementId = null) {
+  const c = card(group.title, "");
   const del = document.createElement("span");
   del.className = "pg-call-del";
   del.textContent = "remove";
-  del.onclick = () => { scene.groups = scene.groups.filter((x) => x !== group); saveScene(); rerenderAll(); };
+  // Match by id, not by reference: a per-element slice (groupsForElement)
+  // hands this a freshly filtered copy, never the object actually sitting
+  // in scene.groups -- removing by identity would silently no-op there.
+  del.onclick = () => { scene.groups = scene.groups.filter((x) => x.id !== group.id); saveScene(); rerenderAll(); };
   c.querySelector(".pg-call-head").appendChild(del);
   if (group.description) {
     const p = document.createElement("div");
@@ -834,7 +998,7 @@ function renderGroupCard(group) {
   const g = fieldsGrid();
   let shown = 0;
   for (const m of group.members || []) {
-    const f = memberField(m);
+    const f = memberField(m, forElementId);
     if (f) { g.appendChild(f); shown++; }
   }
   c.appendChild(g);
@@ -844,18 +1008,16 @@ function renderGroupCard(group) {
 
 // One control for one group member. `control.min`/`max` narrow the input
 // to what suits this scene; the option's own range still bounds it.
-function memberField(m) {
+function memberField(m, forElementId = null) {
   const loc = C.memberLocation(scene, m);
   if (!loc) return null;
   const r = C.resolveMember(scene, m);
   const spec = { ...r.spec };
-  if (m.control?.min != null) spec.min = Math.max(spec.min ?? m.control.min, m.control.min);
-  if (m.control?.max != null) spec.max = Math.min(spec.max ?? m.control.max, m.control.max);
 
   const el = m.elementId ? scene.elements.find((e) => e.id === m.elementId) : null;
-  const arrow = Number(m.direction) < 0 ? "↓" : "↑";
-  const where = m.level === "graphic" ? "whole graphic" : `${el?.label || m.elementId} · ${m.slot}`;
-  const label = `${m.control?.label || m.option} — ${where} ${arrow}`;
+  const dropElementName = forElementId != null && m.elementId === forElementId;
+  const where = m.level === "graphic" ? "whole graphic" : (dropElementName ? m.slot : `${el?.label || m.elementId} · ${m.slot}`);
+  const label = `${m.label || m.option} — ${where}`;
 
   // The graphic's scale reads as a percentage everywhere else in the
   // panel, so it does here too.
@@ -863,23 +1025,22 @@ function memberField(m) {
     const f = renderField(label, { kind: "num", step: 5, min: (spec.min ?? 0.1) * 100, max: (spec.max ?? 4) * 100 },
       +(scene.transform.scale * 100).toFixed(1), (v) => {
         if (v != null && v > 0) scene.transform.scale = v / 100;
-        saveScene(); scheduleRerun();
+        saveScene(); renderPanel(); scheduleRerun();
       });
-    if (m.note) f.title = m.note;
     return f;
   }
 
   const f = renderField(label, spec, C.memberValue(scene, m), (v) => {
     C.setMemberValue(scene, m, v);
-    saveScene(); scheduleRerun();
+    saveScene(); renderPanel(); scheduleRerun();
   });
-  f.title = m.note || C.OPTION_DESC[m.option] || "";
+  f.title = C.OPTION_DESC[m.option] || "";
   return f;
 }
 
-// An option input bound to one texture slot, for the full option list
-// below. The value lives either on the slot's own brush/stamp options or
-// (fill only) on its pattern's own fields.
+// An option input bound to one texture slot, for a slot's full stroke/
+// brush/pattern breakdown. The value lives either on the slot's own
+// brush/stamp options or (fill only) on its pattern's own fields.
 function optionField(label, spec, t, s) {
   const loc = () => C.memberLocation(scene, t) || "options";
   const bagOf = (l) => (l === "pattern" ? s.pattern : s.options) || {};
@@ -888,47 +1049,10 @@ function optionField(label, spec, t, s) {
     const bag = l === "pattern" ? (s.pattern = s.pattern || {}) : (s.options = s.options || {});
     if (v === null || v === undefined || v === "") delete bag[t.option];
     else bag[t.option] = v;
-    saveScene(); scheduleRerun();
+    saveScene(); renderPanel(); scheduleRerun();
   });
   if (C.OPTION_DESC[t.option]) f.title = C.OPTION_DESC[t.option];
   return f;
-}
-
-// Everything the groups do not surface, kept reachable but out of the way.
-// A group is a shortcut to the parameters that matter, never the only way
-// to reach one.
-function renderAllOptions() {
-  const details = document.createElement("details");
-  details.className = "pg-all-options";
-  const summary = document.createElement("summary");
-  details.appendChild(summary);
-
-  const wrap = document.createElement("div");
-  let count = 0;
-  for (const el of scene.elements) {
-    const tex = scene.textures[el.id] || {};
-    for (const slot of C.slotsFor(el.kind)) {
-      const s = tex[slot];
-      if (!s?.fn) continue;
-      const spec = C.optionSpecFor(s.fn);
-      const patSpec = slot === "fill" && s.pattern ? (C.PATTERN_OPTIONS[s.pattern.kind] || {}) : {};
-      const rows = [
-        ...Object.keys(spec).map((k) => ({ level: "brush", elementId: el.id, slot, option: k, spec: spec[k] })),
-        ...Object.keys(patSpec).map((k) => ({ level: "pattern", elementId: el.id, slot, option: k, spec: patSpec[k] })),
-      ].filter((m) => !C.groupsOf(scene, el.id, slot, m.option).length);
-      if (!rows.length) continue;
-      count += rows.length;
-      const c = card(`${el.label || el.id} · ${slot}`, s.fn + (patSpec && Object.keys(patSpec).length ? ` + ${s.pattern.kind}` : ""));
-      const g = fieldsGrid();
-      for (const m of rows) g.appendChild(optionField(m.option, m.spec, m, s));
-      c.appendChild(g);
-      wrap.appendChild(c);
-    }
-  }
-  summary.textContent = count ? `all other options (${count})` : "all other options";
-  if (!count) wrap.appendChild(note(scene.elements.length ? "every option is surfaced above" : "no textures yet"));
-  details.appendChild(wrap);
-  return details;
 }
 
 // --- fields ---

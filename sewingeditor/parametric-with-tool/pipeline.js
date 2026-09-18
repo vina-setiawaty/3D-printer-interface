@@ -118,6 +118,14 @@ export async function runTurn(ctx, deps) {
       // panel is editable, and showing the user a broken attempt they can
       // fix beats discarding the work and showing them nothing.
       if (res.value) deps.merge(stage, res.value);
+      // The gate already compiled this stage's accepted output (against a
+      // draft, but with the same merge logic a real merge just applied) --
+      // reuse that report instead of leaving scene.lastReport stale until
+      // the browser's own post-turn recompile. Without this, every prompt
+      // and the judge see last turn's report for the whole of this one:
+      // "does the report confirm X" can never pass mid-refine no matter
+      // how many rounds run, since X was always built THIS turn.
+      if (res.ok && res.compiled) ctx.scene.lastReport = res.compiled.report;
       if (!res.ok) { failed = stage; break; }
     }
     const thisRound = { plan, ran, verdict: null };

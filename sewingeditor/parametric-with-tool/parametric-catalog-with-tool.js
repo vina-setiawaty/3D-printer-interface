@@ -4,18 +4,20 @@
 // The page holds a SCENE (see defaultScene()): elements with ids (a line
 // path, a closed region boundary, or a point), a texture per element slot
 // (brush + options, plus a fill pattern for regions), a global transform
-// (scale + origin) and a list of parameter ABSTRACTIONS (high-level knobs
-// that drive several low-level options by weight). Four LLM stages write
-// into that scene; everything below the LLMs is deterministic:
+// (scale + origin) and a list of parameter GROUPS -- an ad hoc selection
+// of real options the ui stage judged relevant to the current turn, each
+// with its own short label, no weighting or transform of anyone's values.
+// Four LLM stages write into that scene; everything below the LLMs is
+// deterministic:
 //
 //   resolveScene()   pieces -> vertex lists in graphic space, closure and
 //                    simple-polygon checks, natural bbox
 //   compileScene()   transform, pattern -> strokes/stamps clipped to the
-//                    region, one JOB per brush/stamp call, hard/warn checks,
+//                    region, one JOB per brush call, hard/warn checks,
 //                    geometry REPORT (the model verifies against this)
 //   runJobs()        jobs -> G-code via texture_functions-with-tool.js's
 //                    BRUSHES / STAMPS, bounds + retraction scan, digest
-//   resolveMember() / expandAttribute()    parameter groups
+//   resolveMember()                         parameter groups
 //   validateStageOutput() / merge*()       stage JSON -> scene
 //
 // A model-supplied formula string is NEVER eval()'d or passed to
@@ -25,9 +27,6 @@
 // JS object, global, or property access outside that grammar.
 
 import * as TF from "./docs/texture_functions-with-tool.js";
-import { ATTRIBUTES, ATTRIBUTE_KEYS, CUSTOM_ATTRIBUTE, influencesOf, influenceFor } from "./attributes.js";
-
-export { ATTRIBUTES, ATTRIBUTE_KEYS, CUSTOM_ATTRIBUTE };
 
 // 3: parameter "abstractions" (weighted knobs) became "groups" (a heading
 // over the parameters that affect one attribute). An older stored scene is
@@ -154,64 +153,81 @@ export function legibilityText() {
 // ---------------------------------------------------------------- options --
 
 // kind: "num" | "int" | "nnum" (nullable number) | "enum". min/max are the
-// range a value must sit inside, and the span the UI input uses.
+// range a value must sit inside, and the span the UI input uses. `level`
+// (added by the S()/B() wrappers below) says which half of the
+// Shape->Stroke->Brush split an option belongs to: "stroke" (the walk --
+// layer/pass count, arc-length spacing, priming/retract brackets, inter-
+// stop travel speed) or "brush" (the local deposit -- width, per-call
+// height, local speed, the local mechanism's own timing). Assigned by
+// hand against texture_functions-with-tool.js's actual Stroke/Brush split,
+// not derived automatically.
 const N = (def, min, max, step) => ({ kind: "num", def, min, max, step: step ?? 0.1 });
 const I = (def, min, max) => ({ kind: "int", def, min, max, step: 1 });
 const NN = (def) => ({ kind: "nnum", def });
 const EN = (def, options) => ({ kind: "enum", def, options });
+const S = (spec) => ({ ...spec, level: "stroke" });
+const B = (spec) => ({ ...spec, level: "brush" });
 
+// Always brush-level in every brush that uses them: each is the local
+// dome/hair mechanism's own volume, timing or anti-string behavior, never
+// something a Stroke's walk decides.
 const BLOB_BUILD_OPTS = {
-  baseZ: N(0.2, 0.1, 0.6), buildSteps: I(6, 1, 20), taperFactor: N(0.7, 0, 1),
-  extrudeSpeed: N(120, 20, 600, 5), dwellMs: I(2000, 0, 8000),
-  extrusionMultiplier: N(1.3, 0.5, 3), retractMm: N(4.0, 0, 8),
-  postRetractDwellMs: I(2000, 0, 8000), baseExtraMm: N(0.3, 0, 2),
-  baseDwellMs: I(1000, 0, 5000),
+  baseZ: B(N(0.2, 0.1, 0.6)), buildSteps: B(I(6, 1, 20)), taperFactor: B(N(0.7, 0, 1)),
+  extrudeSpeed: B(N(120, 20, 600, 5)), dwellMs: B(I(2000, 0, 8000)),
+  extrusionMultiplier: B(N(1.3, 0.5, 3)), retractMm: B(N(4.0, 0, 8)),
+  postRetractDwellMs: B(I(2000, 0, 8000)), baseExtraMm: B(N(0.3, 0, 2)),
+  baseDwellMs: B(I(1000, 0, 5000)),
 };
 const ORBIT_OPTS = {
-  orbitRadius: NN(null), orbitPts: I(16, 3, 48), orbitSpeed: N(600, 100, 2000, 10), orbitLoops: I(3, 0, 10),
+  orbitRadius: B(NN(null)), orbitPts: B(I(16, 3, 48)), orbitSpeed: B(N(600, 100, 2000, 10)), orbitLoops: B(I(3, 0, 10)),
 };
 const HAIR_OPTS = {
-  hairLength: N(3.0, 1, 30), hairThickness: NN(null),
-  hairDirection: EN("top", ["top", "right", "left", "bottom"]),
-  hairAzimuthDeg: NN(null), hairElevationDeg: NN(null), beadFlowMult: N(3.5, 1, 6),
-  pullExtrudeSpeed: N(150, 30, 600, 5), stringMm: N(2.0, 0, 10), overtravelMm: N(2.0, 0, 10),
+  hairLength: B(N(3.0, 1, 30)), hairThickness: B(NN(null)),
+  hairDirection: B(EN("top", ["top", "right", "left", "bottom"])),
+  hairAzimuthDeg: B(NN(null)), hairElevationDeg: B(NN(null)), beadFlowMult: B(N(3.5, 1, 6)),
+  pullExtrudeSpeed: B(N(150, 30, 600, 5)), stringMm: B(N(2.0, 0, 10)), overtravelMm: B(N(2.0, 0, 10)),
 };
 
-// Line brushes: what is deposited ALONG a point list.
+// Every brush -- what is deposited, and how it's walked. `blob`, `disc`,
+// `directionalBlob` and `hairyDot` (formerly a separate STAMP_OPTIONS
+// category) are POINT_SAFE_BRUSHES below: brush-only, since a genuine
+// single-point call has no Stroke wrapper around it.
 export const BRUSH_OPTIONS = {
-  solid: { width: N(0.5, 0.3, 3), nLayers: I(2, 1, 10), speed: N(400, 50, 1500, 10) },
-  dashed: { segLen: N(8, 1, 60), gapLen: N(4, 1, 60), width: N(0.5, 0.3, 3), nLayers: I(2, 1, 10), speed: N(400, 50, 1500, 10) },
-  dotted: { gap: N(10, 1, 60), dotRadius: N(0.8, 0.3, 3), nLayers: I(2, 1, 10), speed: N(250, 50, 1000, 10) },
-  blobDotted: { gap: N(10, 1, 60), diameter: N(1.6, 0.6, 8), ...BLOB_BUILD_OPTS, ...ORBIT_OPTS },
+  solid: { width: B(N(0.5, 0.3, 3)), nLayers: S(I(2, 1, 10)), speed: B(N(400, 50, 1500, 10)) },
+  dashed: {
+    segLen: S(N(8, 1, 60)), gapLen: S(N(4, 1, 60)), width: B(N(0.5, 0.3, 3)),
+    nLayers: S(I(2, 1, 10)), speed: B(N(400, 50, 1500, 10)),
+  },
+  dotted: { gap: S(N(10, 1, 60)), dotRadius: B(N(0.8, 0.3, 3)), nLayers: S(I(2, 1, 10)), speed: B(N(250, 50, 1000, 10)) },
+  blobDotted: { gap: S(N(10, 1, 60)), diameter: B(N(1.6, 0.6, 8)), ...BLOB_BUILD_OPTS, ...ORBIT_OPTS },
   directionalBlobDotted: {
-    gap: NN(null), diameter: N(2.0, 0.6, 8), azimuthDeg: N(0, -180, 180, 1),
-    dragSpeed: N(600, 100, 2000, 10), stampOrder: EN("auto", ["auto", "forward", "reverse"]), ...BLOB_BUILD_OPTS,
+    gap: S(NN(null)), diameter: B(N(2.0, 0.6, 8)), azimuthDeg: B(N(0, -180, 180, 1)),
+    dragSpeed: B(N(600, 100, 2000, 10)), stampOrder: B(EN("auto", ["auto", "forward", "reverse"])), ...BLOB_BUILD_OPTS,
   },
   hairy: {
-    spacing: N(5.0, 1, 30), esegmentMm: N(1.2, 0.2, 4), retractMm: N(1.3, 0, 6), dwellMs: I(400, 0, 3000),
-    smallLift: N(0.2, 0, 2), bigLift: N(4.0, 1, 10), baseZ: N(0.3, 0.1, 1), speed: N(200, 50, 1000, 10),
+    spacing: S(N(5.0, 1, 30)), esegmentMm: B(N(1.2, 0.2, 4)), retractMm: B(N(1.3, 0, 6)), dwellMs: B(I(400, 0, 3000)),
+    smallLift: B(N(0.2, 0, 2)), bigLift: B(N(4.0, 1, 10)), baseZ: B(N(0.3, 0.1, 1)), speed: S(N(200, 50, 1000, 10)),
   },
   hairyDotted: {
-    gap: N(10, 1, 60), rootDiameter: N(2.0, 0.6, 8), ...HAIR_OPTS,
-    stampOrder: EN("auto", ["auto", "forward", "reverse"]), ...BLOB_BUILD_OPTS,
+    gap: S(N(10, 1, 60)), rootDiameter: B(N(2.0, 0.6, 8)), ...HAIR_OPTS,
+    stampOrder: B(EN("auto", ["auto", "forward", "reverse"])), ...BLOB_BUILD_OPTS,
   },
   segmented: {
-    thinLen: N(8, 1, 40), thinWidth: N(0.8, 0.3, 3), thinHeight: N(0.2, 0.1, 0.6), thinSpeed: N(130, 30, 600, 5),
-    fatLen: N(4, 1, 40), fatWidth: N(1.6, 0.3, 4), fatHeight: N(0.3, 0.1, 0.8), fatSpeed: N(60, 20, 400, 5),
-    flowMult: N(1.4, 0.5, 3), segDwellMs: I(250, 0, 2000),
+    thinLen: S(N(8, 1, 40)), thinWidth: B(N(0.8, 0.3, 3)), thinHeight: B(N(0.2, 0.1, 0.6)), thinSpeed: B(N(130, 30, 600, 5)),
+    fatLen: S(N(4, 1, 40)), fatWidth: B(N(1.6, 0.3, 4)), fatHeight: B(N(0.3, 0.1, 0.8)), fatSpeed: B(N(60, 20, 400, 5)),
+    flowMult: B(N(1.4, 0.5, 3)), segDwellMs: S(I(250, 0, 2000)),
   },
   variableThickness: {
-    hMin: N(0.16, 0.1, 1), hMax: N(0.9, 0.2, 2), wavelength: N(8.0, 2, 40),
-    beadWidth: N(0.8, 0.3, 3), zGap: N(0.25, 0.25, 1), speed: N(25, 10, 300, 5),
+    hMin: S(N(0.16, 0.1, 1)), hMax: S(N(0.9, 0.2, 2)), wavelength: S(N(8.0, 2, 40)),
+    beadWidth: B(N(0.8, 0.3, 3)), zGap: S(N(0.25, 0.25, 1)), speed: B(N(25, 10, 300, 5)),
   },
-};
-
-// Stamps: what is deposited AT a point.
-export const STAMP_OPTIONS = {
-  blob: { diameter: N(1.6, 0.6, 8), ...BLOB_BUILD_OPTS, ...ORBIT_OPTS },
-  disc: { diameter: N(1.6, 0.6, 8), height: N(0.4, 0.4, 3, 0.2), speed: N(250, 50, 1000, 10) },
-  directionalBlob: { diameter: N(2.0, 0.6, 8), azimuthDeg: N(0, -180, 180, 1), dragSpeed: N(600, 100, 2000, 10), ...BLOB_BUILD_OPTS },
-  hairyDot: { rootDiameter: N(2.0, 0.6, 8), ...HAIR_OPTS, ...BLOB_BUILD_OPTS },
+  // Formerly STAMP_OPTIONS -- merged in (no key collisions). All
+  // brush-level: called as a genuine single point, there's no Stroke
+  // wrapper deciding a walk.
+  blob: { diameter: B(N(1.6, 0.6, 8)), ...BLOB_BUILD_OPTS, ...ORBIT_OPTS },
+  disc: { diameter: B(N(1.6, 0.6, 8)), height: B(N(0.4, 0.4, 3, 0.2)), speed: B(N(250, 50, 1000, 10)) },
+  directionalBlob: { diameter: B(N(2.0, 0.6, 8)), azimuthDeg: B(N(0, -180, 180, 1)), dragSpeed: B(N(600, 100, 2000, 10)), ...BLOB_BUILD_OPTS },
+  hairyDot: { rootDiameter: B(N(2.0, 0.6, 8)), ...HAIR_OPTS, ...BLOB_BUILD_OPTS },
 };
 
 // Built-in fill patterns with editable numeric specs. The free-form kinds
@@ -223,9 +239,18 @@ export const PATTERN_OPTIONS = {
   diamond: { diag: N(8.0, 2, 30), fillGap: N(0.6, 0.35, 3) },
 };
 export const PATTERN_KINDS = ["hatch", "grid", "diamond", "stamps", "strokes", "curves", "family"];
-export const STAMP_PATTERNS = ["grid", "stamps"];           // these need a stamp fn
+export const STAMP_PATTERNS = ["grid", "stamps"];      // these place points, not strokes
 export const BRUSH_NAMES = Object.keys(BRUSH_OPTIONS);
-export const STAMP_NAMES = Object.keys(STAMP_OPTIONS);
+// Brushes that produce a real deposit when called at a single point (no
+// Stroke walk needed) -- verified against texture_functions-with-tool.js:
+// brushSolid/brushDashed/brushSegmented/brushVariableThickness/brushHairy
+// all need pts.length >= 2 to emit anything (their inner walk loop never
+// runs otherwise); these eight have their own size parameter independent
+// of path length and degrade cleanly to one call.
+export const POINT_SAFE_BRUSHES = new Set([
+  "blob", "disc", "directionalBlob", "hairyDot",
+  "dotted", "blobDotted", "directionalBlobDotted", "hairyDotted",
+]);
 
 // One-line semantic descriptor per option name (shared names share a
 // meaning) -- what it does physically and which way is "more". Sent to the
@@ -282,10 +307,15 @@ export const OPTION_DESC = {
 };
 
 export function optionSpecFor(fn) {
-  return BRUSH_OPTIONS[fn] || STAMP_OPTIONS[fn] || {};
+  return BRUSH_OPTIONS[fn] || {};
 }
 export function isBrush(fn) { return fn in BRUSH_OPTIONS; }
-export function isStamp(fn) { return fn in STAMP_OPTIONS; }
+export function isPointSafe(fn) { return POINT_SAFE_BRUSHES.has(fn); }
+// A recognized brush that can actually walk a multi-point path. The four
+// former stamps (blob/disc/directionalBlob/hairyDot) are point-safe but
+// NOT this -- their G-code function only ever takes one (cx, cy); handed
+// a real path they'd silently draw at just its first point, not walk it.
+export function isStrokeCapable(fn) { return isBrush(fn) && !(fn in TF.STAMPS); }
 
 // ---------------------------------------------------------- safe expression --
 
@@ -1091,8 +1121,10 @@ function cleanOptions(fn, options) {
 // ---------------------------------------------------------------- compile --
 
 /** scene -> { jobs, report, errors, warnings, bbox }. A job is
- * { elementId, slot, label, kind: "brush"|"stamp", fn, options, pts | at,
- * newPattern }. */
+ * { elementId, slot, label, fn, options, pts, newPattern } -- `pts` is
+ * always a point list (one point long for a point-safe brush used at a
+ * single spot); runJobs() is the only place that cares whether `fn`
+ * happens to use TF.STAMPS' (em, x, y, options) call shape. */
 export function compileScene(scene) {
   const { resolved, errors, warnings, bbox: naturalBbox } = resolveScene(scene);
   const tf = transformFor(scene, naturalBbox);
@@ -1116,22 +1148,34 @@ export function compileScene(scene) {
     const entry = { id: el.id, label, kind: el.kind, role: el.role || "" };
     report.elements.push(entry);
 
+    // One job shape for every brush call -- `pts` is always a point list,
+    // one point long for a stamp-shaped use (TF.STAMPS dispatches on that
+    // in runJobs() below, calling it (em, x, y, options) instead of
+    // (em, pts, options); the catalog never needs to know that, only
+    // runJobs() does).
     const addBrushJob = (slot, fn, options, pts, extra = {}) => {
       const tag = `"${label}" ${slot}`;
-      if (!isBrush(fn)) { errors.push(`${tag}: "${fn}" is not a line brush (${BRUSH_NAMES.join(", ")}).`); return false; }
+      if (!isBrush(fn)) { errors.push(`${tag}: "${fn}" is not a brush (${BRUSH_NAMES.join(", ")}).`); return false; }
+      // Defense in depth: a stamp-only fn handed more than one point would
+      // silently draw at just the first one (see isStrokeCapable) rather
+      // than error -- callers should already be filtering this via
+      // isPointSafe/isStrokeCapable, but this backstops any that aren't.
+      if (pts.length > 1 && fn in TF.STAMPS) { errors.push(`${tag}: "${fn}" only works at a single point, not along a path of ${pts.length}.`); return false; }
       const opts = cleanOptions(fn, options);
       const rule = checkBrushRules(fn, opts, tag);
       errors.push(...rule.errors); warnings.push(...rule.warnings);
-      jobs.push({ elementId: el.id, slot, label, kind: "brush", fn, options: { ...opts, ...(extra.brushOverride || {}) }, pts, newPattern: extra.newPattern ?? true });
-      return true;
-    };
-    const addStampJob = (slot, fn, options, at) => {
-      const tag = `"${label}" ${slot}`;
-      if (!isStamp(fn)) { errors.push(`${tag}: "${fn}" is not a stamp (${STAMP_NAMES.join(", ")}).`); return false; }
-      const opts = cleanOptions(fn, options);
-      const rule = checkBrushRules(fn, opts, tag);
-      errors.push(...rule.errors); warnings.push(...rule.warnings);
-      jobs.push({ elementId: el.id, slot, label, kind: "stamp", fn, options: opts, at, newPattern: true });
+      // A bare single [x,y] point (no arc-length tag) is fine for a true
+      // TF.STAMPS function -- runJobs calls it with (x, y) directly -- but
+      // a point-safe TF.BRUSHES function (the *Dotted family: blobDotted,
+      // dotted, directionalBlobDotted, hairyDotted) walks pts via
+      // walkArcLengthStops, which reads pts[i][2] as cumulative arc length.
+      // Without it, totalLength() returns undefined, the walk's stop loop
+      // becomes `0 <= NaN` (false), and it silently emits nothing -- no
+      // error, just a dot that never happened. Tag it with s=0 so the
+      // single stop walkArcLengthStops is designed to produce here actually
+      // gets walked.
+      const safePts = (pts.length === 1 && pts[0].length === 2 && !(fn in TF.STAMPS)) ? [[pts[0][0], pts[0][1], 0]] : pts;
+      jobs.push({ elementId: el.id, slot, label, fn, options: { ...opts, ...(extra.brushOverride || {}) }, pts: safePts, newPattern: extra.newPattern ?? true });
       return true;
     };
 
@@ -1145,7 +1189,11 @@ export function compileScene(scene) {
         entry.count = pts.length;
         bedBbox = mergeBbox(bedBbox, bboxOf(pts));
         if (pts.some((p) => outOfSafe([p]))) errors.push(`"${label}": a point is outside the safe area (${CONSTRAINTS.safeMin}-${CONSTRAINTS.safeMax}mm).`);
-        if (tex.brush?.fn) { marks.push({ id: el.id, label, points: pts }); for (const p of pts) addStampJob("brush", tex.brush.fn, tex.brush.options, p); }
+        if (tex.brush?.fn) {
+          marks.push({ id: el.id, label, points: pts });
+          if (!isPointSafe(tex.brush.fn)) errors.push(`"${label}" brush: "${tex.brush.fn}" is not point-safe (${[...POINT_SAFE_BRUSHES].join(", ")}).`);
+          else for (const p of pts) addBrushJob("brush", tex.brush.fn, tex.brush.options, [p]);
+        }
       } else if (r.kind === "line") {
         // strokes has one entry for a plain line, several for a GROUP
         // (repeated disconnected strokes -- axis ticks, gridlines --
@@ -1202,10 +1250,10 @@ export function compileScene(scene) {
             if (v.violations !== 0) errors.push(`"${label}" fill: diamond checkerboard has ${v.violations} adjacency violation(s) of ${v.checked} checked -- neighbouring cells share a fill state.`);
           }
           const needsStamp = STAMP_PATTERNS.includes(pat.kind);
-          if (needsStamp && !isStamp(tex.fill.fn)) errors.push(`"${label}" fill: pattern "${pat.kind}" places stamps, so the fill brush must be a stamp (${STAMP_NAMES.join(", ")}), not "${tex.fill.fn}".`);
-          else if (!needsStamp && !isBrush(tex.fill.fn)) errors.push(`"${label}" fill: pattern "${pat.kind}" draws strokes, so the fill brush must be a line brush (${BRUSH_NAMES.join(", ")}), not "${tex.fill.fn}".`);
+          if (needsStamp && !isPointSafe(tex.fill.fn)) errors.push(`"${label}" fill: pattern "${pat.kind}" places points, so the fill brush must be point-safe (${[...POINT_SAFE_BRUSHES].join(", ")}), not "${tex.fill.fn}".`);
+          else if (!needsStamp && !isStrokeCapable(tex.fill.fn)) errors.push(`"${label}" fill: pattern "${pat.kind}" draws strokes, so the fill brush must be a brush that can walk a path, not "${tex.fill.fn}".`);
           else if (needsStamp) {
-            for (const at of gen.stamps) addStampJob("fill", tex.fill.fn, tex.fill.options, at);
+            for (const at of gen.stamps) addBrushJob("fill", tex.fill.fn, tex.fill.options, [at]);
           } else {
             gen.strokes.forEach((st, i) => {
               addBrushJob("fill", tex.fill.fn, tex.fill.options, TF.polylineToPts(st.points, st.sparse ? null : SAMPLE_STEP),
@@ -1312,8 +1360,12 @@ export function runJobs(jobs, { material = "TPU" } = {}) {
   for (const job of jobs) {
     try {
       if (job.newPattern) em.newPattern();
-      if (job.kind === "brush") TF.BRUSHES[job.fn](em, job.pts, job.options);
-      else TF.STAMPS[job.fn](em, job.at[0], job.at[1], job.options);
+      // TF.STAMPS/TF.BRUSHES keep two call shapes internally -- (em, x, y,
+      // options) vs (em, pts, options) -- purely mechanical, invisible to
+      // the LLM and to every other part of this compiler, which only ever
+      // deals in one unified `fn`/`pts` job shape.
+      if (job.fn in TF.STAMPS) TF.STAMPS[job.fn](em, job.pts[0][0], job.pts[0][1], job.options);
+      else TF.BRUSHES[job.fn](em, job.pts, job.options);
     } catch (e) {
       errors.push(`"${job.label}" ${job.slot}: ${e && e.message ? e.message : e}`);
     }
@@ -1335,18 +1387,21 @@ export function runJobs(jobs, { material = "TPU" } = {}) {
 
 // ---------------------------------------------------------------- groups --
 //
-// A GROUP is a heading plus the parameters that affect the attribute the
-// heading names. It is presentation, not arithmetic: the panel shows those
-// controls together, under the user's own word for the quality, and each
-// control edits its own option directly.
+// A GROUP is a heading plus whichever real parameters the ui stage judged
+// relevant to the current turn, each carrying its own short (1-3 word)
+// label. It is presentation, not arithmetic: the panel shows those
+// controls together, and each control edits its own option directly.
 //
-// This replaces a weighted-knob model in which the model invented a set of
-// targets and weights per turn and the page moved every target by
-// direction x weight x (value - base) x range. That was doing too much at
-// once -- inventing the relationships, hiding the real numbers behind a
-// slider, and re-deriving both every turn -- and the user could not see
-// what a knob would actually do. The relationships now live in
-// attributes.js, and nothing transforms anyone's values.
+// This replaces two earlier designs in turn: first a weighted-knob model
+// where the model invented targets and weights per turn and the page
+// moved each one by direction x weight x (value - base) x range (too much
+// at once -- inventing the relationships AND hiding the real numbers
+// behind a slider, re-derived every turn); then a fixed attribute->option
+// table (attributes.js) that traded that opacity for a closed, hand-
+// maintained list the model could only select from, never adapt to a
+// scene's actual textures. Now the ui stage picks real options straight
+// from the scene per turn, with a label but no weight -- nothing transforms
+// anyone's values, and nothing constrains the selection to a fixed list.
 
 function slotObj(scene, elementId, slot) {
   const tex = scene.textures[elementId];
@@ -1357,14 +1412,18 @@ function slotObj(scene, elementId, slot) {
  *
  * A member is {level, elementId?, slot?, option}:
  *   level "graphic"  a property of the whole graphic -- only `scale`
- *   level "brush"    an option of the brush/stamp in that slot
- *   level "pattern"  a fill pattern's own numeric field
+ *   level "stroke"   an option that owns a brush's WALK (layer/pass
+ *                    count, arc-length spacing, priming/retract brackets)
+ *   level "brush"    an option of the brush's own local deposit (the
+ *                    tags added in BRUSH_OPTIONS distinguish these two)
+ *   level "pattern"  a fill pattern's own numeric field (hatch gap, grid
+ *                    dx/dy, diamond diag -- a different bag entirely)
  *
- * For a fill slot the brush and the pattern are two independently-named
- * spaces; "brush" and "pattern" say which, and resolveMember accepts
- * either spelling by looking the name up when `level` is absent (the
- * model does not have to know). Returns null when the option is not a
- * recognized numeric field of the texture actually in that slot. */
+ * For a fill slot the brush/stroke options and the pattern's own fields
+ * are independently-named spaces; resolveMember accepts either level
+ * spelling by looking the name up when `level` is absent (the model does
+ * not have to know). Returns null when the option is not a recognized
+ * numeric field of the texture actually in that slot. */
 export function resolveMember(scene, member) {
   const { elementId, slot, option } = member || {};
   if (member?.level === "graphic" || (!elementId && !slot)) {
@@ -1375,13 +1434,13 @@ export function resolveMember(scene, member) {
   if (!s) return null;
   const wantPattern = member.level === "pattern";
   const brushSpec = optionSpecFor(s.fn)[option];
-  if (!wantPattern && brushSpec) return { level: "brush", s, spec: brushSpec, location: "options" };
+  if (!wantPattern && brushSpec) return { level: brushSpec.level, s, spec: brushSpec, location: "options" };
   if (slot === "fill" && s.pattern) {
     const patSpec = (PATTERN_OPTIONS[s.pattern.kind] || {})[option];
     if (patSpec) return { level: "pattern", s, spec: patSpec, location: "pattern" };
   }
   // asked for a pattern option that does not exist; fall back to the brush
-  if (wantPattern && brushSpec) return { level: "brush", s, spec: brushSpec, location: "options" };
+  if (wantPattern && brushSpec) return { level: brushSpec.level, s, spec: brushSpec, location: "options" };
   return null;
 }
 
@@ -1425,64 +1484,55 @@ export function groupsOf(scene, elementId, slot, option) {
   return (scene.groups || []).filter((g) => (g.members || []).some((m) => m.elementId === elementId && m.slot === slot && m.option === option));
 }
 
-/** Every parameter in the scene that the table says affects `attribute`,
- * as ready-made members. Offered to the ui stage so it confirms and prunes
- * a real list rather than authoring one from memory. */
-export function expandAttribute(scene, attribute, ids = null) {
-  const out = [];
-  const seen = new Set();
-  const add = (member, inf) => {
-    const key = `${member.level} ${member.elementId || ""} ${member.slot || ""} ${member.option}`;
-    if (seen.has(key)) return;
-    const r = resolveMember(scene, member);
-    // The level must match what the influence meant, not merely resolve.
-    // resolveMember is deliberately lenient for model output (a name is
-    // looked up in whichever space has it), and that leniency would offer
-    // nonsense here: "gap" as a hairiness parameter means a hairy-dot
-    // brush's gap, but on a solid-brush fill the same name falls through
-    // to the hatch pattern's row spacing, which has nothing to do with hair.
-    if (!r || r.level !== inf.level) return;
-    seen.add(key);
-    out.push({ ...member, direction: inf.direction, strength: inf.strength, note: inf.note || "" });
-  };
-  for (const inf of influencesOf(attribute)) {
-    if (inf.level === "graphic") { add({ level: "graphic", option: inf.option }, inf); continue; }
-    for (const el of scene.elements) {
-      if (ids && !ids.includes(el.id)) continue;
-      for (const slot of slotsFor(el.kind)) {
-        add({ level: inf.level, elementId: el.id, slot, option: inf.option }, inf);
-      }
-    }
-  }
-  // primary controls first, then in scene order
-  return out.sort((a, b) => (a.strength === b.strength ? 0 : a.strength === "primary" ? -1 : 1));
+/** How many distinct real elements a group's members touch -- a
+ * graphic-level member (elementId undefined) never counts toward this. */
+function distinctElementIds(group) {
+  return [...new Set((group.members || []).map((m) => m.elementId).filter(Boolean))];
 }
 
-/** The attribute reference for the ui stage's prompt, generated from the
- * table so the prompt and the validator can never disagree about what
- * affects what. */
-export function attributeGuideText() {
-  const lines = [
-    "ATTRIBUTES AND WHAT AFFECTS THEM",
-    "",
-    "These are the qualities a person reaches for, and the parameters that",
-    "move each one. A group for a named attribute may surface ONLY the",
-    "parameters listed under it (the app rejects anything else); a `custom`",
-    "group may surface anything, with a reason.",
-    "",
-  ];
-  for (const [key, a] of Object.entries(ATTRIBUTES)) {
-    lines.push(`${key} -- ${a.description}`);
-    lines.push(`  the user might say: ${a.aliases.join(", ")}`);
-    for (const i of a.influences) {
-      const where = i.level === "graphic" ? "graphic" : `${i.level} option`;
-      lines.push(`    ${i.option} (${where}, ${i.strength}): ${i.direction > 0 ? "raising it raises" : "raising it lowers"} ${key}${i.note ? ` -- ${i.note}` : ""}`);
-    }
-    for (const c of a.cautions || []) lines.push(`    ! ${c}`);
-    lines.push("");
-  }
-  return lines.join("\n");
+/** Every group NOT scoped to exactly one element -- zero (purely graphic,
+ * e.g. a lone "scale") or several (a felt quality spanning multiple
+ * elements, e.g. "tactility" pulling nLayers from more than one) -- shown
+ * whole, unfiltered, as its own top-level card. A single-element group is
+ * deliberately excluded: it already has a complete home in that element's
+ * own card (see groupsForElement), so a second top-level copy would just be
+ * a redundant duplicate of the exact same thing. */
+export function topLevelGroups(scene) {
+  return (scene.groups || []).filter((g) => distinctElementIds(g).length !== 1);
 }
+
+/** This element's own slice of EVERY group that has at least one member
+ * here, whether that group is scoped to just this element or spans several.
+ * Filtered down to only this element's members, keeping the group's
+ * title/description for context. A member of a multi-element group
+ * legitimately appears both here (inside this element's card) and, whole,
+ * in topLevelGroups()'s rendering of that same group -- intentional, not a
+ * duplicate to dedupe away: the top-level card is "see the whole quality
+ * together," this is "see everything relevant to just this element."
+ *
+ * A group's graphic-level members ride along here only when this element is
+ * the group's one real element -- i.e. the whole group is otherwise already
+ * about to be nested in this element's card, so its graphic-level member
+ * (e.g. "scale" alongside this element's own pattern spacing) belongs here
+ * too rather than being silently dropped by an elementId match that can
+ * never equal undefined. For a group spanning several real elements, a
+ * graphic-level member has no single right element to attach to, so it only
+ * shows in topLevelGroups()'s whole-group rendering. */
+export function groupsForElement(scene, elementId) {
+  return (scene.groups || [])
+    .map((g) => {
+      const ids = distinctElementIds(g);
+      const soleElement = ids.length === 1 && ids[0] === elementId;
+      const members = (g.members || []).filter((m) => m.elementId === elementId || (soleElement && !m.elementId));
+      return { ...g, members };
+    })
+    .filter((g) => g.members.length);
+}
+
+// expandAttribute()/attributeGuideText() (attributes.js-backed) retired:
+// the ui stage now selects whichever options it judges relevant to the
+// turn's request directly from optionSpecsText()'s real option list,
+// instead of being constrained to a fixed attribute->option table.
 
 /** Drop members whose element/slot/option no longer exists (after a
  * geometry or texture change), then empty groups. Returns descriptions of
@@ -1566,7 +1616,7 @@ export function optionSpecsText(scene, ids = null) {
     if (t.slot === "fill" && t.pattern && PATTERN_OPTIONS[t.pattern.kind]) patternKinds.add(t.pattern.kind);
   }
   const blocks = [];
-  for (const fn of fns) blocks.push(`${fn} (${isBrush(fn) ? "line brush" : "stamp"}):\n${specRows(optionSpecFor(fn)).join("\n")}`);
+  for (const fn of fns) blocks.push(`${fn} (brush${isPointSafe(fn) ? ", point-safe" : ""}):\n${specRows(optionSpecFor(fn)).join("\n")}`);
   // A fill has TWO option spaces: its brush's own options (above) and its
   // pattern's own numeric fields -- both are valid targets for an
   // group member or a direct options edit on that same {elementId, slot:
@@ -1647,11 +1697,11 @@ export function validateStageOutput(stage, out, scene) {
       const fn = String(t.fn || "");
       const pattern = t.slot === "fill" ? parseJsonField(t.pattern, `${what} pattern`, errors, null) : null;
       if (fn) {
-        if (el.kind === "point" && !isStamp(fn)) errors.push(`${what}: a point needs a stamp (${STAMP_NAMES.join(", ")}), got "${fn}"`);
-        else if ((el.kind === "line" || t.slot === "outline") && !isBrush(fn)) errors.push(`${what}: ${t.slot} needs a line brush (${BRUSH_NAMES.join(", ")}), got "${fn}"`);
+        if (el.kind === "point" && !isPointSafe(fn)) errors.push(`${what}: a point needs a point-safe brush (${[...POINT_SAFE_BRUSHES].join(", ")}), got "${fn}"`);
+        else if ((el.kind === "line" || t.slot === "outline") && !isStrokeCapable(fn)) errors.push(`${what}: ${t.slot} needs a brush that can walk a path, got "${fn}"`);
         else if (t.slot === "fill") {
           if (!pattern || !PATTERN_KINDS.includes(pattern.kind)) errors.push(`${what}: fill pattern kind must be one of ${PATTERN_KINDS.join(", ")}`);
-          else if (STAMP_PATTERNS.includes(pattern.kind) ? !isStamp(fn) : !isBrush(fn)) errors.push(`${what}: pattern "${pattern.kind}" needs a ${STAMP_PATTERNS.includes(pattern.kind) ? "stamp" : "line brush"}, got "${fn}"`);
+          else if (STAMP_PATTERNS.includes(pattern.kind) ? !isPointSafe(fn) : !isStrokeCapable(fn)) errors.push(`${what}: pattern "${pattern.kind}" needs a ${STAMP_PATTERNS.includes(pattern.kind) ? "point-safe brush" : "brush that can walk a path"}, got "${fn}"`);
         }
       }
       // The texture stage sets the numbers for the texture it chose --
@@ -1680,15 +1730,17 @@ export function validateStageOutput(stage, out, scene) {
   }
 
   if (stage === "ui") {
+    // A group is a selection, not an assertion: the ui stage picks
+    // whichever real parameters (from the textures actually in the scene)
+    // it judges relevant to the turn's request, each with its own short
+    // label. No attribute name to validate against, no direction/weight --
+    // resolveMember() still does the one thing that has to be checked
+    // (the option genuinely exists on that texture); everything else is
+    // free-form curation.
     const groups = [];
     const seen = new Set();
     (Array.isArray(out.groups) ? out.groups : []).forEach((g, i) => {
       const what = `group ${i + 1}`;
-      const attribute = String(g.attribute || "").trim();
-      if (attribute !== CUSTOM_ATTRIBUTE && !ATTRIBUTE_KEYS.includes(attribute)) {
-        errors.push(`${what}: attribute must be one of ${ATTRIBUTE_KEYS.join(", ")} or "${CUSTOM_ATTRIBUTE}" (got "${g.attribute}")`);
-        return;
-      }
       const membersRaw = parseJsonField(g.members, `${what} members`, errors, []);
       const members = [];
       (Array.isArray(membersRaw) ? membersRaw : []).forEach((m, j) => {
@@ -1699,45 +1751,19 @@ export function validateStageOutput(stage, out, scene) {
           errors.push(`${where}: "${m.option}" is not a parameter of ${m.level === "graphic" || !m.elementId ? "the graphic" : `${m.elementId}.${m.slot}${s0 ? ` (${s0.fn})` : " (no texture)"}`}`);
           return;
         }
-        // A named attribute may only surface what the influence table says
-        // affects it. This is the whole point of the table: the model
-        // chooses which of the real relationships to show, it does not get
-        // to assert a new one. "custom" is the way to surface anything
-        // else, and it has to be named as such.
-        const inf = attribute === CUSTOM_ATTRIBUTE ? null : influenceFor(attribute, resolved.level, m.option);
-        if (attribute !== CUSTOM_ATTRIBUTE && !inf) {
-          errors.push(`${where}: "${m.option}" is not listed as affecting ${attribute} -- surface it under a "custom" group with a reason, or drop it`);
-          return;
-        }
-        const control = m.control && typeof m.control === "object" ? m.control : {};
-        const spec = resolved.spec;
-        const narrowed = {};
-        for (const k of ["min", "max"]) {
-          const v = Number(control[k]);
-          if (!Number.isFinite(v)) continue;
-          if (spec.min != null && spec.max != null && (v < spec.min || v > spec.max)) {
-            errors.push(`${where}: control ${k} ${v} is outside "${m.option}"'s own range ${spec.min}..${spec.max}`);
-            continue;
-          }
-          narrowed[k] = v;
-        }
-        if (narrowed.min != null && narrowed.max != null && !(narrowed.max > narrowed.min)) {
-          errors.push(`${where}: control min must be below control max`);
-          return;
-        }
+        const label = String(m.label || m.option).trim();
+        if (!label) { errors.push(`${where}: needs a short label`); return; }
         members.push({
           level: resolved.level,
           ...(resolved.level === "graphic" ? {} : { elementId: m.elementId, slot: m.slot }),
           option: m.option,
-          direction: Number(m.direction) < 0 ? -1 : (inf ? inf.direction : 1),
-          note: String(m.note || inf?.note || ""),
-          control: { label: String(control.label || m.option), ...narrowed },
+          label,
         });
       });
       let id = typeof g.id === "string" && g.id.trim() ? g.id.trim() : "";
       if (!id || seen.has(id)) id = nextId({ elements: scene.elements, groups: [...(scene.groups || []), ...groups] }, "gr");
       seen.add(id);
-      if (members.length) groups.push({ id, title: String(g.title || attribute), attribute, description: String(g.description || ""), members });
+      if (members.length) groups.push({ id, title: String(g.title || "relevant parameters"), description: String(g.description || ""), members });
     });
     return { value: { chat: String(out.chat || ""), groups }, errors };
   }

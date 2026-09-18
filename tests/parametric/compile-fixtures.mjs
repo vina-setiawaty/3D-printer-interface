@@ -39,10 +39,10 @@ test("bar chart compiles, report lists bar heights in order", () => {
   assert.deepEqual(r.errors, []);
   assert.equal(r.report.chart.bars.map((b) => b.height).join(","), "5,12,8");
   assert.equal(r.report.chart.axes.length, 1);
-  const kinds = r.jobs.map((j) => `${j.elementId}:${j.slot}:${j.kind}`);
+  const kinds = r.jobs.map((j) => `${j.elementId}:${j.slot}:${C.isPointSafe(j.fn) ? "stamp" : "brush"}`);
   assert.ok(kinds.includes("el_1:brush:brush") && kinds.includes("el_2:outline:brush") && kinds.includes("el_2:fill:brush"));
-  assert.ok(r.jobs.filter((j) => j.elementId === "el_4" && j.kind === "stamp").length > 4, "grid stamps inside bar 3");
-  assert.ok(r.jobs.some((j) => j.elementId === "el_5" && j.kind === "stamp"));
+  assert.ok(r.jobs.filter((j) => j.elementId === "el_4" && C.isPointSafe(j.fn)).length > 4, "grid stamps inside bar 3");
+  assert.ok(r.jobs.some((j) => j.elementId === "el_5" && C.isPointSafe(j.fn)));
   // outline before fill within the element, elements in order
   const order = r.jobs.map((j) => `${j.elementId}:${j.slot}`);
   assert.ok(order.indexOf("el_2:outline") < order.indexOf("el_2:fill"));
@@ -153,7 +153,7 @@ test("verification: closure warning, self-intersection, brush/pattern mismatch, 
 
   s.textures = { o: { fill: { fn: "blob", options: {}, pattern: { kind: "hatch", gap: 4 } } } };
   r = C.compileScene(s);
-  assert.ok(r.errors.some((e) => /must be a line brush/.test(e)));
+  assert.ok(r.errors.some((e) => /must be a brush/.test(e)));
 
   s.textures = { o: { outline: { fn: "solid", options: { nLayers: 1 } } } };
   r = C.compileScene(s);
@@ -218,11 +218,54 @@ test("point group (data markers): one element, one texture, N stamp jobs", () =>
   const r = C.compileScene(s);
   assert.deepEqual(r.errors, []);
   assert.equal(r.jobs.length, marks.length);
-  assert.ok(r.jobs.every((j) => j.kind === "stamp" && j.fn === "blob" && j.options.diameter === 2));
+  assert.ok(r.jobs.every((j) => C.isPointSafe(j.fn) && j.fn === "blob" && j.options.diameter === 2));
   const entry = r.report.elements.find((e) => e.id === "el_1");
   assert.equal(entry.count, marks.length);
   assert.equal(entry.at.length, marks.length);
   assert.ok(C.runJobs(r.jobs).ok);
+});
+
+// Regression for a real bug: a single-point stamp job was built as a bare
+// [x, y] pair. That's fine for a true TF.STAMPS function (dispatched by x,y
+// directly), but the point-safe *Dotted family (blobDotted, dotted,
+// directionalBlobDotted, hairyDotted) is a TF.BRUSHES function that walks
+// its points via walkArcLengthStops, which reads pts[i][2] as cumulative
+// arc length. A bare [x, y] made totalLength() return undefined, the walk's
+// `0 <= NaN` stop condition false, and the dot silently never get emitted --
+// no error anywhere, just G-code that quietly lost the fill. Fixed in
+// addBrushJob() by tagging a bare single point with s=0.
+test("a point-safe BRUSH (not a true stamp) at a single point still emits its dot", () => {
+  const s = C.defaultScene();
+  s.elements = [{ id: "el_1", label: "marker", kind: "point", role: "marker", at: [50, 50] }];
+  s.textures = { el_1: { brush: { fn: "blobDotted", options: { diameter: 2 } } } };
+  const r = C.compileScene(s);
+  assert.deepEqual(r.errors, []);
+  assert.equal(r.jobs.length, 1);
+  assert.equal(r.jobs[0].pts[0].length, 3, "the point was tagged with an arc-length coordinate, not left bare");
+  const run = C.runJobs(r.jobs);
+  assert.ok(run.ok, run.errors.join("; "));
+  assert.ok(/G4 /.test(run.gcode), "the dot's dwell command actually made it into the g-code");
+});
+
+test("a grid fill pattern with a point-safe BRUSH emits every stamp's dot", () => {
+  const s = C.defaultScene();
+  s.elements = [{ id: "el_1", label: "square", kind: "region", role: "other",
+    boundary: [{ points: [[20, 20], [60, 20], [60, 60], [20, 60]] }] }];
+  s.textures = { el_1: {
+    outline: { fn: "solid", options: {} },
+    fill: { fn: "blobDotted", pattern: { kind: "grid", dx: 8, dy: 8, angleDeg: 0 }, options: { diameter: 2 } },
+  } };
+  const r = C.compileScene(s);
+  assert.deepEqual(r.errors, []);
+  const entry = r.report.elements.find((e) => e.id === "el_1");
+  const fillJobs = r.jobs.filter((j) => j.slot === "fill");
+  assert.equal(fillJobs.length, entry.fill.stamps, "one job per stamp the report says exist");
+  assert.ok(fillJobs.length > 0);
+  assert.ok(fillJobs.every((j) => j.pts[0].length === 3));
+  const run = C.runJobs(r.jobs);
+  assert.ok(run.ok, run.errors.join("; "));
+  const dwells = (run.gcode.match(/G4 /g) || []).length;
+  assert.ok(dwells >= fillJobs.length, `expected at least one dwell per dot (${fillJobs.length} dots), got ${dwells}`);
 });
 
 test("a ref cannot target a line GROUP (ambiguous which stroke)", () => {
@@ -289,15 +332,16 @@ test("stage validation + merge round trip", () => {
   assert.equal(bogus.errors.length, 1);
   assert.ok(/not an option of hairy/.test(bogus.errors[0]), bogus.errors[0]);
 
-  // the ui stage surfaces controls and sets no values
+  // the ui stage surfaces controls and sets no values -- a selection with
+  // a short label each, no attribute name, no direction/weight
   const ui = C.validateStageOutput("ui", {
     chat: "surfaced",
     groups: [{
-      id: "", title: "how dense the shading feels", attribute: "density", description: "tighter rows read as darker",
+      id: "", title: "how dense the shading feels", description: "tighter rows read as darker",
       members: JSON.stringify([
-        { level: "pattern", elementId: "el_2", slot: "fill", option: "gap", control: { label: "row spacing", min: 2, max: 8 } },
-        { level: "brush", elementId: "el_2", slot: "fill", option: "spacing" },
-        { level: "graphic", option: "scale" },
+        { level: "pattern", elementId: "el_2", slot: "fill", option: "gap", label: "row spacing" },
+        { level: "brush", elementId: "el_2", slot: "fill", option: "spacing", label: "strand spacing" },
+        { level: "graphic", option: "scale", label: "overall size" },
       ]),
     }],
   }, s);
@@ -305,33 +349,25 @@ test("stage validation + merge round trip", () => {
   C.mergeUi(s, ui.value);
   assert.equal(s.groups[0].id, "gr_1");
   assert.equal(s.groups[0].members.length, 3);
-  assert.equal(s.groups[0].members[0].direction, -1, "direction comes from the table, not from the model");
-  assert.equal(s.groups[0].members[0].control.min, 2, "a narrowed control range is kept");
+  assert.equal(s.groups[0].members[0].label, "row spacing", "the model's own short label is kept");
   assert.equal(s.textures.el_2.fill.pattern.gap, 6, "surfacing a control changed no value");
 
-  // a member the table does not connect to that attribute is refused
+  // a member naming an option that does not exist on that texture is refused
   const wrong = C.validateStageOutput("ui", {
-    chat: "", groups: [{ id: "", title: "density", attribute: "density", description: "",
-      members: JSON.stringify([{ level: "brush", elementId: "el_2", slot: "fill", option: "baseZ" }]) }],
+    chat: "", groups: [{ id: "", title: "density", description: "",
+      members: JSON.stringify([{ level: "brush", elementId: "el_2", slot: "fill", option: "nonsense" }]) }],
   }, s);
   assert.equal(wrong.errors.length, 1);
-  assert.ok(/not listed as affecting density/.test(wrong.errors[0]), wrong.errors[0]);
+  assert.ok(/is not a parameter of/.test(wrong.errors[0]), wrong.errors[0]);
 
-  // ...but a custom group may surface it, with a reason
-  const custom = C.validateStageOutput("ui", {
-    chat: "", groups: [{ id: "", title: "first-contact height", attribute: "custom", description: "",
-      members: JSON.stringify([{ level: "brush", elementId: "el_2", slot: "fill", option: "baseZ", note: "how hard the first layer is pressed in" }]) }],
+  // no fixed attribute table left to consult -- any real option on the
+  // texture is fair game, and a missing label falls back to the option name
+  const noLabel = C.validateStageOutput("ui", {
+    chat: "", groups: [{ id: "", title: "first-contact height", description: "",
+      members: JSON.stringify([{ level: "brush", elementId: "el_2", slot: "fill", option: "baseZ" }]) }],
   }, s);
-  assert.deepEqual(custom.errors, []);
-  assert.equal(custom.value.groups[0].members[0].note, "how hard the first layer is pressed in");
-
-  // a control range outside the option's own range is refused
-  const wide = C.validateStageOutput("ui", {
-    chat: "", groups: [{ id: "", title: "density", attribute: "density", description: "",
-      members: JSON.stringify([{ level: "pattern", elementId: "el_2", slot: "fill", option: "gap", control: { min: 0, max: 500 } }]) }],
-  }, s);
-  assert.equal(wide.errors.length, 2, wide.errors.join("; "));
-  assert.ok(wide.errors.every((e) => /outside/.test(e)));
+  assert.deepEqual(noLabel.errors, []);
+  assert.equal(noLabel.value.groups[0].members[0].label, "baseZ", "falls back to the option name");
 
   // a texture change drops the controls that pointed at what is gone
   C.mergeTextures(s, { textures: [{ elementId: "el_2", slot: "fill", fn: "solid", pattern: { kind: "hatch", gap: 4 }, options: {}, patternOptions: {} }] });
@@ -347,45 +383,21 @@ test("stage validation + merge round trip", () => {
   assert.deepEqual(route.value.acceptance, ["el_2 reads denser"], "blank criteria dropped");
 });
 
-test("the influence table only names parameters that really exist", () => {
-  for (const [key, a] of Object.entries(C.ATTRIBUTES)) {
-    assert.ok(a.description && a.aliases.length, `${key} needs a description and aliases`);
-    for (const inf of a.influences) {
-      assert.ok([-1, 1].includes(inf.direction), `${key}.${inf.option} needs a direction`);
-      assert.ok(["primary", "secondary"].includes(inf.strength), `${key}.${inf.option} needs a strength`);
-      let known = false;
-      if (inf.level === "graphic") known = inf.option in C.GRAPHIC_OPTIONS;
-      else if (inf.level === "pattern") known = Object.values(C.PATTERN_OPTIONS).some((spec) => inf.option in spec);
-      else known = [...C.BRUSH_NAMES, ...C.STAMP_NAMES].some((fn) => inf.option in C.optionSpecFor(fn));
-      assert.ok(known, `${key}: no ${inf.level} has an option called "${inf.option}"`);
+test("every brush option is tagged stroke or brush level", () => {
+  for (const fn of C.BRUSH_NAMES) {
+    for (const [opt, spec] of Object.entries(C.optionSpecFor(fn))) {
+      assert.ok(["stroke", "brush"].includes(spec.level), `${fn}.${opt} needs a stroke|brush level, got "${spec.level}"`);
     }
   }
 });
 
-test("expandAttribute offers only what this scene actually has", () => {
-  const s = barChart();
-  // bar 1 is a solid hatch fill, bar 2 a hairy hatch fill, bar 3 a blob grid
-  const density = C.expandAttribute(s, "density");
-  const keys = density.map((m) => `${m.level}:${m.elementId || "graphic"}:${m.option}`);
-  assert.ok(keys.includes("pattern:el_2:gap"), "the hatch row spacing");
-  assert.ok(keys.includes("brush:el_3:spacing"), "the hairy brush's strand spacing");
-  assert.ok(keys.includes("pattern:el_4:dx") && keys.includes("pattern:el_4:dy"), "the grid spacing");
-  assert.ok(keys.includes("graphic:graphic:scale"), "and the graphic's own scale");
-  assert.ok(!keys.some((k) => k.includes("el_1")), "a solid axis brush has no density parameter");
-  assert.equal(density[0].strength, "primary", "primary controls come first");
-
-  const hairiness = C.expandAttribute(s, "hairiness");
-  assert.ok(hairiness.every((m) => m.elementId === "el_3"), "only the hairy fill has hair parameters");
-  assert.ok(hairiness.some((m) => m.option === "bigLift"));
-
-  // narrowing to one element narrows the offer
-  assert.ok(C.expandAttribute(s, "density", ["el_4"]).every((m) => !m.elementId || m.elementId === "el_4"));
-  assert.deepEqual(C.expandAttribute(s, "nonsense"), []);
-
-  // the generated guide names every attribute and its parameters
-  const guide = C.attributeGuideText();
-  for (const key of C.ATTRIBUTE_KEYS) assert.ok(guide.includes(key), `${key} missing from the guide`);
-  assert.ok(guide.includes("custom"), "and says how to surface something the table does not name");
+test("resolveMember reports the real stroke/brush/pattern/graphic level", () => {
+  const s = C.defaultScene();
+  s.elements = [{ id: "l", label: "line", kind: "line", role: "curve", path: { points: [[40, 40], [100, 40]] } }];
+  s.textures = { l: { brush: { fn: "solid", options: {} }, fill: undefined } };
+  assert.equal(C.resolveMember(s, { elementId: "l", slot: "brush", option: "nLayers" }).level, "stroke", "nLayers owns the layer loop");
+  assert.equal(C.resolveMember(s, { elementId: "l", slot: "brush", option: "width" }).level, "brush", "width is the local bead");
+  assert.equal(C.resolveMember(s, { level: "graphic", option: "scale" }).level, "graphic");
 });
 
 test("normalizeScene discards old formats", () => {
