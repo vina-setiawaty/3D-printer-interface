@@ -1,14 +1,14 @@
-// parametric-with-tool.html -- four-stage LLM pipeline for tactile graphics.
+// parametric-with-tool.html -- a staged LLM pipeline for tactile graphics.
 //
 // Column 1: a multi-turn chat. Column 2: the parameter panel (global
-// transform, elements with their textures, high-level abstraction knobs,
-// remaining brush options). Column 3: the geometry report, the print
+// transform, elements with their textures, the parameter groups the ui
+// stage surfaced, and the full option list). Column 3: the geometry report, the print
 // digest and the generated G-code (the shared #raw-gcode-textarea +
 // run/save wiring from script.js).
 //
 // A user message goes to the ROUTE stage, which rewrites it as a
 // self-contained instruction and picks the entry stage; the page then
-// chains geometry -> texture -> parameters (or a suffix of that), calling
+// chains geometry -> texture -> ui (or a suffix of that), calling
 // the chosen provider (OpenAI or Anthropic) DIRECTLY from the browser with
 // a key the user enters (see stage-schemas.js for per-stage schemas/token
 // budgets and llm.js's callLlmDirect for the request itself -- no Vercel
@@ -24,39 +24,24 @@
 // initParametricEditor on window for parametric-with-tool-compat.js.
 
 import { STAGES } from "./stage-schemas.js";
+import {
+  DOC_PATHS, docText, composeSystemPrompt, composeUserMessage, composeRouteMessages,
+  composeJudgeMessage, composeRefineMessage,
+} from "./prompt-assembly.js";
+import { runTurn, CHAIN } from "./pipeline.js";
 
 const STORAGE_KEY = "parametricWithToolSessionState";
 const DEBUG_LOG_KEY = "parametricWithToolDebugLog";
 const DEBUG_LOG_MAX_TURNS = 15;   // localStorage is finite; keep the most recent turns
 
-// Prompt docs per stage. A doc wrapped in a ``` fence contributes only the
-// fenced block; a plain doc is used whole.
-const STAGE_DOCS = {
-  route: ["docs/stage-route.md"],
-  geometry: ["docs/stage-geometry.md", "docs/reference-machine.md"],
-  "geometry-check": ["docs/stage-geometry-check.md", "docs/reference-machine.md"],
-  texture: ["docs/stage-texture.md", "docs/reference-machine.md", "docs/reference-brushes.md"],
-  "texture-check": ["docs/stage-texture-check.md", "docs/reference-machine.md", "docs/reference-brushes.md"],
-  parameters: ["docs/stage-parameters.md", "docs/reference-brushes.md"],
-};
-const CHAIN = { geometry: ["geometry", "texture", "parameters"], texture: ["texture", "parameters"], parameters: ["parameters"], chat: [] };
-const STAGE_LABEL = { route: "routing", geometry: "geometry", texture: "texture", parameters: "parameters" };
-// A *-check call reuses the "geometry"/"texture" output validator (same
-// per-item shape -- see api/parametric-stage.js's shared item schemas);
-// only the top-level `ok` boolean is read separately, straight off the
-// raw parsed JSON, since it has no nested-JSON field that needs parsing.
-const VALIDATOR_FOR_STAGE = { route: "route", geometry: "geometry", "geometry-check": "geometry", texture: "texture", "texture-check": "texture", parameters: "parameters" };
-// Fill pattern kinds whose coordinates the model writes itself -- these
-// are the only ones worth a texture-check pass; hatch/grid/diamond are
-// recomputed deterministically from the region and can't be "wrong".
-const FREEFORM_PATTERN_KINDS = ["stamps", "strokes", "curves", "family"];
+const STAGE_LABEL = { route: "deciding", geometry: "geometry", texture: "texture", ui: "controls", judge: "checking" };
 
 let C = null;              // parametric-catalog-with-tool.js module
 let docs = {};             // path -> text
 let ready = false;
 let scene = null;
 let rerunTimer = null;
-let pending = null;        // { instruction, targets, remaining: [stage...] } for retry
+let lastTurn = null;       // the finished runTurn() result, for the retry link and the criteria list
 let busy = false;
 
 // Debug log: one entry per user turn, each holding every stage call that
@@ -125,7 +110,7 @@ function formatDebugLog(log) {
       if (c.refusal) lines.push("MODEL REFUSED:", c.refusal, "");
       if (c.rawOutput != null) lines.push("raw model output:", pretty(c.rawOutput), "");
       if (c.parseError) lines.push("JSON PARSE ERROR:", c.parseError, "");
-      if (c.validationErrors && c.validationErrors.length) lines.push("VALIDATION REJECTED:", c.validationErrors.join("\n"), "");
+      if (c.validationErrors && c.validationErrors.length) lines.push("REJECTED BY THE GATE (sent back to this same stage as a repair):", c.validationErrors.join("\n"), "");
       if (!c.networkError && !c.httpError && !c.refusal && !c.parseError && !(c.validationErrors && c.validationErrors.length)) lines.push("(accepted)", "");
     }
     lines.push("");
@@ -158,13 +143,10 @@ async function loadDeps() {
   debugLog = loadDebugLog();
   $("#pg-material").value = scene.config.material;
   try {
-    const paths = [...new Set(Object.values(STAGE_DOCS).flat())];
-    await Promise.all(paths.map(async (path) => {
+    await Promise.all(DOC_PATHS.map(async (path) => {
       const r = await fetch(path);
       if (!r.ok) throw new Error(`${path} → HTTP ${r.status}`);
-      const text = await r.text();
-      const fenced = text.match(/```([\s\S]*?)```/);
-      docs[path] = fenced ? fenced[1].trim() : text;
+      docs[path] = docText(path, await r.text());
     }));
   } catch (e) {
     status.textContent = "";
@@ -179,61 +161,20 @@ async function loadDeps() {
 }
 
 // ------------------------------------------------------- stage requests --
+//
+// Prompt text is assembled by prompt-assembly.js -- a DOM-free module, so
+// the same code that builds a live call is what the offline prompt tests
+// exercise. This file only supplies the scene and the catalog.
 
-function systemPromptFor(stage) {
-  const mat = scene.config.material || "TPU";
-  const body = STAGE_DOCS[stage].map((p) => docs[p]).join("\n\n---\n\n");
-  const session = `\n\n---\n\nSESSION: material = ${mat}.` + (mat === "PLA" ? " Use PLA numbers; the page emits a PLA start sequence." : " Use TPU numbers (the library defaults).");
-  if (stage === "route") return `${body}\n\n---\n\nSCENE SUMMARY:\n${C.sceneSummary(scene)}`;
-  return body + session;
-}
-
-// The router sees the whole transcript (consecutive same-role turns merged
-// so both providers accept it). Other stages are single-turn.
-function routeMessages() {
-  const out = [];
-  for (const m of scene.messages) {
-    const content = m.stage && m.role === "assistant" ? `[${m.stage}] ${m.content}` : m.content;
-    if (out.length && out[out.length - 1].role === m.role) out[out.length - 1].content += "\n\n" + content;
-    else out.push({ role: m.role, content });
-  }
-  return out;
-}
-
-function recentConversation(n = 3) {
-  const turns = scene.messages.slice(-n - 1, -1);   // exclude the current user turn
-  if (!turns.length) return "(none)";
-  return turns.map((m) => `${m.role}${m.stage ? ` (${m.stage})` : ""}: ${m.content}`).join("\n");
-}
+const systemPromptFor = (stage) => composeSystemPrompt(stage, { docs, scene, C });
+const routeMessages = () => composeRouteMessages(scene);
+const stageUserMessage = (stage, instruction, targets) => composeUserMessage(stage, { scene, C, instruction, targets });
 
 // One array item per line, each compact -- readable for the model without
 // pretty-printing every coordinate onto its own line.
 function jsonLines(arr) {
   if (!Array.isArray(arr) || !arr.length) return "[]";
   return "[\n" + arr.map((x) => "  " + JSON.stringify(x)).join(",\n") + "\n]";
-}
-
-function stageUserMessage(stage, instruction, targets) {
-  const ids = targets.length ? targets : null;
-  const parts = [`INSTRUCTION:\n${instruction}`, `TARGET ELEMENTS: ${targets.length ? targets.join(", ") : "(whole scene)"}`];
-  parts.push(`RECENT CONVERSATION:\n${recentConversation()}`);
-  if (stage === "geometry") {
-    parts.push(`CURRENT ELEMENTS (JSON):\n${jsonLines(C.elementsJson(scene))}`);
-    parts.push(`CURRENT TRANSFORM: ${JSON.stringify(scene.transform)}`);
-  } else {
-    const els = C.elementsJson(scene).map((e) => {
-      const rep = scene.lastReport?.elements?.find((r) => r.id === e.id);
-      return { ...e, size: rep ? { bbox: rep.bbox, length: rep.length, area: rep.area, width: rep.width, height: rep.height } : undefined };
-    });
-    parts.push(`ELEMENTS (JSON, geometry + printed size):\n${jsonLines(els)}`);
-    parts.push(`CURRENT TEXTURES (JSON):\n${jsonLines(C.texturesJson(scene))}`);
-  }
-  if (stage === "parameters") {
-    parts.push(`OPTION SPECS for the brushes/stamps in use:\n${C.optionSpecsText(scene, ids) || "(no textures yet)"}`);
-    parts.push(`CURRENT ABSTRACTIONS (JSON):\n${jsonLines(scene.abstractions)}`);
-  }
-  parts.push(`LATEST GEOMETRY REPORT:\n${C.reportText(scene.lastReport)}`);
-  return parts.join("\n\n");
 }
 
 // `contextScene` defaults to the live scene; a *-check call passes a
@@ -289,14 +230,32 @@ async function callStage(stage, messages, contextScene = scene) {
       throw new Error(`could not parse the model output as JSON: ${e.message}`);
     }
     if (data.usage) recordCost(data.usage, model);
-    const v = C.validateStageOutput(VALIDATOR_FOR_STAGE[stage], json, contextScene);
+    // A rejected output is data, not an exception: the pipeline's gate
+    // hands these errors straight back to the same stage as a repair.
+    // Only a network, refusal or parse failure is fatal to the turn.
+    const v = C.validateStageOutput(stage, json, contextScene);
     record.validationErrors = v.errors;
-    if (v.errors.length) throw new Error(`${stage} output rejected: ${v.errors.join("; ")}`);
-    if (stage.endsWith("-check")) v.value.ok = !!json.ok;
-    return v.value;
+    return { value: v.value, errors: v.errors, raw: text };
   } finally {
     logDebugCall(record);
   }
+}
+
+// The two calls that are not one of the pipeline's generating stages: the
+// manager (multi-turn, sees the conversation) and the judge (single-turn,
+// sees the finished scene and the app's numbers).
+async function callRoute(refine) {
+  const messages = composeRouteMessages(scene);
+  if (refine) messages.push({ role: "user", content: composeRefineMessage(refine) });
+  const res = await callStage("route", messages);
+  if (res.errors.length) throw new Error(`the manager's answer was rejected: ${res.errors.join("; ")}`);
+  return res.value;
+}
+
+async function callJudge(plan, compiled, notes) {
+  const content = composeJudgeMessage({ scene, C, instruction: plan.instruction, acceptance: plan.acceptance, compiled, notes });
+  const res = await callStage("judge", [{ role: "user", content }]);
+  return res.value;
 }
 
 // ---------------------------------------------------------- orchestration --
@@ -328,166 +287,111 @@ async function onSend() {
 
   pushMessage("user", instruction);
   input.value = "";
-  pending = null;
   beginDebugTurn(instruction);
-
-  setBusy(true, "routing…");
-  let route;
-  try {
-    route = await callStage("route", routeMessages());
-  } catch (e) {
-    setBusy(false);
-    showMessages([escapeHtml(String(e.message || e)), retryLink("route", { instruction })]);
-    pending = { stage: "route", instruction };
-    return;
-  }
-  if (route.route === "chat" || !CHAIN[route.route]) {
-    pushMessage("assistant", route.reply || "(no reply)", "chat");
-    setBusy(false);
-    return;
-  }
-  const chain = CHAIN[route.route].slice();
-  pending = { instruction: route.instruction || instruction, targets: route.targets, remaining: chain, total: chain.length };
-  await runChain();
+  setBusy(true, "deciding…");
+  await driveTurn();
 }
 
-function retryLink(kind, p) {
-  return `<span class="pg-retry" data-kind="${kind}">retry</span>`;
+// Everything the pipeline needs from the page: how to call a model, how to
+// compile, how to merge, and how to say what it is doing. The loop itself
+// lives in pipeline.js, where it is tested without a browser.
+function turnDeps() {
+  const notes = [];
+  return {
+    C,
+    selfCheck: selfCheckEnabled(),
+    maxRepairs: 2,
+    maxRefineRounds: selfCheckEnabled() ? 2 : 0,
+    notes,
+    route: (refine) => {
+      setBusy(true, refine ? "deciding what to fix…" : "deciding…");
+      return callRoute(refine);
+    },
+    callModel: (stage, content, contextScene) => callStage(stage, [{ role: "user", content }], contextScene),
+    composeUser: (stage, opts) => composeUserMessage(stage, { scene, C, ...opts }),
+    compile: (s) => C.compileScene(s),
+    merge: (stage, value) => {
+      if (value.chat) { pushMessage("assistant", value.chat, stage); notes.push(`${stage}: ${value.chat}`); }
+      if (stage === "geometry") return C.mergeGeometry(scene, value);
+      if (stage === "texture") return C.mergeTextures(scene, value);
+      if (stage === "ui") return C.mergeUi(scene, value);
+      return [];
+    },
+    judge: (plan) => {
+      setBusy(true, "checking it against what you asked for…");
+      return callJudge(plan, C.compileScene(scene), notes);
+    },
+    onProgress: ({ stage, attempt, repairing }) => {
+      setBusy(true, repairing
+        ? `fixing ${STAGE_LABEL[stage] || stage} (attempt ${attempt + 1})…`
+        : `generating ${STAGE_LABEL[stage] || stage}…`);
+    },
+  };
+}
+
+async function driveTurn(refineOnly = false) {
+  const deps = turnDeps();
+  let out;
+  try {
+    out = await runTurn({ scene }, deps);
+  } catch (e) {
+    setBusy(false);
+    rerenderAll();
+    showMessages([escapeHtml(String(e.message || e)), retryLink()]);
+    return;
+  }
+  lastTurn = out;
+
+  if (out.stopped === "chat") {
+    pushMessage("assistant", out.plan?.reply || "(no reply)", "chat");
+  } else if (out.stopped === "gate") {
+    const errs = out.rounds[out.rounds.length - 1]?.ran?.slice(-1)[0]?.errors || [];
+    showMessages([
+      `the ${escapeHtml(STAGE_LABEL[out.failedStage] || out.failedStage)} stage could not produce something printable after ${deps.maxRepairs} attempts:`,
+      ...errs.slice(0, 4).map((e) => escapeHtml(e)),
+      "what it last proposed is in the panel, so you can also fix it by hand",
+      retryLink(),
+    ]);
+  } else if (out.verdict && !out.verdict.pass) {
+    pushMessage("assistant", out.verdict.note || "some of what you asked for is still not right", "check");
+  } else if (out.verdict?.note) {
+    pushMessage("assistant", out.verdict.note, "check");
+  }
+
+  setBusy(false);
+  rerenderAll();
+}
+
+function retryLink() {
+  return `<span class="pg-retry" data-kind="turn">try that turn again</span>`;
 }
 
 function selfCheckEnabled() { return $("#pg-self-check").value === "on"; }
 
-// After the geometry stage returns a proposed element list, compile it
-// (elements only, no textures -- resolveScene/compileScene don't need
-// them for bbox/closure/chart-role reporting) to get the app's own exact
-// numbers, then -- if there's anything worth checking and self-check is
-// on -- ask the geometry-check stage to review against those numbers and
-// patch anything wrong. Returns the (possibly patched) elements and a
-// chat note to show, or null if nothing changed.
-async function checkGeometry(step, total, instruction, elements, transform) {
-  const draft = { elements, textures: {}, transform, config: scene.config, abstractions: [] };
-  let compiled;
-  try { compiled = C.compileScene(draft); } catch (e) { return { elements, note: null }; }
-  const worthChecking = compiled.errors.length > 0 || compiled.warnings.length > 0 ||
-    elements.some((e) => ["bar", "axis", "curve", "tick"].includes(e.role));
-  if (!selfCheckEnabled() || !worthChecking) return { elements, note: null };
-
-  setBusy(true, `checking geometry… (step ${step} of ${total})`);
-  const parts = [
-    `INSTRUCTION:\n${instruction}`,
-    `PROPOSED ELEMENTS (JSON):\n${jsonLines(C.elementsJson(draft))}`,
-    `DETERMINISTIC REPORT (computed by the app from this exact geometry -- trust these numbers):\n${C.reportText(compiled.report)}`,
-  ];
-  if (compiled.errors.length) parts.push(`HARD ERRORS (must be fixed):\n${compiled.errors.join("\n")}`);
-  if (compiled.warnings.length) parts.push(`WARNINGS:\n${compiled.warnings.join("\n")}`);
-
-  let out;
-  try {
-    out = await callStage("geometry-check", [{ role: "user", content: parts.join("\n\n") }], draft);
-  } catch (e) {
-    showMessages([`geometry check failed (kept the unverified draft): ${escapeHtml(String(e.message || e))}`]);
-    return { elements, note: null };
-  }
-  if (out.ok || !out.elements.length) return { elements, note: null };
-  const byId = new Map(elements.map((e, i) => [e.id, i]));
-  for (const fix of out.elements) {
-    const i = byId.get(fix.id);
-    if (i != null) elements[i] = fix; else elements.push(fix);
-  }
-  return { elements, note: out.chat };
+async function onRetry() {
+  if (busy || !scene.messages.length) return;
+  setBusy(true, "deciding…");
+  await driveTurn();
 }
 
-// Same idea for the texture stage, but only worth doing when at least one
-// proposed fill uses a free-form (hand-written-coordinates) pattern.
-async function checkTexture(step, total, instruction, textures) {
-  const worthChecking = textures.some((t) => t.slot === "fill" && t.pattern && FREEFORM_PATTERN_KINDS.includes(t.pattern.kind));
-  if (!selfCheckEnabled() || !worthChecking) return { textures, note: null };
-
-  const draft = { elements: scene.elements, textures: structuredClone(scene.textures), transform: scene.transform, config: scene.config, abstractions: structuredClone(scene.abstractions) };
-  C.mergeTextures(draft, { textures });
-  let compiled;
-  try { compiled = C.compileScene(draft); } catch (e) { return { textures, note: null }; }
-
-  setBusy(true, `checking texture… (step ${step} of ${total})`);
-  const parts = [
-    `INSTRUCTION:\n${instruction}`,
-    `PROPOSED TEXTURES (JSON):\n${jsonLines(textures)}`,
-    `DETERMINISTIC REPORT (compiled fill stats -- trust these numbers):\n${C.reportText(compiled.report)}`,
-  ];
-  if (compiled.errors.length) parts.push(`HARD ERRORS (must be fixed):\n${compiled.errors.join("\n")}`);
-  if (compiled.warnings.length) parts.push(`WARNINGS:\n${compiled.warnings.join("\n")}`);
-
-  let out;
-  try {
-    out = await callStage("texture-check", [{ role: "user", content: parts.join("\n\n") }], draft);
-  } catch (e) {
-    showMessages([`texture check failed (kept the unverified draft): ${escapeHtml(String(e.message || e))}`]);
-    return { textures, note: null };
-  }
-  if (out.ok || !out.textures.length) return { textures, note: null };
-  const key = (t) => `${t.elementId} ${t.slot}`;
-  const byKey = new Map(textures.map((t, i) => [key(t), i]));
-  for (const fix of out.textures) {
-    const i = byKey.get(key(fix));
-    if (i != null) textures[i] = fix; else textures.push(fix);
-  }
-  return { textures, note: out.chat };
-}
-
-// The transform a proposed geometry change implies, for the check pass's
-// report -- value.transform is already parsed (object or null) by
-// validateStageOutput.
-function previewTransform(value) {
-  if (!value.transform) return scene.transform;
-  const t = value.transform;
-  return {
-    scale: Number(t.scale) > 0 ? Number(t.scale) : scene.transform.scale,
-    origin: Array.isArray(t.origin) ? t.origin.map(Number) : (t.origin === null ? null : scene.transform.origin),
-  };
-}
-
-async function runChain() {
-  if (!pending || !pending.remaining) return;
-  while (pending.remaining.length) {
-    const stage = pending.remaining[0];
-    const step = pending.total - pending.remaining.length + 1;
-    setBusy(true, `generating ${STAGE_LABEL[stage]}… (step ${step} of ${pending.total})`);
-    let value;
-    try {
-      value = await callStage(stage, [{ role: "user", content: stageUserMessage(stage, pending.instruction, pending.targets) }]);
-    } catch (e) {
-      setBusy(false);
-      showMessages([`${STAGE_LABEL[stage]} stage failed: ${escapeHtml(String(e.message || e))}`, retryLink("chain")]);
-      return;
-    }
-    pushMessage("assistant", value.chat || "(no message)", stage);
-
-    if (stage === "geometry") {
-      const checked = await checkGeometry(step, pending.total, pending.instruction, value.elements, previewTransform(value));
-      value.elements = checked.elements;
-      if (checked.note) pushMessage("assistant", checked.note, "geometry-check");
-    } else if (stage === "texture") {
-      const checked = await checkTexture(step, pending.total, pending.instruction, value.textures);
-      value.textures = checked.textures;
-      if (checked.note) pushMessage("assistant", checked.note, "texture-check");
-    }
-
-    let dropped = [];
-    if (stage === "geometry") dropped = C.mergeGeometry(scene, value);
-    else if (stage === "texture") dropped = C.mergeTextures(scene, value);
-    else if (stage === "parameters") C.mergeParameters(scene, value);
-    pending.remaining.shift();
-    rerenderAll();
-    if (dropped.length) showMessages([`dropped abstraction targets that no longer apply: ${escapeHtml(dropped.join(", "))}`]);
-  }
-  pending = null;
-  setBusy(false);
-}
-
-async function onRetry(kind) {
-  if (busy || !pending) return;
-  if (kind === "route") { $("#pg-input").value = pending.instruction; scene.messages.pop(); saveScene(); renderTranscript(); pending = null; onSend(); return; }
-  await runChain();
+// The turn's acceptance criteria and how they came out, under the digest:
+// what the manager decided "done" meant, and whether the app's own numbers
+// agreed. Rendered from the last turn only -- it describes that turn.
+function renderVerdict() {
+  const el = $("#pg-verdict");
+  if (!el) return;
+  const plan = lastTurn?.plan;
+  const criteria = plan?.acceptance || [];
+  if (!criteria.length) { el.innerHTML = ""; return; }
+  const failures = lastTurn?.verdict?.failures || [];
+  const failed = new Set(failures.map((f) => f.criterion));
+  const rows = criteria.map((c) => {
+    const bad = failed.has(c);
+    return `<li class="${bad ? "pg-crit-bad" : "pg-crit-ok"}">${bad ? "✗" : "✓"} ${escapeHtml(c)}</li>`;
+  }).join("");
+  const why = failures.map((f) => `<li>${escapeHtml(f.criterion)} — ${escapeHtml(f.evidence)}</li>`).join("");
+  el.innerHTML = `<div class="pg-section">what this turn was checked against</div><ul class="pg-crits">${rows}</ul>` +
+    (why ? `<div class="pg-warns"><strong>not met:</strong><ul>${why}</ul></div>` : "");
 }
 
 // ----------------------------------------------------------------- render --
@@ -504,6 +408,7 @@ function renderTranscript() {
 function rerenderAll() {
   renderPanel();
   rerunGcode();
+  renderVerdict();
 }
 
 function scheduleRerun() {
@@ -552,21 +457,61 @@ function rerunGcode() {
   digestEl.innerHTML = `${badge}<table class="pg-digest-table">${rows}</table>${errs}${warns}`;
 }
 
-// ---------------------------------------------------------------- panel --
+// -------------------------------- panel --
 
+// Order, top to bottom: printing settings (global, always visible) -- one
+// top-level card per scene.groups entry NOT scoped to exactly one element
+// (a graphic-level control, or a felt quality spanning several elements --
+// see topLevelGroups/groupsForElement in the catalog) -- then one card per
+// element, each holding its own slice of the relevant groups, its shape
+// editor, and a fully collapsible per-slot stroke/brush/pattern breakdown.
+// A group spanning several elements shows up BOTH as its own top-level card
+// AND inside each of those elements' own cards -- deliberate, not a
+// duplicate to remove (see the parameters-panel plan).
+//
+// Editing any field now re-renders this whole panel (so two displays of the
+// same value never drift), which would otherwise collapse every open
+// <details> back closed on every keystroke -- captureOpenKeys/applyOpenState
+// preserve open/closed state, at every nesting level, across each rebuild.
 function renderPanel() {
   const el = $("#pg-params");
+  const openKeys = captureOpenKeys(el);
   el.innerHTML = "";
   el.appendChild(renderGraphicCard());
-  const elsTitle = section("elements");
-  el.appendChild(elsTitle);
+
+  const topGroups = C.topLevelGroups(scene);
+  if (topGroups.length) {
+    el.appendChild(section("relevant parameters"));
+    topGroups.forEach((g) => el.appendChild(renderGroupCard(g)));
+  }
+
+  el.appendChild(section("elements"));
   if (!scene.elements.length) el.appendChild(note("elements appear here after the AI proposes a graphic"));
-  scene.elements.forEach((element, idx) => el.appendChild(renderElementCard(element, idx)));
-  el.appendChild(section("high-level parameters"));
-  if (!scene.abstractions.length) el.appendChild(note("the parameters stage proposes knobs like hairiness or density here"));
-  scene.abstractions.forEach((a) => el.appendChild(renderAbstractionCard(a)));
-  el.appendChild(section("other brush options"));
-  el.appendChild(renderOtherOptions());
+  const targeted = new Set(lastTurn?.plan?.targets || []);
+  const rank = (e) => (targeted.has(e.id) ? 0 : 1);
+  const ordered = scene.elements.map((e, idx) => [e, idx]).sort((a, b) => rank(a[0]) - rank(b[0]));
+  ordered.forEach(([element, idx]) => el.appendChild(renderElementCard(element, idx)));
+
+  applyOpenState(el, openKeys, targeted);
+}
+
+// Every collapsible <details> this panel builds (element cards, slot
+// breakdowns, stroke/brush/pattern subsections, an element's own
+// generated-ui section) carries a stable `data-open-key` -- see
+// collapsibleCard()'s callers. Captured before a rebuild, restored after.
+function captureOpenKeys(container) {
+  return new Set([...container.querySelectorAll("details[data-open-key][open]")].map((d) => d.dataset.openKey));
+}
+function applyOpenState(container, openKeys, targetedIds) {
+  const GEN_UI_SUFFIX = ":generated-ui";
+  for (const d of container.querySelectorAll("details[data-open-key]")) {
+    const key = d.dataset.openKey;
+    if (openKeys.has(key)) { d.open = true; continue; }
+    // A freshly-relevant generated-ui section defaults open even before the
+    // user has ever manually opened it -- but only as a default: an
+    // explicit prior close (captured above) always wins.
+    if (key.endsWith(GEN_UI_SUFFIX) && targetedIds.has(key.slice(0, -GEN_UI_SUFFIX.length))) d.open = true;
+  }
 }
 
 function section(title) {
@@ -590,17 +535,47 @@ function card(title, sub) {
   c.appendChild(head);
   return c;
 }
+// Same head shape as card(), but a native <details> so it starts closed --
+// used for per-element cards, which default to collapsed so a scene with
+// many elements doesn't bury the parameters the ui stage actually surfaced.
+function collapsibleCard(title, sub, openKey) {
+  const c = document.createElement("details");
+  c.className = "pg-call";
+  if (openKey) c.dataset.openKey = openKey;
+  const head = document.createElement("summary");
+  head.className = "pg-call-head";
+  head.innerHTML = `<span class="pg-call-label">${escapeHtml(title)}</span><span class="pg-call-fn">${escapeHtml(sub || "")}</span>`;
+  c.appendChild(head);
+  return c;
+}
 function fieldsGrid() {
   const w = document.createElement("div");
   w.className = "pg-fields";
   return w;
+}
+// A light-weight in-card heading -- same visual weight as a slot's own
+// "brush"/"pattern" title, used for things nested inside a card that aren't
+// worth a full top-level section() heading.
+function subLabel(text) {
+  const d = document.createElement("div");
+  d.className = "pg-fields-title";
+  d.textContent = text;
+  return d;
+}
+// One collapsible stroke/brush/pattern subsection inside a slot.
+function renderOptionSubsection(openKey, label, fields) {
+  const c = collapsibleCard(label, "", openKey);
+  const g = fieldsGrid();
+  fields.forEach((f) => g.appendChild(f));
+  c.appendChild(g);
+  return c;
 }
 function commitGeometry() { saveScene(); scheduleRerun(); }
 
 // --- graphic (global) ---
 
 function renderGraphicCard() {
-  const c = card("graphic", "global transform");
+  const c = card("printing settings", "scale, position, material — the whole print, not one element");
   const grid = fieldsGrid();
   grid.appendChild(renderField("scale %", { kind: "num", step: 5, min: 10, max: 400 }, +(scene.transform.scale * 100).toFixed(1), (v) => {
     if (v != null && v > 0) scene.transform.scale = v / 100;
@@ -617,6 +592,24 @@ function renderGraphicCard() {
   };
   grid.appendChild(renderField("origin x (min corner)", { kind: "nnum", step: 1 }, ox, (v) => setOrigin(0, v)));
   grid.appendChild(renderField("origin y (min corner)", { kind: "nnum", step: 1 }, oy, (v) => setOrigin(1, v)));
+  const matLbl = document.createElement("label");
+  matLbl.className = "pg-field";
+  matLbl.innerHTML = `<span>material</span>`;
+  const matSel = document.createElement("select");
+  for (const [v, text] of [["TPU", "TPU (default)"], ["PLA", "PLA"]]) {
+    const o = document.createElement("option");
+    o.value = v; o.textContent = text;
+    if (v === scene.config.material) o.selected = true;
+    matSel.appendChild(o);
+  }
+  matSel.onchange = () => {
+    scene.config.material = matSel.value;
+    const other = $("#pg-material");
+    if (other) other.value = matSel.value;
+    saveScene(); scheduleRerun();
+  };
+  matLbl.appendChild(matSel);
+  grid.appendChild(matLbl);
   c.appendChild(grid);
   const row = document.createElement("div");
   row.className = "pg-btn-row";
@@ -647,22 +640,47 @@ function smallBtn(label, onClick) {
 function renderElementCard(el, idx) {
   const groupCount = el.kind === "point" && Array.isArray(el.at) && Array.isArray(el.at[0]) ? el.at.length
     : el.kind === "line" && Array.isArray(el.paths) ? el.paths.length : null;
-  const c = card(el.label || el.id, `${el.id} · ${el.kind}${el.role ? ` · ${el.role}` : ""}${groupCount != null ? ` · group of ${groupCount}` : ""}`);
+  const c = collapsibleCard(el.label || el.id, `${el.id} · ${el.kind}${el.role ? ` · ${el.role}` : ""}${groupCount != null ? ` · group of ${groupCount}` : ""}`, el.id);
   const del = document.createElement("span");
   del.className = "pg-call-del";
   del.textContent = "remove";
   del.onclick = () => {
     scene.elements.splice(idx, 1);
     delete scene.textures[el.id];
-    C.pruneAbstractions(scene);
+    C.pruneGroups(scene);
     saveScene(); rerenderAll();
   };
   c.querySelector(".pg-call-head").appendChild(del);
 
+  const generatedUi = renderElementGeneratedUi(el);
+  if (generatedUi) c.appendChild(generatedUi);
+
+  c.appendChild(subLabel("shape"));
   c.appendChild(renderGeometryEditor(el));
 
   const tex = scene.textures[el.id] || (scene.textures[el.id] = {});
-  for (const slot of C.slotsFor(el.kind)) c.appendChild(renderSlotEditor(el, tex, slot));
+  if (el.kind === "region") c.appendChild(renderPatternEditor(el, tex));
+
+  for (const slot of C.slotsFor(el.kind)) {
+    const slotCard = collapsibleCard(slot, "", `${el.id}:${slot}`);
+    slotCard.appendChild(renderSlotEditor(el, tex, slot));
+    c.appendChild(slotCard);
+  }
+  return c;
+}
+
+// This element's own slice of every relevant scene.groups entry -- its own
+// single-element groups (shown complete), plus its own member from any
+// group that also spans other elements (that group's other members live in
+// their own elements' cards, and the whole group also has its own top-level
+// card -- see groupsForElement in the catalog for why that's intentional).
+// Returns null when there's nothing to show, so the caller can skip the
+// section entirely rather than rendering an empty heading.
+function renderElementGeneratedUi(el) {
+  const groups = C.groupsForElement(scene, el.id);
+  if (!groups.length) return null;
+  const c = collapsibleCard("generated ui", "", `${el.id}:generated-ui`);
+  for (const g of groups) c.appendChild(renderGroupCard(g, el.id));
   return c;
 }
 
@@ -670,6 +688,53 @@ function renderElementCard(el, idx) {
 // is several stamps/strokes sharing this one element's texture (ticks,
 // gridlines, a row of markers). `onToggle(isGroup)` swaps the element's
 // geometry field shape; the caller re-renders.
+// A "form" select: which shape of geometry this element is written in.
+// `options` is [[value, label], ...]; `onChange` gets the chosen value.
+function formToggle(options, current, onChange) {
+  const lbl = document.createElement("label");
+  lbl.className = "pg-field";
+  lbl.innerHTML = `<span>form</span>`;
+  const sel = document.createElement("select");
+  options.forEach(([v, text]) => {
+    const o = document.createElement("option");
+    o.value = v; o.textContent = text;
+    if (v === current) o.selected = true;
+    sel.appendChild(o);
+  });
+  sel.onchange = () => onChange(sel.value);
+  lbl.appendChild(sel);
+  return lbl;
+}
+
+// The bounds of an app-solved region. The crossings and the shaded span
+// are computed by the compiler, so the only things to edit here are which
+// curves bound it and (optionally) a narrower x range -- the solved range
+// itself is shown in the geometry report, not typed in.
+function renderBetweenEditor(el) {
+  const b = el.between;
+  const g = fieldsGrid();
+  const lineIds = scene.elements.filter((e) => e.kind === "line" && !Array.isArray(e.paths)).map((e) => e.id);
+  const LEVEL = "(a flat y level)";
+  const boundField = (which) => {
+    const cur = b[which];
+    const isLevel = cur && typeof cur === "object";
+    g.appendChild(renderField(`${which} bound`, { kind: "enum", options: [...(lineIds.length ? lineIds : [""]), LEVEL], def: lineIds[0] || "" }, isLevel ? LEVEL : cur, (v) => {
+      b[which] = v === LEVEL ? { y: 40 } : v;
+      commitGeometry(); renderPanel();
+    }));
+    if (isLevel) g.appendChild(numField(`${which} y (mm)`, cur.y, (v) => { if (v != null) { b[which] = { y: v }; commitGeometry(); } }));
+  };
+  boundField("upper");
+  boundField("lower");
+  const xField = (key) => renderField(`${key} (blank = solved)`, { kind: "nnum", step: 1 }, b[key] ?? null, (v) => {
+    if (v == null) delete b[key]; else b[key] = v;
+    commitGeometry();
+  });
+  g.appendChild(xField("xFrom"));
+  g.appendChild(xField("xTo"));
+  return g;
+}
+
 function groupToggle(isGroup, onToggle) {
   const lbl = document.createElement("label");
   lbl.className = "pg-field";
@@ -726,6 +791,23 @@ function renderGeometryEditor(el) {
       wrap.appendChild(renderPieceEditor(el.path, (p) => { el.path = p; commitGeometry(); renderPanel(); }, false));
     }
   } else if (el.kind === "region") {
+    const isBetween = !!el.between;
+    wrap.appendChild(formToggle(
+      [["boundary", "boundary (an explicit outline)"], ["between", "between (app-solved area under/between curves)"]],
+      isBetween ? "between" : "boundary",
+      (form) => {
+        if (form === "between") {
+          const lines = scene.elements.filter((e) => e.kind === "line" && !Array.isArray(e.paths)).map((e) => e.id);
+          el.between = { upper: lines[0] || "", lower: lines[1] || { y: 40 } };
+          delete el.boundary;
+        } else {
+          el.boundary = [{ points: [[40, 40], [80, 40], [80, 70], [40, 70], [40, 40]] }];
+          delete el.between;
+        }
+        commitGeometry(); renderPanel();
+      },
+    ));
+    if (isBetween) { wrap.appendChild(renderBetweenEditor(el)); return wrap; }
     el.boundary = Array.isArray(el.boundary) && el.boundary.length ? el.boundary : [{ points: [[40, 40], [80, 40], [80, 70], [40, 70], [40, 40]] }];
     const list = document.createElement("div");
     el.boundary.forEach((piece, i) => {
@@ -780,8 +862,11 @@ function renderPieceEditor(piece, onReplace, allowRef) {
     const lines = scene.elements.filter((e) => e.kind === "line").map((e) => e.id);
     g.appendChild(renderField("ref (line id)", { kind: "enum", options: lines.length ? lines : [""], def: piece.ref }, piece.ref, (v) => { piece.ref = v; commitGeometry(); }));
     g.appendChild(renderField("reverse", { kind: "bool", def: false }, !!piece.reverse, (v) => { piece.reverse = v; commitGeometry(); }));
-    g.appendChild(renderField("tFrom", { kind: "nnum", step: 0.1 }, piece.tFrom ?? null, (v) => { if (v == null) delete piece.tFrom; else piece.tFrom = v; commitGeometry(); }));
-    g.appendChild(renderField("tTo", { kind: "nnum", step: 0.1 }, piece.tTo ?? null, (v) => { if (v == null) delete piece.tTo; else piece.tTo = v; commitGeometry(); }));
+    // x range rather than the referenced path's own parameter: it means
+    // the same thing on a formula and on a point list, and it is the
+    // number anyone actually has in mind ("the axis from 60 to 90").
+    g.appendChild(renderField("xFrom (blank = whole path)", { kind: "nnum", step: 1 }, piece.xFrom ?? null, (v) => { if (v == null) delete piece.xFrom; else piece.xFrom = v; commitGeometry(); }));
+    g.appendChild(renderField("xTo (blank = whole path)", { kind: "nnum", step: 1 }, piece.xTo ?? null, (v) => { if (v == null) delete piece.xTo; else piece.xTo = v; commitGeometry(); }));
   }
   return g;
 }
@@ -790,162 +875,184 @@ function renderPieceEditor(piece, onReplace, allowRef) {
 
 function renderSlotEditor(el, tex, slot) {
   const wrap = document.createElement("div");
-  const title = document.createElement("div");
-  title.className = "pg-fields-title";
-  title.textContent = slot === "brush" ? (el.kind === "point" ? "stamp" : "brush") : slot;
-  wrap.appendChild(title);
   const g = fieldsGrid();
   const s = tex[slot];
   const isFill = slot === "fill";
-  const pat = isFill ? (s?.pattern || { kind: "hatch" }) : null;
-  const wantsStamp = el.kind === "point" || (isFill && C.STAMP_PATTERNS.includes(pat.kind));
-  const names = ["(none)", ...(wantsStamp ? C.STAMP_NAMES : C.BRUSH_NAMES)];
-  g.appendChild(renderField(wantsStamp ? "stamp" : "brush", { kind: "enum", options: names, def: "(none)" }, s?.fn || "(none)", (v) => {
+  // A point element or a points-placing fill pattern needs a brush that's
+  // point-safe (see POINT_SAFE_BRUSHES/isPointSafe) -- everything else can
+  // offer the full brush list. The pattern KIND itself is chosen under
+  // "shape" (renderPatternEditor) -- it decides the spatial arrangement,
+  // not how it's printed -- but this slot still reads it, since which
+  // brushes are even valid here depends on it (a stamp-style pattern needs
+  // a point-safe brush, a stroke-style one doesn't).
+  const patKind = isFill ? (s?.pattern?.kind || "hatch") : null;
+  const needsPointSafe = el.kind === "point" || (isFill && C.STAMP_PATTERNS.includes(patKind));
+  const names = ["(none)", ...(needsPointSafe ? [...C.POINT_SAFE_BRUSHES] : C.BRUSH_NAMES)];
+  g.appendChild(renderField("brush", { kind: "enum", options: names, def: "(none)" }, s?.fn || "(none)", (v) => {
     if (v === "(none)") delete tex[slot];
-    else if (!s || s.fn !== v) tex[slot] = { fn: v, options: {}, bases: {}, ...(isFill ? { pattern: pat } : {}) };
-    C.pruneAbstractions(scene);
+    else if (!s || s.fn !== v) tex[slot] = { fn: v, options: {}, bases: {}, ...(isFill ? { pattern: s?.pattern || { kind: "hatch" } } : {}) };
+    C.pruneGroups(scene);
     saveScene(); rerenderAll();
   }));
-  if (isFill) {
-    g.appendChild(renderField("pattern", { kind: "enum", options: C.PATTERN_KINDS, def: "hatch" }, pat.kind, (kind) => {
-      const next = { kind, ...(C.PATTERN_OPTIONS[kind] ? Object.fromEntries(Object.entries(C.PATTERN_OPTIONS[kind]).map(([k, m]) => [k, m.def])) : {}) };
-      if (kind === "stamps") next.points = [[60, 60], [70, 60]];
-      if (kind === "strokes") next.strokes = [[[40, 40], [80, 80]]];
-      if (kind === "curves") next.curves = [{ x: "40 + t", y: "60 + 5*sin(t/4)", tEnd: 60 }];
-      if (kind === "family") Object.assign(next, { x: "110 + t*cos(u)", y: "110 + t*sin(u)", tEnd: 40, uEnd: 6.28, uStep: 0.5 });
-      if (!s) tex[slot] = { fn: C.STAMP_PATTERNS.includes(kind) ? "blob" : "solid", options: {}, bases: {}, pattern: next };
-      else {
-        s.pattern = next;
-        const needStamp = C.STAMP_PATTERNS.includes(kind);
-        if (needStamp !== C.isStamp(s.fn)) { s.fn = needStamp ? "blob" : "solid"; s.options = {}; s.bases = {}; }
-      }
-      C.pruneAbstractions(scene);
-      saveScene(); rerenderAll();
-    }));
-    if (s) {
-      const spec = C.PATTERN_OPTIONS[pat.kind];
-      if (spec) {
-        // Route through optionField so a pattern value an abstraction also
-        // drives (e.g. a "density" knob targeting hatch's gap) rebases
-        // instead of fighting the slider on the next applyAbstractions().
-        for (const k of Object.keys(spec)) g.appendChild(optionField(k, spec[k], { elementId: el.id, slot, option: k }, s));
-      } else {
-        const { kind, ...rest } = pat;
-        g.appendChild(jsonField(`${kind} spec (JSON)`, rest, (v) => { if (v && typeof v === "object") { s.pattern = { kind, ...v }; saveScene(); scheduleRerun(); } }));
-      }
+  wrap.appendChild(g);
+
+  // The brush dropdown above only picks WHICH brush is used; its own
+  // numeric options (width, nLayers, spacing, ...) get their own
+  // collapsible subsection per level, bucketed by the level S()/B() already
+  // tags each option with in BRUSH_OPTIONS -- stroke (the walk: layers,
+  // arc-length spacing, ...) vs brush (the local deposit: width, height,
+  // local speed, ...). Only shown once a brush is actually selected.
+  if (s) {
+    const spec = C.optionSpecFor(s.fn);
+    const strokeKeys = Object.keys(spec).filter((k) => spec[k].level === "stroke");
+    const brushKeys = Object.keys(spec).filter((k) => spec[k].level === "brush");
+    if (strokeKeys.length) {
+      wrap.appendChild(renderOptionSubsection(`${el.id}:${slot}:stroke`, "stroke",
+        strokeKeys.map((k) => optionField(k, spec[k], { level: "stroke", elementId: el.id, slot, option: k }, s))));
+    }
+    if (brushKeys.length) {
+      wrap.appendChild(renderOptionSubsection(`${el.id}:${slot}:brush`, "brush",
+        brushKeys.map((k) => optionField(k, spec[k], { level: "brush", elementId: el.id, slot, option: k }, s))));
     }
   }
-  wrap.appendChild(g);
   return wrap;
 }
 
-// --- abstractions ---
+// Fill pattern selection lives under "shape", not inside the fill slot's
+// own collapsible: which spatial arrangement fills a region (hatch, grid,
+// diamond, ...) is a geometric decision about what the shape looks like,
+// same as the boundary itself -- the fill slot's own stroke/brush
+// breakdown (renderSlotEditor) is purely about how that arrangement gets
+// printed, a separate concern. Region elements only; line/point elements
+// have no fill slot.
+function renderPatternEditor(el, tex) {
+  const wrap = document.createElement("div");
+  wrap.appendChild(subLabel("pattern"));
+  const s = tex.fill;
+  const pat = s?.pattern || { kind: "hatch" };
+  const g = fieldsGrid();
+  g.appendChild(renderField("pattern", { kind: "enum", options: C.PATTERN_KINDS, def: "hatch" }, pat.kind, (kind) => {
+    const next = { kind, ...(C.PATTERN_OPTIONS[kind] ? Object.fromEntries(Object.entries(C.PATTERN_OPTIONS[kind]).map(([k, m]) => [k, m.def])) : {}) };
+    if (kind === "stamps") next.points = [[60, 60], [70, 60]];
+    if (kind === "strokes") next.strokes = [[[40, 40], [80, 80]]];
+    if (kind === "curves") next.curves = [{ x: "40 + t", y: "60 + 5*sin(t/4)", tEnd: 60 }];
+    if (kind === "family") Object.assign(next, { x: "110 + t*cos(u)", y: "110 + t*sin(u)", tEnd: 40, uEnd: 6.28, uStep: 0.5 });
+    if (!s) tex.fill = { fn: C.STAMP_PATTERNS.includes(kind) ? "blob" : "solid", options: {}, bases: {}, pattern: next };
+    else {
+      s.pattern = next;
+      const needStamp = C.STAMP_PATTERNS.includes(kind);
+      if (needStamp !== C.isPointSafe(s.fn)) { s.fn = needStamp ? "blob" : "solid"; s.options = {}; s.bases = {}; }
+    }
+    C.pruneGroups(scene);
+    saveScene(); rerenderAll();
+  }));
+  wrap.appendChild(g);
 
-function optKey(t) { return `${t.elementId} ${t.slot} ${t.option}`; }
+  if (s) {
+    // level "pattern" explicitly: a fill's brush and its pattern are
+    // separately-named spaces, and some names exist in both (a
+    // blobDotted fill and a hatch pattern both have "gap").
+    const patSpec = C.PATTERN_OPTIONS[pat.kind];
+    if (patSpec) {
+      const fields = Object.keys(patSpec).map((k) => optionField(k, patSpec[k], { level: "pattern", elementId: el.id, slot: "fill", option: k }, s));
+      wrap.appendChild(renderOptionSubsection(`${el.id}:pattern`, "options", fields));
+    } else {
+      const { kind, ...rest } = pat;
+      const patCard = collapsibleCard("options", "", `${el.id}:pattern`);
+      patCard.appendChild(jsonField(`${kind} spec (JSON)`, rest, (v) => {
+        if (v && typeof v === "object") { s.pattern = { kind, ...v }; saveScene(); renderPanel(); scheduleRerun(); }
+      }));
+      wrap.appendChild(patCard);
+    }
+  }
+  return wrap;
+}
 
-function renderAbstractionCard(a) {
-  const c = card(a.name, a.id);
+// --- surfaced parameter groups ---
+
+// A group is a heading plus whichever real parameters the ui stage judged
+// relevant to this turn. Each control edits its own option directly: no
+// knob, no weights, nothing between the number shown and the number
+// printed.
+// `forElementId`: when this card is being rendered nested inside that
+// element's own card (renderElementGeneratedUi), each member's label drops
+// the redundant "element name" part -- the enclosing card already says
+// which element this is. Omitted for the top-level rendering, where a
+// group can span several elements and each row needs to say which one.
+function renderGroupCard(group, forElementId = null) {
+  const c = card(group.title, "");
   const del = document.createElement("span");
   del.className = "pg-call-del";
   del.textContent = "remove";
-  del.onclick = () => { scene.abstractions = scene.abstractions.filter((x) => x !== a); saveScene(); rerenderAll(); };
+  // Match by id, not by reference: a per-element slice (groupsForElement)
+  // hands this a freshly filtered copy, never the object actually sitting
+  // in scene.groups -- removing by identity would silently no-op there.
+  del.onclick = () => { scene.groups = scene.groups.filter((x) => x.id !== group.id); saveScene(); rerenderAll(); };
   c.querySelector(".pg-call-head").appendChild(del);
-  if (a.description) { const p = document.createElement("div"); p.className = "pg-desc"; p.textContent = a.description; c.appendChild(p); }
-
-  const row = document.createElement("label");
-  row.className = "pg-field pg-field-wide pg-slider";
-  const val = document.createElement("span");
-  val.textContent = Number(a.value).toFixed(2);
-  const inp = document.createElement("input");
-  inp.type = "range"; inp.min = 0; inp.max = 1; inp.step = 0.01; inp.value = a.value;
-  inp.oninput = () => {
-    a.value = parseFloat(inp.value);
-    val.textContent = a.value.toFixed(2);
-    C.applyAbstractions(scene);
-    refreshDrivenInputs();
-    saveScene();
-    scheduleRerun();
-  };
-  row.appendChild(val);
-  row.appendChild(inp);
-  c.appendChild(row);
-
+  if (group.description) {
+    const p = document.createElement("div");
+    p.className = "pg-desc";
+    p.textContent = group.description;
+    c.appendChild(p);
+  }
   const g = fieldsGrid();
-  const weights = C.normalizedWeights(a.targets);
-  a.targets.forEach((t, i) => {
-    const s = scene.textures[t.elementId]?.[t.slot];
-    if (!s) return;
-    const el = scene.elements.find((e) => e.id === t.elementId);
-    // A fill's option and pattern spaces are named independently (see
-    // resolveTarget()) -- look in whichever one this target actually
-    // resolves to, so a knob driving e.g. hatch's own "gap" still renders.
-    const target = C.resolveTarget(scene, t.elementId, t.slot, t.option);
-    if (!target) return;
-    const label = `${el?.label || t.elementId} · ${t.slot} · ${t.option}  (${Number(t.direction) < 0 ? "−" : "+"}${(weights[i] * 100).toFixed(0)}%)`;
-    g.appendChild(optionField(label, target.spec, t, s));
-  });
+  let shown = 0;
+  for (const m of group.members || []) {
+    const f = memberField(m, forElementId);
+    if (f) { g.appendChild(f); shown++; }
+  }
   c.appendChild(g);
+  if (!shown) c.appendChild(note("these controls no longer apply to the current textures"));
   return c;
 }
 
-// An option input bound to a scene slot -- the value may live on the
-// slot's own brush/stamp options, or (fill only) on its pattern's own
-// numeric fields (hatch's gap, grid's dx/dy, ...) -- see resolveTarget().
-// A manual edit of a driven option rebases it so the sliders stay put.
+// One control for one group member. `control.min`/`max` narrow the input
+// to what suits this scene; the option's own range still bounds it.
+function memberField(m, forElementId = null) {
+  const loc = C.memberLocation(scene, m);
+  if (!loc) return null;
+  const r = C.resolveMember(scene, m);
+  const spec = { ...r.spec };
+
+  const el = m.elementId ? scene.elements.find((e) => e.id === m.elementId) : null;
+  const dropElementName = forElementId != null && m.elementId === forElementId;
+  const where = m.level === "graphic" ? "whole graphic" : (dropElementName ? m.slot : `${el?.label || m.elementId} · ${m.slot}`);
+  const label = `${m.label || m.option} — ${where}`;
+
+  // The graphic's scale reads as a percentage everywhere else in the
+  // panel, so it does here too.
+  if (m.level === "graphic" && m.option === "scale") {
+    const f = renderField(label, { kind: "num", step: 5, min: (spec.min ?? 0.1) * 100, max: (spec.max ?? 4) * 100 },
+      +(scene.transform.scale * 100).toFixed(1), (v) => {
+        if (v != null && v > 0) scene.transform.scale = v / 100;
+        saveScene(); renderPanel(); scheduleRerun();
+      });
+    return f;
+  }
+
+  const f = renderField(label, spec, C.memberValue(scene, m), (v) => {
+    C.setMemberValue(scene, m, v);
+    saveScene(); renderPanel(); scheduleRerun();
+  });
+  f.title = C.OPTION_DESC[m.option] || "";
+  return f;
+}
+
+// An option input bound to one texture slot, for a slot's full stroke/
+// brush/pattern breakdown. The value lives either on the slot's own
+// brush/stamp options or (fill only) on its pattern's own fields.
 function optionField(label, spec, t, s) {
-  const loc = () => C.targetLocation(scene, t.elementId, t.slot, t.option) || "options";
+  const loc = () => C.memberLocation(scene, t) || "options";
   const bagOf = (l) => (l === "pattern" ? s.pattern : s.options) || {};
   const f = renderField(label, spec, bagOf(loc())[t.option], (v) => {
     const l = loc();
     const bag = l === "pattern" ? (s.pattern = s.pattern || {}) : (s.options = s.options || {});
-    const bases = l === "pattern" ? s.patternBases : s.bases;
-    if (v === null || v === undefined || v === "") { delete bag[t.option]; if (bases) delete bases[t.option]; }
-    else {
-      bag[t.option] = v;
-      if (typeof v === "number") { C.rebaseOption(scene, t.elementId, t.slot, t.option, v); C.applyAbstractions(scene); refreshDrivenInputs(); }
-    }
-    saveScene(); scheduleRerun();
+    if (v === null || v === undefined || v === "") delete bag[t.option];
+    else bag[t.option] = v;
+    saveScene(); renderPanel(); scheduleRerun();
   });
-  const input = f.querySelector("input,select");
-  if (input) input.dataset.opt = optKey(t);
   if (C.OPTION_DESC[t.option]) f.title = C.OPTION_DESC[t.option];
   return f;
-}
-
-function refreshDrivenInputs() {
-  document.querySelectorAll("[data-opt]").forEach((inp) => {
-    const [elementId, slot, option] = inp.dataset.opt.split(" ");
-    const s = scene.textures[elementId]?.[slot];
-    if (!s) return;
-    const loc = C.targetLocation(scene, elementId, slot, option);
-    const bag = (loc === "pattern" ? s.pattern : s.options) || {};
-    const v = bag[option];
-    if (inp.type === "checkbox") inp.checked = !!v;
-    else if (document.activeElement !== inp) inp.value = v ?? "";
-  });
-}
-
-function renderOtherOptions() {
-  const wrap = document.createElement("div");
-  let any = false;
-  for (const el of scene.elements) {
-    const tex = scene.textures[el.id] || {};
-    for (const slot of C.slotsFor(el.kind)) {
-      const s = tex[slot];
-      if (!s?.fn) continue;
-      const spec = C.optionSpecFor(s.fn);
-      const undriven = Object.keys(spec).filter((k) => !C.driversOf(scene, el.id, slot, k).length);
-      if (!undriven.length) continue;
-      any = true;
-      const c = card(`${el.label || el.id} · ${slot}`, s.fn);
-      const g = fieldsGrid();
-      for (const k of undriven) g.appendChild(optionField(k, spec[k], { elementId: el.id, slot, option: k }, s));
-      c.appendChild(g);
-      wrap.appendChild(c);
-    }
-  }
-  if (!any) wrap.appendChild(note("no textures yet"));
-  return wrap;
 }
 
 // --- fields ---
@@ -1032,7 +1139,7 @@ function newConversation() {
   if (!confirm("Clear the conversation, the scene, and the generated G-code?")) return;
   scene = C.defaultScene();
   scene.config.material = $("#pg-material").value;
-  pending = null;
+  lastTurn = null;
   saveScene();
   renderTranscript();
   rerenderAll();
@@ -1045,8 +1152,7 @@ function initParametricEditor() {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); onSend(); }
   });
   $("#pg-messages").addEventListener("click", (e) => {
-    const r = e.target.closest(".pg-retry");
-    if (r) onRetry(r.dataset.kind);
+    if (e.target.closest(".pg-retry")) onRetry();
   });
   $("#pg-openai-key").addEventListener("change", () => saveApiKeyFrom("openai", "pg-openai-key"));
   $("#pg-anthropic-key").addEventListener("change", () => saveApiKeyFrom("anthropic", "pg-anthropic-key"));

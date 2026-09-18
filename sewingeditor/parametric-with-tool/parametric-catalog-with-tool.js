@@ -4,18 +4,20 @@
 // The page holds a SCENE (see defaultScene()): elements with ids (a line
 // path, a closed region boundary, or a point), a texture per element slot
 // (brush + options, plus a fill pattern for regions), a global transform
-// (scale + origin) and a list of parameter ABSTRACTIONS (high-level knobs
-// that drive several low-level options by weight). Four LLM stages write
-// into that scene; everything below the LLMs is deterministic:
+// (scale + origin) and a list of parameter GROUPS -- an ad hoc selection
+// of real options the ui stage judged relevant to the current turn, each
+// with its own short label, no weighting or transform of anyone's values.
+// Four LLM stages write into that scene; everything below the LLMs is
+// deterministic:
 //
 //   resolveScene()   pieces -> vertex lists in graphic space, closure and
 //                    simple-polygon checks, natural bbox
 //   compileScene()   transform, pattern -> strokes/stamps clipped to the
-//                    region, one JOB per brush/stamp call, hard/warn checks,
+//                    region, one JOB per brush call, hard/warn checks,
 //                    geometry REPORT (the model verifies against this)
 //   runJobs()        jobs -> G-code via texture_functions-with-tool.js's
 //                    BRUSHES / STAMPS, bounds + retraction scan, digest
-//   applyAbstractions() / rebaseOption()   the abstraction rule
+//   resolveMember()                         parameter groups
 //   validateStageOutput() / merge*()       stage JSON -> scene
 //
 // A model-supplied formula string is NEVER eval()'d or passed to
@@ -26,91 +28,206 @@
 
 import * as TF from "./docs/texture_functions-with-tool.js";
 
-export const SCENE_VERSION = 2;
+// 3: parameter "abstractions" (weighted knobs) became "groups" (a heading
+// over the parameters that affect one attribute). An older stored scene is
+// discarded by normalizeScene rather than migrated -- the knob values had
+// no meaning under the new model.
+export const SCENE_VERSION = 3;
 
-// Runtime limits: only what has a physical consequence. Perceptual limits
-// ("reads as scattered dots") live in the prompt docs and the option
-// min/max below, not here.
-export const CONSTRAINTS = {
-  bed: 220,
-  safeMin: 15, safeMax: 205,   // safe area for every printed coordinate
-  closureSnapMm: 0.5,          // boundary end within this of its start snaps closed
-  minDomeDiameter: 0.8,        // hard: blob / hairy-root / disc / 2*dotRadius
-  minDiscHeight: 0.4,          // hard
-  minLayers: 2,                // hard: relief floor 0.4mm
-  zGapFloor: 0.25,             // hard
-  minSolidSheetGap: 0.35,      // hard: hatch gap with the solid brush
-  minBeadWidth: 0.4,           // warn
-  blobDottedGapOverDiameter: 1.0,  // warn: gap >= diameter + this
-  hairyDottedGapOverRoot: 2.0,     // warn: gap >= rootDiameter + this
-  minDottedGapOverDot: 1.0,        // warn: gap >= 2*dotRadius + this
-  minHairSpacing: 2.5,             // warn
-  minHairyFillRowGap: 4.0,         // warn: hatch gap with the hairy brush
-  retractCyclesWarn: 250,
-  retractCyclesHard: 2000,
+// ------------------------------------------------------------ constraints --
+//
+// Three groups, kept separate because they answer different questions and
+// have different provenance:
+//
+//   PRINT_LIMITS     physical -- what the printer and the filament can do.
+//                    Violating one damages the print or the machine.
+//   GEOMETRY_LIMITS  the coordinate system and shape rules the compiler
+//                    itself needs (bed size, safe area, closure snap).
+//   LEGIBILITY_GUIDE tactile perception -- past these a "line" stops
+//                    reading as a line and a "fill" as a filled area.
+//                    NONE of these have been tested on hardware, so they
+//                    are NOT enforced: they reach the model as prompt
+//                    guidance only. Flip `enforced` once the numbers are
+//                    confirmed and they become warnings in the rule checks.
+//
+// Every PRINT_LIMITS value is still a PLACEHOLDER guessed from the library
+// defaults and the TPU cautions -- docs/PARAMETER_CONSTRAINTS.md is the
+// fill-in form generated from these objects. Flip a row's `status` to
+// "confirmed" here once a print confirms it; the form and the prompt text
+// both follow automatically.
+
+const hard = (value, applies, note = "", extra = {}) => ({ value, kind: "hard", status: "placeholder", applies, note, ...extra });
+const warn = (value, applies, note = "", extra = {}) => ({ value, kind: "warn", status: "placeholder", applies, note, ...extra });
+
+export const PRINT_LIMITS = {
+  zGapFloor: hard(0.25, "variableThickness zGap", "user-validated; lower prints flat"),
+  minSolidSheetGap: hard(0.35, "hatch gap with the solid brush, and diamond fillGap", "below this is severe over-extrusion"),
+  retractCyclesHard: hard(2000, "retraction cycles in one job", "TPU drive-gear damage; deliberately high -- a diamond fill alone does hundreds of small in-place retracts"),
+  netExtrusionTrip: hard(-20, "running sum of E deltas across the job", "a dip this far negative is a retraction-math bug in a brush, not a real move", { internal: true }),
+  minBeadWidth: warn(0.4, "width / beadWidth / thinWidth", "about one nozzle width"),
+  blobDottedGapOverDiameter: warn(1.0, "blobDotted gap, required as gap >= diameter + this", "closer and adjacent domes fuse into a ridge"),
+  hairyDottedGapOverRoot: warn(2.0, "hairyDotted gap, required as gap >= rootDiameter + this"),
+  minDottedGapOverDot: warn(1.0, "dotted gap, required as gap >= 2*dotRadius + this"),
+  minHairSpacing: warn(2.5, "hairy strand spacing", "closer and strands fuse"),
+  minHairyFillRowGap: warn(4.0, "hatch gap with the hairy brush", "closer and the hair rows fuse"),
+  retractCyclesWarn: warn(250, "retraction cycles in one job", "TPU can flat-spot at the drive gear; the count is surfaced to the user"),
 };
+
+export const GEOMETRY_LIMITS = {
+  bed: { value: 220, applies: "bed size in mm, both axes", note: "absolute bound on any emitted coordinate" },
+  safeMin: { value: 15, applies: "minimum X/Y for every printed coordinate", note: "margin the prime line and the bed clips need" },
+  safeMax: { value: 205, applies: "maximum X/Y for every printed coordinate", note: "" },
+  closureSnapMm: { value: 0.5, applies: "a region boundary's end vs. its start", note: "within this snaps closed; a larger gap is closed with a straight edge and warned about" },
+};
+
+// Not enforced -- see the header comment. `enforced` is flipped by tests
+// (and, once the numbers are confirmed, here) to route these into the rule
+// checks as warnings.
+export const LEGIBILITY_GUIDE = {
+  enforced: false,
+  status: "untested",
+  rules: {
+    minDomeDiameter: { value: 0.8, applies: "blob / directionalBlob dome diameter, hairy root diameter, disc diameter, 2*dotRadius", note: "below this the dome does not clear the 0.4mm relief floor -- may be hard to feel" },
+    minDiscHeight: { value: 0.4, applies: "disc height", note: "two 0.2mm layers -- thinner relief may be hard to feel" },
+    minLayers: { value: 2, applies: "any line brush's nLayers", note: "0.4mm relief floor -- thinner relief may be hard to feel" },
+    maxDottedGapOverDiameter: { value: 4.0, applies: "dotted / blobDotted / directionalBlobDotted / hairyDotted gap, as a multiple of the dot diameter", note: "past this it reads as scattered dots, not a line" },
+    maxDashGapOverSegLen: { value: 3.0, applies: "dashed gapLen, as a multiple of segLen", note: "past this it reads as isolated dashes" },
+    minDashLen: { value: 2.0, applies: "dashed segLen", note: "shorter dashes are indistinct by touch" },
+    minDashGap: { value: 2.0, applies: "dashed gapLen", note: "" },
+    minSegmentLen: { value: 3.0, applies: "segmented thinLen / fatLen", note: "" },
+    maxHairSpacing: { value: 12.0, applies: "hairy strand spacing", note: "past this the strands stop reading as one hairy line" },
+    maxShadeFillGap: { value: 8.0, applies: "hatch row gap with a continuous brush", note: "past this the area no longer reads as shaded, just as spaced lines" },
+    maxDottedFillRowGap: { value: 12.0, applies: "hatch row gap with a dotted or hairy brush", note: "past this it reads as separate rows, not a filled patch" },
+    minDiamondDiag: { value: 4.0, applies: "diamond diag", note: "smaller cells blur together" },
+  },
+};
+
+// Flat numeric view -- what every check below (and the page's "fit to safe
+// area" button, via C.CONSTRAINTS) actually reads, so a number lives in
+// exactly one place.
+export const CONSTRAINTS = Object.fromEntries([
+  ...Object.entries(PRINT_LIMITS).map(([k, r]) => [k, r.value]),
+  ...Object.entries(GEOMETRY_LIMITS).map(([k, r]) => [k, r.value]),
+]);
+
+const LEG = (name) => LEGIBILITY_GUIDE.rules[name].value;
+
+/** The enforced-limits section of a stage prompt, generated from
+ * PRINT_LIMITS + GEOMETRY_LIMITS so the prompt can never drift from what
+ * the code checks (it used to be hand-copied into reference-brushes.md).
+ * `internal` rows are about library bugs, not model choices -- omitted. */
+export function limitsText() {
+  const rows = (kind) => Object.values(PRINT_LIMITS)
+    .filter((r) => r.kind === kind && !r.internal)
+    .map((r) => `  ${r.applies}: ${r.value}${r.note ? ` -- ${r.note}` : ""}`);
+  return [
+    "LIMITS THE PAGE ENFORCES (physical; every number is a placeholder pending hardware confirmation)",
+    "",
+    "Hard -- the page refuses to mark the job safe:",
+    ...rows("hard"),
+    `  every printed coordinate: inside X/Y ${CONSTRAINTS.safeMin}-${CONSTRAINTS.safeMax}`,
+    "  a region boundary: simple (never self-crossing) and closed",
+    "  a path: not too steep to print at any sampling resolution",
+    "",
+    "Warned -- surfaced to the user, not blocking:",
+    ...rows("warn"),
+    `  a boundary whose ends are more than ${CONSTRAINTS.closureSnapMm}mm apart: closed with a straight edge`,
+    "  two elements' fills overlapping, or a stroke printed over another element's fill",
+  ].join("\n");
+}
+
+/** The perceptual-guidance section. Explicitly marked as untested and
+ * unenforced so the model treats it as judgement, not as a rule it can
+ * point at. */
+export function legibilityText() {
+  return [
+    "TACTILE LEGIBILITY (guidance, NOT enforced -- these numbers are not yet hardware-tested)",
+    "",
+    ...Object.values(LEGIBILITY_GUIDE.rules).map((r) => `  ${r.applies}: ${r.value}${r.note ? ` -- ${r.note}` : ""}`),
+    "",
+    "Pick textures that feel DISTINCT by touch when they encode different",
+    "meanings (a ridge vs. dots vs. hair), not merely different to look at.",
+  ].join("\n");
+}
 
 // ---------------------------------------------------------------- options --
 
 // kind: "num" | "int" | "nnum" (nullable number) | "enum". min/max are the
-// slider spans the abstraction rule uses and the input clamps.
+// range a value must sit inside, and the span the UI input uses. `level`
+// (added by the S()/B() wrappers below) says which half of the
+// Shape->Stroke->Brush split an option belongs to: "stroke" (the walk --
+// layer/pass count, arc-length spacing, priming/retract brackets, inter-
+// stop travel speed) or "brush" (the local deposit -- width, per-call
+// height, local speed, the local mechanism's own timing). Assigned by
+// hand against texture_functions-with-tool.js's actual Stroke/Brush split,
+// not derived automatically.
 const N = (def, min, max, step) => ({ kind: "num", def, min, max, step: step ?? 0.1 });
 const I = (def, min, max) => ({ kind: "int", def, min, max, step: 1 });
 const NN = (def) => ({ kind: "nnum", def });
 const EN = (def, options) => ({ kind: "enum", def, options });
+const S = (spec) => ({ ...spec, level: "stroke" });
+const B = (spec) => ({ ...spec, level: "brush" });
 
+// Always brush-level in every brush that uses them: each is the local
+// dome/hair mechanism's own volume, timing or anti-string behavior, never
+// something a Stroke's walk decides.
 const BLOB_BUILD_OPTS = {
-  baseZ: N(0.2, 0.1, 0.6), buildSteps: I(6, 1, 20), taperFactor: N(0.7, 0, 1),
-  extrudeSpeed: N(120, 20, 600, 5), dwellMs: I(2000, 0, 8000),
-  extrusionMultiplier: N(1.3, 0.5, 3), retractMm: N(4.0, 0, 8),
-  postRetractDwellMs: I(2000, 0, 8000), baseExtraMm: N(0.3, 0, 2),
-  baseDwellMs: I(1000, 0, 5000),
+  baseZ: B(N(0.2, 0.1, 0.6)), buildSteps: B(I(6, 1, 20)), taperFactor: B(N(0.7, 0, 1)),
+  extrudeSpeed: B(N(120, 20, 600, 5)), dwellMs: B(I(2000, 0, 8000)),
+  extrusionMultiplier: B(N(1.3, 0.5, 3)), retractMm: B(N(4.0, 0, 8)),
+  postRetractDwellMs: B(I(2000, 0, 8000)), baseExtraMm: B(N(0.3, 0, 2)),
+  baseDwellMs: B(I(1000, 0, 5000)),
 };
 const ORBIT_OPTS = {
-  orbitRadius: NN(null), orbitPts: I(16, 3, 48), orbitSpeed: N(600, 100, 2000, 10), orbitLoops: I(3, 0, 10),
+  orbitRadius: B(NN(null)), orbitPts: B(I(16, 3, 48)), orbitSpeed: B(N(600, 100, 2000, 10)), orbitLoops: B(I(3, 0, 10)),
 };
 const HAIR_OPTS = {
-  hairLength: N(3.0, 1, 30), hairThickness: NN(null),
-  hairDirection: EN("top", ["top", "right", "left", "bottom"]),
-  hairAzimuthDeg: NN(null), hairElevationDeg: NN(null), beadFlowMult: N(3.5, 1, 6),
-  pullExtrudeSpeed: N(150, 30, 600, 5), stringMm: N(2.0, 0, 10), overtravelMm: N(2.0, 0, 10),
+  hairLength: B(N(3.0, 1, 30)), hairThickness: B(NN(null)),
+  hairDirection: B(EN("top", ["top", "right", "left", "bottom"])),
+  hairAzimuthDeg: B(NN(null)), hairElevationDeg: B(NN(null)), beadFlowMult: B(N(3.5, 1, 6)),
+  pullExtrudeSpeed: B(N(150, 30, 600, 5)), stringMm: B(N(2.0, 0, 10)), overtravelMm: B(N(2.0, 0, 10)),
 };
 
-// Line brushes: what is deposited ALONG a point list.
+// Every brush -- what is deposited, and how it's walked. `blob`, `disc`,
+// `directionalBlob` and `hairyDot` (formerly a separate STAMP_OPTIONS
+// category) are POINT_SAFE_BRUSHES below: brush-only, since a genuine
+// single-point call has no Stroke wrapper around it.
 export const BRUSH_OPTIONS = {
-  solid: { width: N(0.5, 0.3, 3), nLayers: I(2, 1, 10), speed: N(400, 50, 1500, 10) },
-  dashed: { segLen: N(8, 1, 60), gapLen: N(4, 1, 60), width: N(0.5, 0.3, 3), nLayers: I(2, 1, 10), speed: N(400, 50, 1500, 10) },
-  dotted: { gap: N(10, 1, 60), dotRadius: N(0.8, 0.3, 3), nLayers: I(2, 1, 10), speed: N(250, 50, 1000, 10) },
-  blobDotted: { gap: N(10, 1, 60), diameter: N(1.6, 0.6, 8), ...BLOB_BUILD_OPTS, ...ORBIT_OPTS },
+  solid: { width: B(N(0.5, 0.3, 3)), nLayers: S(I(2, 1, 10)), speed: B(N(400, 50, 1500, 10)) },
+  dashed: {
+    segLen: S(N(8, 1, 60)), gapLen: S(N(4, 1, 60)), width: B(N(0.5, 0.3, 3)),
+    nLayers: S(I(2, 1, 10)), speed: B(N(400, 50, 1500, 10)),
+  },
+  dotted: { gap: S(N(10, 1, 60)), dotRadius: B(N(0.8, 0.3, 3)), nLayers: S(I(2, 1, 10)), speed: B(N(250, 50, 1000, 10)) },
+  blobDotted: { gap: S(N(10, 1, 60)), diameter: B(N(1.6, 0.6, 8)), ...BLOB_BUILD_OPTS, ...ORBIT_OPTS },
   directionalBlobDotted: {
-    gap: NN(null), diameter: N(2.0, 0.6, 8), azimuthDeg: N(0, -180, 180, 1),
-    dragSpeed: N(600, 100, 2000, 10), stampOrder: EN("auto", ["auto", "forward", "reverse"]), ...BLOB_BUILD_OPTS,
+    gap: S(NN(null)), diameter: B(N(2.0, 0.6, 8)), azimuthDeg: B(N(0, -180, 180, 1)),
+    dragSpeed: B(N(600, 100, 2000, 10)), stampOrder: B(EN("auto", ["auto", "forward", "reverse"])), ...BLOB_BUILD_OPTS,
   },
   hairy: {
-    spacing: N(5.0, 1, 30), esegmentMm: N(1.2, 0.2, 4), retractMm: N(1.3, 0, 6), dwellMs: I(400, 0, 3000),
-    smallLift: N(0.2, 0, 2), bigLift: N(4.0, 1, 10), baseZ: N(0.3, 0.1, 1), speed: N(200, 50, 1000, 10),
+    spacing: S(N(5.0, 1, 30)), esegmentMm: B(N(1.2, 0.2, 4)), retractMm: B(N(1.3, 0, 6)), dwellMs: B(I(400, 0, 3000)),
+    smallLift: B(N(0.2, 0, 2)), bigLift: B(N(4.0, 1, 10)), baseZ: B(N(0.3, 0.1, 1)), speed: S(N(200, 50, 1000, 10)),
   },
   hairyDotted: {
-    gap: N(10, 1, 60), rootDiameter: N(2.0, 0.6, 8), ...HAIR_OPTS,
-    stampOrder: EN("auto", ["auto", "forward", "reverse"]), ...BLOB_BUILD_OPTS,
+    gap: S(N(10, 1, 60)), rootDiameter: B(N(2.0, 0.6, 8)), ...HAIR_OPTS,
+    stampOrder: B(EN("auto", ["auto", "forward", "reverse"])), ...BLOB_BUILD_OPTS,
   },
   segmented: {
-    thinLen: N(8, 1, 40), thinWidth: N(0.8, 0.3, 3), thinHeight: N(0.2, 0.1, 0.6), thinSpeed: N(130, 30, 600, 5),
-    fatLen: N(4, 1, 40), fatWidth: N(1.6, 0.3, 4), fatHeight: N(0.3, 0.1, 0.8), fatSpeed: N(60, 20, 400, 5),
-    flowMult: N(1.4, 0.5, 3), segDwellMs: I(250, 0, 2000),
+    thinLen: S(N(8, 1, 40)), thinWidth: B(N(0.8, 0.3, 3)), thinHeight: B(N(0.2, 0.1, 0.6)), thinSpeed: B(N(130, 30, 600, 5)),
+    fatLen: S(N(4, 1, 40)), fatWidth: B(N(1.6, 0.3, 4)), fatHeight: B(N(0.3, 0.1, 0.8)), fatSpeed: B(N(60, 20, 400, 5)),
+    flowMult: B(N(1.4, 0.5, 3)), segDwellMs: S(I(250, 0, 2000)),
   },
   variableThickness: {
-    hMin: N(0.16, 0.1, 1), hMax: N(0.9, 0.2, 2), wavelength: N(8.0, 2, 40),
-    beadWidth: N(0.8, 0.3, 3), zGap: N(0.25, 0.25, 1), speed: N(25, 10, 300, 5),
+    hMin: S(N(0.16, 0.1, 1)), hMax: S(N(0.9, 0.2, 2)), wavelength: S(N(8.0, 2, 40)),
+    beadWidth: B(N(0.8, 0.3, 3)), zGap: S(N(0.25, 0.25, 1)), speed: B(N(25, 10, 300, 5)),
   },
-};
-
-// Stamps: what is deposited AT a point.
-export const STAMP_OPTIONS = {
-  blob: { diameter: N(1.6, 0.6, 8), ...BLOB_BUILD_OPTS, ...ORBIT_OPTS },
-  disc: { diameter: N(1.6, 0.6, 8), height: N(0.4, 0.4, 3, 0.2), speed: N(250, 50, 1000, 10) },
-  directionalBlob: { diameter: N(2.0, 0.6, 8), azimuthDeg: N(0, -180, 180, 1), dragSpeed: N(600, 100, 2000, 10), ...BLOB_BUILD_OPTS },
-  hairyDot: { rootDiameter: N(2.0, 0.6, 8), ...HAIR_OPTS, ...BLOB_BUILD_OPTS },
+  // Formerly STAMP_OPTIONS -- merged in (no key collisions). All
+  // brush-level: called as a genuine single point, there's no Stroke
+  // wrapper deciding a walk.
+  blob: { diameter: B(N(1.6, 0.6, 8)), ...BLOB_BUILD_OPTS, ...ORBIT_OPTS },
+  disc: { diameter: B(N(1.6, 0.6, 8)), height: B(N(0.4, 0.4, 3, 0.2)), speed: B(N(250, 50, 1000, 10)) },
+  directionalBlob: { diameter: B(N(2.0, 0.6, 8)), azimuthDeg: B(N(0, -180, 180, 1)), dragSpeed: B(N(600, 100, 2000, 10)), ...BLOB_BUILD_OPTS },
+  hairyDot: { rootDiameter: B(N(2.0, 0.6, 8)), ...HAIR_OPTS, ...BLOB_BUILD_OPTS },
 };
 
 // Built-in fill patterns with editable numeric specs. The free-form kinds
@@ -122,9 +239,18 @@ export const PATTERN_OPTIONS = {
   diamond: { diag: N(8.0, 2, 30), fillGap: N(0.6, 0.35, 3) },
 };
 export const PATTERN_KINDS = ["hatch", "grid", "diamond", "stamps", "strokes", "curves", "family"];
-export const STAMP_PATTERNS = ["grid", "stamps"];           // these need a stamp fn
+export const STAMP_PATTERNS = ["grid", "stamps"];      // these place points, not strokes
 export const BRUSH_NAMES = Object.keys(BRUSH_OPTIONS);
-export const STAMP_NAMES = Object.keys(STAMP_OPTIONS);
+// Brushes that produce a real deposit when called at a single point (no
+// Stroke walk needed) -- verified against texture_functions-with-tool.js:
+// brushSolid/brushDashed/brushSegmented/brushVariableThickness/brushHairy
+// all need pts.length >= 2 to emit anything (their inner walk loop never
+// runs otherwise); these eight have their own size parameter independent
+// of path length and degrade cleanly to one call.
+export const POINT_SAFE_BRUSHES = new Set([
+  "blob", "disc", "directionalBlob", "hairyDot",
+  "dotted", "blobDotted", "directionalBlobDotted", "hairyDotted",
+]);
 
 // One-line semantic descriptor per option name (shared names share a
 // meaning) -- what it does physically and which way is "more". Sent to the
@@ -181,10 +307,15 @@ export const OPTION_DESC = {
 };
 
 export function optionSpecFor(fn) {
-  return BRUSH_OPTIONS[fn] || STAMP_OPTIONS[fn] || {};
+  return BRUSH_OPTIONS[fn] || {};
 }
 export function isBrush(fn) { return fn in BRUSH_OPTIONS; }
-export function isStamp(fn) { return fn in STAMP_OPTIONS; }
+export function isPointSafe(fn) { return POINT_SAFE_BRUSHES.has(fn); }
+// A recognized brush that can actually walk a multi-point path. The four
+// former stamps (blob/disc/directionalBlob/hairyDot) are point-safe but
+// NOT this -- their G-code function only ever takes one (cx, cy); handed
+// a real path they'd silently draw at just its first point, not walk it.
+export function isStrokeCapable(fn) { return isBrush(fn) && !(fn in TF.STAMPS); }
 
 // ---------------------------------------------------------- safe expression --
 
@@ -453,7 +584,7 @@ export function defaultScene() {
     transform: { scale: 1.0, origin: null },
     elements: [],
     textures: {},
-    abstractions: [],
+    groups: [],
     messages: [],
     lastReport: null,
   };
@@ -468,7 +599,7 @@ export function normalizeScene(raw) {
   s.transform = { scale: Number(raw.transform?.scale) || 1.0, origin: Array.isArray(raw.transform?.origin) ? raw.transform.origin : null };
   s.elements = Array.isArray(raw.elements) ? raw.elements : [];
   s.textures = raw.textures && typeof raw.textures === "object" ? raw.textures : {};
-  s.abstractions = Array.isArray(raw.abstractions) ? raw.abstractions : [];
+  s.groups = Array.isArray(raw.groups) ? raw.groups : [];
   s.messages = Array.isArray(raw.messages) ? raw.messages : [];
   s.lastReport = raw.lastReport || null;
   return s;
@@ -476,7 +607,7 @@ export function normalizeScene(raw) {
 
 export function nextId(scene, prefix) {
   let n = 1;
-  const taken = new Set([...scene.elements.map((e) => e.id), ...scene.abstractions.map((a) => a.id)]);
+  const taken = new Set([...scene.elements.map((e) => e.id), ...(scene.groups || []).map((g) => g.id)]);
   while (taken.has(`${prefix}_${n}`)) n++;
   return `${prefix}_${n}`;
 }
@@ -506,6 +637,39 @@ function sampleFormula(spec, what, tFrom = 0, tTo = null) {
   return TF.samplePath((t) => fx(t), (t) => fy(t), t0, t1, { step: SAMPLE_STEP }).map((p) => [p[0], p[1]]);
 }
 
+/** Cuts a polyline to an x range, interpolating a new vertex exactly on
+ * each cut. Works on a sampled formula and on a hand-written point list
+ * alike, which is the point: "the axis from x=40 to x=90" used to have to
+ * be retyped as its own point list because tFrom/tTo only ever applied to
+ * a formula's own parameter. */
+function cutPolylineByX(pts, x0, x1, what) {
+  const lerp = (a, b, x) => [x, a[1] + ((b[1] - a[1]) * (x - a[0])) / (b[0] - a[0])];
+  const out = [];
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i];
+    if (p[0] >= x0 - 1e-9 && p[0] <= x1 + 1e-9) out.push(p);
+    const q = pts[i + 1];
+    if (!q) continue;
+    for (const xc of [x0, x1]) if ((p[0] - xc) * (q[0] - xc) < 0) out.push(lerp(p, q, xc));
+  }
+  const cut = dedupeConsecutive(out.sort((a, b) => a[0] - b[0]));
+  if (cut.length < 2) {
+    const bb = bboxOf(pts);
+    throw new Error(`${what}: nothing of this path lies between x ${x0} and x ${x1} -- its own x range is ${bb.minX.toFixed(1)}..${bb.maxX.toFixed(1)}`);
+  }
+  return cut;
+}
+
+/** The vertex list of a single-stroke line element, in graphic space. */
+function linePolyline(id, scene, what) {
+  const target = scene.elements.find((e) => e.id === id);
+  if (!target) throw new Error(`${what}: "${id}" is not an element id`);
+  if (target.kind !== "line") throw new Error(`${what}: "${id}" must be a line element`);
+  if (Array.isArray(target.paths)) throw new Error(`${what}: "${id}" is a repeated group (multiple strokes) -- only a single-stroke line can bound a region`);
+  if (Array.isArray(target.path?.points)) return checkPointList(target.path.points, what);
+  return sampleFormula(target.path || {}, `${what} (${id})`);
+}
+
 /** A piece -> vertex list in graphic space (no arc-length tag yet). */
 function resolvePiece(piece, scene, what, depth = 0) {
   if (!piece || typeof piece !== "object") throw new Error(`${what}: missing piece`);
@@ -519,9 +683,125 @@ function resolvePiece(piece, scene, what, depth = 0) {
     let pts;
     if (Array.isArray(target.path?.points)) pts = checkPointList(target.path.points, what);
     else pts = sampleFormula(target.path || {}, `${what} (ref ${piece.ref})`, piece.tFrom ?? 0, piece.tTo ?? target.path?.tEnd);
+    // An x range is the sub-range anyone actually means ("the axis under
+    // the shaded part"), and unlike tFrom/tTo it means the same thing on a
+    // formula path and a point list.
+    const hasX = Number.isFinite(Number(piece.xFrom)) || Number.isFinite(Number(piece.xTo));
+    if (hasX) {
+      const bb = bboxOf(pts);
+      const x0 = Number.isFinite(Number(piece.xFrom)) ? Number(piece.xFrom) : bb.minX;
+      const x1 = Number.isFinite(Number(piece.xTo)) ? Number(piece.xTo) : bb.maxX;
+      if (!(x1 > x0)) throw new Error(`${what}: xFrom must be less than xTo (got ${x0}..${x1})`);
+      pts = cutPolylineByX(pts, x0, x1, `${what} (ref ${piece.ref})`);
+    }
     return piece.reverse ? pts.slice().reverse() : pts;
   }
   return sampleFormula(piece, what);
+}
+
+// ------------------------------------------------- app-solved "between" --
+
+/** Normalizes a bound to run left-to-right and rejects one that doubles
+ * back: "between" only means anything when each bound gives one y per x. */
+function ascendingInX(pts, what) {
+  let dir = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const dx = pts[i][0] - pts[i - 1][0];
+    if (Math.abs(dx) < 1e-9) continue;
+    const d = dx > 0 ? 1 : -1;
+    if (dir === 0) dir = d;
+    else if (d !== dir) throw new Error(`${what}: this bound doubles back in x, so it has no single y per x -- write the shape as an explicit boundary instead of "between"`);
+  }
+  return dir < 0 ? pts.slice().reverse() : pts;
+}
+
+/** Every proper crossing of two polylines, as [x, y], left to right. */
+function polylineCrossings(a, b) {
+  const hits = [];
+  for (let i = 0; i + 1 < a.length; i++) {
+    const aLo = Math.min(a[i][0], a[i + 1][0]), aHi = Math.max(a[i][0], a[i + 1][0]);
+    for (let j = 0; j + 1 < b.length; j++) {
+      if (Math.max(b[j][0], b[j + 1][0]) < aLo) continue;
+      if (Math.min(b[j][0], b[j + 1][0]) > aHi) break;   // b ascends in x
+      const c = segCross(a[i], a[i + 1], b[j], b[j + 1], true);
+      if (c) hits.push([a[i][0] + (a[i + 1][0] - a[i][0]) * c.t, a[i][1] + (a[i + 1][1] - a[i][1]) * c.t]);
+    }
+  }
+  hits.sort((p, q) => p[0] - q[0]);
+  const out = [];
+  for (const p of hits) if (!out.length || Math.abs(p[0] - out[out.length - 1][0]) > 1e-6) out.push(p);
+  return out;
+}
+
+/** Solves `{between: {upper, lower, xFrom?, xTo?}}` into a closed polygon.
+ *
+ * The model names the two bounds and, if it wants one, an x range; the app
+ * samples them, finds where they cross, cuts both to the same span and
+ * closes the ends. Previously all of that was the model's arithmetic --
+ * solve the intersection, pick matching parameter ranges, hope the ends
+ * meet -- which is where inaccurate shading came from: a boundary whose
+ * ends missed was silently closed with a straight edge across the shape.
+ *
+ * Returns { polygon, meta } where meta feeds the geometry report. */
+function solveBetween(spec, scene, what) {
+  if (!spec || typeof spec !== "object") throw new Error(`${what}: "between" needs {"upper": <line id>, "lower": <line id> | {"y": <mm>}}`);
+  const isLevel = (b) => b && typeof b === "object" && Number.isFinite(Number(b.y));
+  const { upper, lower } = spec;
+  if (isLevel(upper) && isLevel(lower)) throw new Error(`${what}: at least one bound must be a line element -- two levels have no x range of their own`);
+
+  // Resolve whichever bound is a real path first; a {"y": n} level then
+  // spans exactly that path's x extent.
+  const anchorIsUpper = !isLevel(upper);
+  const anchor = ascendingInX(linePolyline(anchorIsUpper ? upper : lower, scene, `${what} ${anchorIsUpper ? "upper" : "lower"} bound`), `${what} ${anchorIsUpper ? "upper" : "lower"} bound`);
+  const anchorBox = bboxOf(anchor);
+  const other = isLevel(anchorIsUpper ? lower : upper)
+    ? [[anchorBox.minX, Number((anchorIsUpper ? lower : upper).y)], [anchorBox.maxX, Number((anchorIsUpper ? lower : upper).y)]]
+    : ascendingInX(linePolyline(anchorIsUpper ? lower : upper, scene, `${what} ${anchorIsUpper ? "lower" : "upper"} bound`), `${what} ${anchorIsUpper ? "lower" : "upper"} bound`);
+
+  let up = anchorIsUpper ? anchor : other;
+  let lo = anchorIsUpper ? other : anchor;
+
+  const crossings = polylineCrossings(up, lo);
+  const upBox = bboxOf(up), loBox = bboxOf(lo);
+  const overlap = { min: Math.max(upBox.minX, loBox.minX), max: Math.min(upBox.maxX, loBox.maxX) };
+  if (!(overlap.max > overlap.min)) throw new Error(`${what}: the two bounds never share an x range (upper spans ${upBox.minX.toFixed(1)}..${upBox.maxX.toFixed(1)}, lower ${loBox.minX.toFixed(1)}..${loBox.maxX.toFixed(1)}) -- there is no area between them`);
+
+  const given = Number.isFinite(Number(spec.xFrom)) || Number.isFinite(Number(spec.xTo));
+  let x0, x1;
+  if (given) {
+    x0 = Number.isFinite(Number(spec.xFrom)) ? Number(spec.xFrom) : overlap.min;
+    x1 = Number.isFinite(Number(spec.xTo)) ? Number(spec.xTo) : overlap.max;
+    if (!(x1 > x0)) throw new Error(`${what}: xFrom must be less than xTo (got ${x0}..${x1})`);
+  } else if (crossings.length >= 2) {
+    // The classic lens: shade between the first and last crossing.
+    x0 = crossings[0][0];
+    x1 = crossings[crossings.length - 1][0];
+    if (crossings.length > 2) throw new Error(`${what}: the bounds cross ${crossings.length} times, so "the area between them" is ambiguous -- give xFrom and xTo to say which span you mean`);
+  } else if (crossings.length === 1) {
+    throw new Error(`${what}: the bounds cross once (at x ${crossings[0][0].toFixed(2)}), so they swap sides and the area between them is two separate pieces -- give xFrom and xTo to pick one`);
+  } else {
+    // Never cross (a curve over an axis): the whole shared span.
+    x0 = overlap.min;
+    x1 = overlap.max;
+  }
+
+  up = cutPolylineByX(up, x0, x1, `${what} upper bound`);
+  lo = cutPolylineByX(lo, x0, x1, `${what} lower bound`);
+
+  // Walk the upper left-to-right, then the lower back right-to-left; the
+  // two vertical edges at x0 and x1 close it. A zero-height end (the
+  // bounds meet there) collapses to a single vertex via dedupe.
+  const polygon = dedupeConsecutive([...up, ...lo.slice().reverse()]);
+  if (polygon.length < 3) throw new Error(`${what}: the two bounds coincide over this span -- there is no area between them`);
+  return {
+    polygon,
+    meta: {
+      solvedXRange: [+x0.toFixed(2), +x1.toFixed(2)],
+      bounds: { upper: isLevel(upper) ? `y=${Number(upper.y)}` : upper, lower: isLevel(lower) ? `y=${Number(lower.y)}` : lower },
+      intersections: crossings.map(([x, y]) => [+x.toFixed(2), +y.toFixed(2)]),
+      rangeFrom: given ? "given" : (crossings.length >= 2 ? "solved from the crossings" : "the bounds' shared x span"),
+    },
+  };
 }
 
 /** Resolves every element to vertex lists in GRAPHIC space and validates
@@ -562,20 +842,31 @@ export function resolveScene(scene) {
         resolved[el.id] = { kind: "line", strokes, dense: pieces.every((p) => !Array.isArray(p.points)) };
         for (const pts of strokes) bbox = mergeBbox(bbox, bboxOf(pts));
       } else if (el.kind === "region") {
-        if (!Array.isArray(el.boundary) || !el.boundary.length) throw new Error(`${what}: region needs a boundary piece list`);
-        let poly = [];
-        el.boundary.forEach((piece, i) => { poly.push(...resolvePiece(piece, scene, `${what} boundary piece ${i + 1}`)); });
-        poly = dedupeConsecutive(poly);
-        // Closure: an end within closureSnapMm of the start snaps onto it;
-        // a larger gap is closed with a straight edge (natural for point
-        // lists; reported as closureGap so a formula boundary that was
-        // meant to close shows up in the report and gets a warning).
-        const closureGap = poly.length > 1 ? dist2(poly[0], poly[poly.length - 1]) : Infinity;
-        if (closureGap <= CONSTRAINTS.closureSnapMm) poly.pop();
-        else if (el.boundary.some((p) => !Array.isArray(p.points))) warnings.push(`${what}: boundary end is ${closureGap.toFixed(1)}mm from its start -- closed with a straight edge.`);
+        let poly, closureGap = 0, meta = null;
+        if (el.between) {
+          // App-solved: the model named the bounds, the compiler did the
+          // intersecting and closing. Closed by construction, so there is
+          // no closure gap to report.
+          const solved = solveBetween(el.between, scene, what);
+          poly = solved.polygon;
+          meta = solved.meta;
+        } else {
+          if (!Array.isArray(el.boundary) || !el.boundary.length) throw new Error(`${what}: region needs a boundary piece list, or a "between" spec`);
+          poly = [];
+          el.boundary.forEach((piece, i) => { poly.push(...resolvePiece(piece, scene, `${what} boundary piece ${i + 1}`)); });
+          poly = dedupeConsecutive(poly);
+          // Closure: an end within closureSnapMm of the start snaps onto
+          // it; a larger gap is closed with a straight edge. That edge is
+          // now ALWAYS warned about, point lists included -- a boundary
+          // silently closed across the middle of the shape is exactly how
+          // inaccurate shading used to get through unnoticed.
+          closureGap = poly.length > 1 ? dist2(poly[0], poly[poly.length - 1]) : Infinity;
+          if (closureGap <= CONSTRAINTS.closureSnapMm) poly.pop();
+          else warnings.push(`${what}: the boundary's end is ${closureGap.toFixed(1)}mm from its start -- closed with a straight edge. If that edge is not meant to be part of the shape, the pieces do not meet.`);
+        }
         if (poly.length < 3) throw new Error(`${what}: boundary needs at least 3 distinct points`);
         if (!isSimplePolygon(poly)) throw new Error(`${what}: boundary crosses itself -- a fill region must be a simple, single-contour shape`);
-        resolved[el.id] = { kind: "region", polygon: poly, closureGap };
+        resolved[el.id] = { kind: "region", polygon: poly, closureGap, meta };
         bbox = mergeBbox(bbox, bboxOf(poly));
       } else {
         throw new Error(`${what}: unknown kind "${el.kind}"`);
@@ -679,27 +970,17 @@ export function generatePattern(pattern, polygon, tf, what) {
 
 // ------------------------------------------------------------------ rules --
 
-// Physical checks on one brush/stamp's options (see CONSTRAINTS). `ctx`
-// carries the pattern gap in bed mm for hatch fills.
-export function checkBrushRules(fn, opts, ctx = {}, tag = fn) {
+// Physical checks on one brush/stamp's options (see PRINT_LIMITS). Rules
+// that belong to a fill's PATTERN rather than to the brush walking it live
+// in checkPatternRules() below.
+export function checkBrushRules(fn, opts, tag = fn) {
   const errors = [], warnings = [];
   const g = (k, d) => (opts[k] === undefined || opts[k] === null ? d : opts[k]);
   const spec = optionSpecFor(fn);
   const def = (k, fallback) => (spec[k] && spec[k].def != null ? spec[k].def : fallback);
 
   const diaKey = fn === "hairyDotted" || fn === "hairyDot" ? "rootDiameter" : (fn === "dotted" ? null : "diameter");
-  if (diaKey && diaKey in spec) {
-    const dia = g(diaKey, def(diaKey, 1.6));
-    if (dia < CONSTRAINTS.minDomeDiameter) errors.push(`${tag}: ${diaKey} ${dia}mm is below the ${CONSTRAINTS.minDomeDiameter}mm minimum.`);
-  }
-  if (fn === "dotted" && 2 * g("dotRadius", 0.8) < CONSTRAINTS.minDomeDiameter) errors.push(`${tag}: dotRadius ${g("dotRadius")}mm makes a disc below the ${CONSTRAINTS.minDomeDiameter}mm minimum.`);
-  if (fn === "disc" && g("height", 0.4) < CONSTRAINTS.minDiscHeight) errors.push(`${tag}: height below ${CONSTRAINTS.minDiscHeight}mm.`);
-  if ("nLayers" in spec && g("nLayers", 2) < CONSTRAINTS.minLayers) errors.push(`${tag}: nLayers ${g("nLayers")} is below ${CONSTRAINTS.minLayers} -- relief will not be felt.`);
   if (fn === "variableThickness" && g("zGap", 0.25) < CONSTRAINTS.zGapFloor) errors.push(`${tag}: zGap below the ${CONSTRAINTS.zGapFloor}mm floor (prints flat).`);
-  if (ctx.hatchGap != null) {
-    if (fn === "solid" && ctx.hatchGap < CONSTRAINTS.minSolidSheetGap) errors.push(`${tag}: hatch gap ${ctx.hatchGap.toFixed(2)}mm below ${CONSTRAINTS.minSolidSheetGap}mm -- severe over-extrusion.`);
-    if (fn === "hairy" && ctx.hatchGap < CONSTRAINTS.minHairyFillRowGap) warnings.push(`${tag}: hairy hatch row gap ${ctx.hatchGap.toFixed(1)}mm below ${CONSTRAINTS.minHairyFillRowGap}mm -- rows may fuse.`);
-  }
 
   for (const k of ["width", "beadWidth", "thinWidth"]) {
     if (k in spec && g(k, def(k, 0.5)) < CONSTRAINTS.minBeadWidth) warnings.push(`${tag}: ${k} below ${CONSTRAINTS.minBeadWidth}mm.`);
@@ -721,6 +1002,81 @@ export function checkBrushRules(fn, opts, ctx = {}, tag = fn) {
     if (gap < 2 * dr + CONSTRAINTS.minDottedGapOverDot) warnings.push(`${tag}: gap ${gap}mm is tight for dotRadius ${dr}mm.`);
   }
   if (fn === "hairy" && g("spacing", 5) < CONSTRAINTS.minHairSpacing) warnings.push(`${tag}: strand spacing ${g("spacing")}mm below ${CONSTRAINTS.minHairSpacing}mm -- strands may fuse.`);
+
+  // Tactile legibility -- the "stops reading as a line / as a fill" family
+  // the older single-call page enforced. OFF by default: none of these
+  // numbers have been printed and confirmed, so enforcing them would
+  // manufacture authority the project does not have. The path exists (and
+  // is tested with the flag on) so confirming the numbers is a one-line
+  // change rather than a rewrite.
+  if (LEGIBILITY_GUIDE.enforced) {
+    if (diaKey && diaKey in spec) {
+      const dia = g(diaKey, def(diaKey, 1.6));
+      if (dia < LEG("minDomeDiameter")) warnings.push(`${tag}: ${diaKey} ${dia}mm is below the ${LEG("minDomeDiameter")}mm relief-floor guidance -- may be hard to feel.`);
+    }
+    if (fn === "dotted" && 2 * g("dotRadius", 0.8) < LEG("minDomeDiameter")) warnings.push(`${tag}: dotRadius ${g("dotRadius")}mm makes a disc below the ${LEG("minDomeDiameter")}mm relief-floor guidance -- may be hard to feel.`);
+    if (fn === "disc" && g("height", 0.4) < LEG("minDiscHeight")) warnings.push(`${tag}: height below the ${LEG("minDiscHeight")}mm relief-floor guidance -- may be hard to feel.`);
+    if ("nLayers" in spec && g("nLayers", 2) < LEG("minLayers")) warnings.push(`${tag}: nLayers ${g("nLayers")} is below the ${LEG("minLayers")}-layer relief-floor guidance -- may be hard to feel.`);
+
+    const dotty = { blobDotted: "diameter", directionalBlobDotted: "diameter", hairyDotted: "rootDiameter" };
+    if (fn in dotty) {
+      const dia = g(dotty[fn], def(dotty[fn], 1.6)), gap = g("gap", fn === "directionalBlobDotted" ? dia : 10);
+      if (gap > dia * LEG("maxDottedGapOverDiameter")) warnings.push(`${tag}: gap ${gap}mm is large for ${dotty[fn]} ${dia}mm -- reads as scattered dots, not a line (want <= ${(dia * LEG("maxDottedGapOverDiameter")).toFixed(1)}mm).`);
+    }
+    if (fn === "dotted") {
+      const dia = 2 * g("dotRadius", 0.8), gap = g("gap", 10);
+      if (gap > dia * LEG("maxDottedGapOverDiameter")) warnings.push(`${tag}: gap ${gap}mm is large for dotRadius ${g("dotRadius", 0.8)}mm -- reads as scattered dots, not a line (want <= ${(dia * LEG("maxDottedGapOverDiameter")).toFixed(1)}mm).`);
+    }
+    if (fn === "dashed") {
+      const segLen = g("segLen", 8), gapLen = g("gapLen", 4);
+      if (segLen < LEG("minDashLen")) warnings.push(`${tag}: segLen ${segLen}mm below ${LEG("minDashLen")}mm -- dashes are indistinct.`);
+      if (gapLen < LEG("minDashGap")) warnings.push(`${tag}: gapLen ${gapLen}mm below ${LEG("minDashGap")}mm.`);
+      if (gapLen > segLen * LEG("maxDashGapOverSegLen")) warnings.push(`${tag}: gapLen ${gapLen}mm is large vs segLen ${segLen}mm -- reads as isolated dashes (want <= ${(segLen * LEG("maxDashGapOverSegLen")).toFixed(1)}mm).`);
+    }
+    if (fn === "segmented" && (g("thinLen", 8) < LEG("minSegmentLen") || g("fatLen", 4) < LEG("minSegmentLen"))) {
+      warnings.push(`${tag}: a segment length is below ${LEG("minSegmentLen")}mm -- the alternation stops being felt.`);
+    }
+    if (fn === "hairy" && g("spacing", 5) > LEG("maxHairSpacing")) warnings.push(`${tag}: strand spacing ${g("spacing")}mm above ${LEG("maxHairSpacing")}mm -- the strands stop reading as one hairy line.`);
+  }
+  return { errors, warnings };
+}
+
+/** Physical checks on a fill PATTERN's own numbers, given the brush that
+ * will walk it and the graphic's scale (pattern spacing is written in
+ * graphic units and scales with the transform; a brush's mm do not).
+ *
+ * Separate from checkBrushRules because these are properties of the
+ * pattern, not of the brush -- and because almost nothing checked them
+ * before: only hatch's gap ever reached a rule, through an ad-hoc context
+ * field, and diamond's fillGap (an over-extrusion limit the older
+ * single-call page did enforce) was lost entirely in the move to this
+ * page. */
+export function checkPatternRules(pattern, fn, scale, tag) {
+  const errors = [], warnings = [];
+  const kind = pattern?.kind;
+  const num = (k, fallback) => {
+    const v = Number(pattern?.[k]);
+    return Number.isFinite(v) ? v : fallback;
+  };
+
+  if (kind === "hatch") {
+    const gap = num("gap", PATTERN_OPTIONS.hatch.gap.def) * scale;
+    if (fn === "solid" && gap < CONSTRAINTS.minSolidSheetGap) errors.push(`${tag}: hatch gap ${gap.toFixed(2)}mm below ${CONSTRAINTS.minSolidSheetGap}mm -- severe over-extrusion.`);
+    if (fn === "hairy" && gap < CONSTRAINTS.minHairyFillRowGap) warnings.push(`${tag}: hairy hatch row gap ${gap.toFixed(1)}mm below ${CONSTRAINTS.minHairyFillRowGap}mm -- rows may fuse.`);
+    if (LEGIBILITY_GUIDE.enforced) {
+      const dottedRows = ["dotted", "blobDotted", "directionalBlobDotted", "hairyDotted", "hairy"].includes(fn);
+      const max = dottedRows ? LEG("maxDottedFillRowGap") : LEG("maxShadeFillGap");
+      if (gap > max) warnings.push(`${tag}: hatch row gap ${gap.toFixed(1)}mm above ${max}mm -- reads as separate rows, not a filled area.`);
+    }
+  }
+  if (kind === "diamond") {
+    const fillGap = num("fillGap", PATTERN_OPTIONS.diamond.fillGap.def) * scale;
+    if (fillGap < CONSTRAINTS.minSolidSheetGap) errors.push(`${tag}: diamond fillGap ${fillGap.toFixed(2)}mm below ${CONSTRAINTS.minSolidSheetGap}mm -- severe over-extrusion.`);
+    if (LEGIBILITY_GUIDE.enforced) {
+      const diag = num("diag", PATTERN_OPTIONS.diamond.diag.def) * scale;
+      if (diag < LEG("minDiamondDiag")) warnings.push(`${tag}: diamond diag ${diag.toFixed(1)}mm below ${LEG("minDiamondDiag")}mm -- cells blur together.`);
+    }
+  }
   return { errors, warnings };
 }
 
@@ -742,7 +1098,17 @@ function coerceOptionValue(meta, v) {
   if (meta.kind === "bool") return { value: !!v };
   const n = Number(v);
   if (!Number.isFinite(n)) return { error: "must be a number" };
-  return { value: meta.kind === "int" ? Math.round(n) : n };
+  const out = meta.kind === "int" ? Math.round(n) : n;
+  // An option's range is part of its contract, not just a slider hint. A
+  // value outside it (a 100mm hatch gap on a 15mm bar, a 40mm dome) is a
+  // real mistake, and storing it silently produced textures nobody asked
+  // for -- the option range was previously consulted only to size the UI
+  // input and to clamp knob-driven values, never to check what a stage
+  // wrote directly. Rejecting here gives the stage its own mistake back.
+  if (meta.min != null && meta.max != null && (out < meta.min || out > meta.max)) {
+    return { error: `must be within ${meta.min}..${meta.max}` };
+  }
+  return { value: out };
 }
 
 function cleanOptions(fn, options) {
@@ -755,14 +1121,19 @@ function cleanOptions(fn, options) {
 // ---------------------------------------------------------------- compile --
 
 /** scene -> { jobs, report, errors, warnings, bbox }. A job is
- * { elementId, slot, label, kind: "brush"|"stamp", fn, options, pts | at,
- * newPattern }. */
+ * { elementId, slot, label, fn, options, pts, newPattern } -- `pts` is
+ * always a point list (one point long for a point-safe brush used at a
+ * single spot); runJobs() is the only place that cares whether `fn`
+ * happens to use TF.STAMPS' (em, x, y, options) call shape. */
 export function compileScene(scene) {
   const { resolved, errors, warnings, bbox: naturalBbox } = resolveScene(scene);
   const tf = transformFor(scene, naturalBbox);
   const jobs = [];
   const report = { transform: { scale: tf.scale, origin: tf.origin.map((v) => +v.toFixed(2)) }, elements: [], chart: {} };
   const fillPolys = [];
+  // Every line stroke / point stamp in bed space, for the
+  // stroke-over-another-element's-fill check after the element loop.
+  const marks = [];
   let bedBbox = null;
 
   const outOfSafe = (points) => points.some(([x, y]) => x < CONSTRAINTS.safeMin || x > CONSTRAINTS.safeMax || y < CONSTRAINTS.safeMin || y > CONSTRAINTS.safeMax);
@@ -777,22 +1148,34 @@ export function compileScene(scene) {
     const entry = { id: el.id, label, kind: el.kind, role: el.role || "" };
     report.elements.push(entry);
 
-    const addBrushJob = (slot, fn, options, pts, extra = {}, ctx = {}) => {
+    // One job shape for every brush call -- `pts` is always a point list,
+    // one point long for a stamp-shaped use (TF.STAMPS dispatches on that
+    // in runJobs() below, calling it (em, x, y, options) instead of
+    // (em, pts, options); the catalog never needs to know that, only
+    // runJobs() does).
+    const addBrushJob = (slot, fn, options, pts, extra = {}) => {
       const tag = `"${label}" ${slot}`;
-      if (!isBrush(fn)) { errors.push(`${tag}: "${fn}" is not a line brush (${BRUSH_NAMES.join(", ")}).`); return false; }
+      if (!isBrush(fn)) { errors.push(`${tag}: "${fn}" is not a brush (${BRUSH_NAMES.join(", ")}).`); return false; }
+      // Defense in depth: a stamp-only fn handed more than one point would
+      // silently draw at just the first one (see isStrokeCapable) rather
+      // than error -- callers should already be filtering this via
+      // isPointSafe/isStrokeCapable, but this backstops any that aren't.
+      if (pts.length > 1 && fn in TF.STAMPS) { errors.push(`${tag}: "${fn}" only works at a single point, not along a path of ${pts.length}.`); return false; }
       const opts = cleanOptions(fn, options);
-      const rule = checkBrushRules(fn, opts, ctx, tag);
+      const rule = checkBrushRules(fn, opts, tag);
       errors.push(...rule.errors); warnings.push(...rule.warnings);
-      jobs.push({ elementId: el.id, slot, label, kind: "brush", fn, options: { ...opts, ...(extra.brushOverride || {}) }, pts, newPattern: extra.newPattern ?? true });
-      return true;
-    };
-    const addStampJob = (slot, fn, options, at) => {
-      const tag = `"${label}" ${slot}`;
-      if (!isStamp(fn)) { errors.push(`${tag}: "${fn}" is not a stamp (${STAMP_NAMES.join(", ")}).`); return false; }
-      const opts = cleanOptions(fn, options);
-      const rule = checkBrushRules(fn, opts, {}, tag);
-      errors.push(...rule.errors); warnings.push(...rule.warnings);
-      jobs.push({ elementId: el.id, slot, label, kind: "stamp", fn, options: opts, at, newPattern: true });
+      // A bare single [x,y] point (no arc-length tag) is fine for a true
+      // TF.STAMPS function -- runJobs calls it with (x, y) directly -- but
+      // a point-safe TF.BRUSHES function (the *Dotted family: blobDotted,
+      // dotted, directionalBlobDotted, hairyDotted) walks pts via
+      // walkArcLengthStops, which reads pts[i][2] as cumulative arc length.
+      // Without it, totalLength() returns undefined, the walk's stop loop
+      // becomes `0 <= NaN` (false), and it silently emits nothing -- no
+      // error, just a dot that never happened. Tag it with s=0 so the
+      // single stop walkArcLengthStops is designed to produce here actually
+      // gets walked.
+      const safePts = (pts.length === 1 && pts[0].length === 2 && !(fn in TF.STAMPS)) ? [[pts[0][0], pts[0][1], 0]] : pts;
+      jobs.push({ elementId: el.id, slot, label, fn, options: { ...opts, ...(extra.brushOverride || {}) }, pts: safePts, newPattern: extra.newPattern ?? true });
       return true;
     };
 
@@ -806,7 +1189,11 @@ export function compileScene(scene) {
         entry.count = pts.length;
         bedBbox = mergeBbox(bedBbox, bboxOf(pts));
         if (pts.some((p) => outOfSafe([p]))) errors.push(`"${label}": a point is outside the safe area (${CONSTRAINTS.safeMin}-${CONSTRAINTS.safeMax}mm).`);
-        if (tex.brush?.fn) for (const p of pts) addStampJob("brush", tex.brush.fn, tex.brush.options, p);
+        if (tex.brush?.fn) {
+          marks.push({ id: el.id, label, points: pts });
+          if (!isPointSafe(tex.brush.fn)) errors.push(`"${label}" brush: "${tex.brush.fn}" is not point-safe (${[...POINT_SAFE_BRUSHES].join(", ")}).`);
+          else for (const p of pts) addBrushJob("brush", tex.brush.fn, tex.brush.options, [p]);
+        }
       } else if (r.kind === "line") {
         // strokes has one entry for a plain line, several for a GROUP
         // (repeated disconnected strokes -- axis ticks, gridlines --
@@ -832,12 +1219,18 @@ export function compileScene(scene) {
         bedBbox = mergeBbox(bedBbox, bb);
         if (strokeSets.some((pts) => outOfSafe(pts))) errors.push(`"${label}": path leaves the safe area (${CONSTRAINTS.safeMin}-${CONSTRAINTS.safeMax}mm).`);
         if (tex.brush?.fn) {
+          marks.push({ id: el.id, label, points: strokeSets.flat() });
           for (const pts of strokeSets) addBrushJob("brush", tex.brush.fn, tex.brush.options, TF.polylineToPts(pts, r.dense ? null : SAMPLE_STEP));
         }
       } else if (r.kind === "region") {
         const poly = r.polygon.map(tf.map);
         const bb = bboxOf(poly);
         entry.bbox = rndBox(bb); entry.area = rnd(polygonArea(poly)); entry.closureGap = rnd(r.closureGap);
+        // For an app-solved region: the x span actually used, where the
+        // bounds were found to cross, and how the span was decided -- so
+        // "shade between x=1 and x=3" is checkable against numbers rather
+        // than against what the model said it did.
+        if (r.meta) Object.assign(entry, r.meta);
         entry.width = rnd(bb.maxX - bb.minX); entry.height = rnd(bb.maxY - bb.minY);
         bedBbox = mergeBbox(bedBbox, bb);
         if (outOfSafe(poly)) errors.push(`"${label}": boundary leaves the safe area (${CONSTRAINTS.safeMin}-${CONSTRAINTS.safeMax}mm).`);
@@ -847,16 +1240,24 @@ export function compileScene(scene) {
           const pat = tex.fill.pattern || { kind: "hatch" };
           const gen = generatePattern(pat, poly, tf, `"${label}" fill`);
           entry.fill = { kind: pat.kind, strokes: gen.strokes.length, stamps: gen.stamps.length, strokeLength: rnd(gen.strokes.reduce((s, st) => s + polylineLength(st.points), 0)) };
+          const patRule = checkPatternRules(pat, tex.fill.fn, tf.scale, `"${label}" fill`);
+          errors.push(...patRule.errors); warnings.push(...patRule.warnings);
+          // The checkerboard parity is the one thing about a diamond fill
+          // that cannot be eyeballed, and the library ships the explicit
+          // verifier for exactly this -- it was simply never called here.
+          if (pat.kind === "diamond" && gen.diamonds) {
+            const v = TF.verifyCheckerboard(gen.diamonds, (Number(pat.diag) || PATTERN_OPTIONS.diamond.diag.def) * tf.scale);
+            if (v.violations !== 0) errors.push(`"${label}" fill: diamond checkerboard has ${v.violations} adjacency violation(s) of ${v.checked} checked -- neighbouring cells share a fill state.`);
+          }
           const needsStamp = STAMP_PATTERNS.includes(pat.kind);
-          if (needsStamp && !isStamp(tex.fill.fn)) errors.push(`"${label}" fill: pattern "${pat.kind}" places stamps, so the fill brush must be a stamp (${STAMP_NAMES.join(", ")}), not "${tex.fill.fn}".`);
-          else if (!needsStamp && !isBrush(tex.fill.fn)) errors.push(`"${label}" fill: pattern "${pat.kind}" draws strokes, so the fill brush must be a line brush (${BRUSH_NAMES.join(", ")}), not "${tex.fill.fn}".`);
+          if (needsStamp && !isPointSafe(tex.fill.fn)) errors.push(`"${label}" fill: pattern "${pat.kind}" places points, so the fill brush must be point-safe (${[...POINT_SAFE_BRUSHES].join(", ")}), not "${tex.fill.fn}".`);
+          else if (!needsStamp && !isStrokeCapable(tex.fill.fn)) errors.push(`"${label}" fill: pattern "${pat.kind}" draws strokes, so the fill brush must be a brush that can walk a path, not "${tex.fill.fn}".`);
           else if (needsStamp) {
-            for (const at of gen.stamps) addStampJob("fill", tex.fill.fn, tex.fill.options, at);
+            for (const at of gen.stamps) addBrushJob("fill", tex.fill.fn, tex.fill.options, [at]);
           } else {
-            const ctx = pat.kind === "hatch" ? { hatchGap: (Number(pat.gap) || 4) * tf.scale } : {};
             gen.strokes.forEach((st, i) => {
               addBrushJob("fill", tex.fill.fn, tex.fill.options, TF.polylineToPts(st.points, st.sparse ? null : SAMPLE_STEP),
-                { brushOverride: st.brushOverride, newPattern: gen.newPatternOnce ? i === 0 : true }, i === 0 ? ctx : {});
+                { brushOverride: st.brushOverride, newPattern: gen.newPatternOnce ? i === 0 : true });
             });
             if (gen.strokes.length && !gen.strokes.some((st) => st.points.length > 1)) warnings.push(`"${label}" fill: pattern produced no printable strokes inside the region.`);
           }
@@ -872,6 +1273,28 @@ export function compileScene(scene) {
   for (let i = 0; i < fillPolys.length; i++) {
     for (let j = i + 1; j < fillPolys.length; j++) {
       if (polygonsOverlap(fillPolys[i].poly, fillPolys[j].poly)) warnings.push(`fills of "${fillPolys[i].label}" and "${fillPolys[j].label}" overlap -- double deposition where they share area.`);
+    }
+  }
+
+  // A stroke or stamp printed on top of ANOTHER element's fill -- the
+  // nozzle passing over already-deposited material. The older single-call
+  // page caught this with a bbox layout check over every call; this page
+  // checked only fill-against-fill, so a marker or curve sitting inside a
+  // shaded area went unflagged. Subsampled and bbox-prefiltered: a dense
+  // curve can carry thousands of points and a sampled boundary hundreds of
+  // edges, and one interior point is enough to prove the case.
+  for (const m of marks) {
+    for (const f of fillPolys) {
+      if (m.id === f.id) continue;            // a region's own outline/fill is expected
+      const fb = bboxOf(f.poly);
+      const stride = Math.max(1, Math.ceil(m.points.length / 200));
+      let hit = false;
+      for (let i = 0; i < m.points.length && !hit; i += stride) {
+        const [x, y] = m.points[i];
+        if (x < fb.minX || x > fb.maxX || y < fb.minY || y > fb.maxY) continue;
+        if (pointInPolygon(m.points[i], f.poly)) hit = true;
+      }
+      if (hit) warnings.push(`"${m.label}" prints over the fill of "${f.label}" -- fine if it is meant to stand taller, a nozzle collision risk if they print at the same height.`);
     }
   }
 
@@ -895,6 +1318,10 @@ export function compileScene(scene) {
 // and the footer emit G91 relative moves). Counts retraction cycles.
 export function scanGcode(lines) {
   let retractCycles = 0, absolute = true, px = null, py = null;
+  // Running sum of E deltas. Not a machine-accurate filament model (it
+  // ignores G92 resets) but a tripwire for a gross retraction-math bug in
+  // a brush: real printing never drives the net this far negative.
+  let eSum = 0, eMin = 0;
   const outOfBounds = [];
   const num = (line, axis) => {
     const m = line.match(new RegExp(`(?:^|\\s)${axis}(-?\\d+(?:\\.\\d+)?)`));
@@ -909,14 +1336,18 @@ export function scanGcode(lines) {
     if (cmd === "G92") { const gx = num(line, "X"), gy = num(line, "Y"); if (gx !== null) px = gx; if (gy !== null) py = gy; continue; }
     if (cmd !== "G0" && cmd !== "G1" && cmd !== "G2" && cmd !== "G3") continue;
     const e = num(line, "E");
-    if (e !== null && e < 0) retractCycles++;
+    if (e !== null) {
+      eSum += e;
+      if (eSum < eMin) eMin = eSum;
+      if (e < 0) retractCycles++;
+    }
     const mx = num(line, "X"), my = num(line, "Y");
     if (absolute) { if (mx !== null) px = mx; if (my !== null) py = my; }
     else { if (mx !== null && px !== null) px += mx; if (my !== null && py !== null) py += my; }
     if (px !== null && (px < 0 || px > CONSTRAINTS.bed)) outOfBounds.push(`X${px.toFixed(2)} (line: ${line})`);
     if (py !== null && (py < 0 || py > CONSTRAINTS.bed)) outOfBounds.push(`Y${py.toFixed(2)} (line: ${line})`);
   }
-  return { retractCycles, outOfBounds };
+  return { retractCycles, outOfBounds, eSum, eMin, negTrip: eMin < CONSTRAINTS.netExtrusionTrip };
 }
 
 // ---------------------------------------------------------------- runJobs --
@@ -929,8 +1360,12 @@ export function runJobs(jobs, { material = "TPU" } = {}) {
   for (const job of jobs) {
     try {
       if (job.newPattern) em.newPattern();
-      if (job.kind === "brush") TF.BRUSHES[job.fn](em, job.pts, job.options);
-      else TF.STAMPS[job.fn](em, job.at[0], job.at[1], job.options);
+      // TF.STAMPS/TF.BRUSHES keep two call shapes internally -- (em, x, y,
+      // options) vs (em, pts, options) -- purely mechanical, invisible to
+      // the LLM and to every other part of this compiler, which only ever
+      // deals in one unified `fn`/`pts` job shape.
+      if (job.fn in TF.STAMPS) TF.STAMPS[job.fn](em, job.pts[0][0], job.pts[0][1], job.options);
+      else TF.BRUSHES[job.fn](em, job.pts, job.options);
     } catch (e) {
       errors.push(`"${job.label}" ${job.slot}: ${e && e.message ? e.message : e}`);
     }
@@ -940,141 +1375,178 @@ export function runJobs(jobs, { material = "TPU" } = {}) {
   const gcode = TF.stripComments(lines.join("\n") + "\n");
   const scan = scanGcode(lines);
   for (const oob of scan.outOfBounds.slice(0, 5)) errors.push(`coordinate out of bed bounds: ${oob}`);
+  if (scan.negTrip) errors.push(`net extrusion dips to ${scan.eMin.toFixed(2)}mm -- a retraction-math bug in one of the brushes, not a printable job.`);
   if (scan.retractCycles >= CONSTRAINTS.retractCyclesHard) errors.push(`${scan.retractCycles} retraction cycles -- over the ${CONSTRAINTS.retractCyclesHard} cap (TPU drive-gear damage risk).`);
   else if (scan.retractCycles >= CONSTRAINTS.retractCyclesWarn) warnings.push(`${scan.retractCycles} retraction cycles (soft cap ${CONSTRAINTS.retractCyclesWarn}) -- TPU can flat-spot; consider wider spacing.`);
-  const digest = { lineCount: lines.length, retractCycles: scan.retractCycles, boundsOk: scan.outOfBounds.length === 0 };
+  const digest = {
+    lineCount: lines.length, retractCycles: scan.retractCycles, boundsOk: scan.outOfBounds.length === 0,
+    netExtrusionMm: +scan.eSum.toFixed(1), minNetExtrusionMm: +scan.eMin.toFixed(1),
+  };
   return { gcode, digest, errors, warnings, ok: errors.length === 0 };
 }
 
-// ------------------------------------------------------------ abstractions --
-
-/** Normalized weights for an abstraction's targets: clamp to >= 0, scale
- * to sum 1; equal weights if none are usable. */
-export function normalizedWeights(targets) {
-  const w = targets.map((t) => (Number.isFinite(Number(t.weight)) ? Math.max(0, Number(t.weight)) : 0));
-  const sum = w.reduce((a, b) => a + b, 0);
-  if (sum <= 0) return targets.map(() => 1 / Math.max(1, targets.length));
-  return w.map((x) => x / sum);
-}
+// ---------------------------------------------------------------- groups --
+//
+// A GROUP is a heading plus whichever real parameters the ui stage judged
+// relevant to the current turn, each carrying its own short (1-3 word)
+// label. It is presentation, not arithmetic: the panel shows those
+// controls together, and each control edits its own option directly.
+//
+// This replaces two earlier designs in turn: first a weighted-knob model
+// where the model invented targets and weights per turn and the page
+// moved each one by direction x weight x (value - base) x range (too much
+// at once -- inventing the relationships AND hiding the real numbers
+// behind a slider, re-derived every turn); then a fixed attribute->option
+// table (attributes.js) that traded that opacity for a closed, hand-
+// maintained list the model could only select from, never adapt to a
+// scene's actual textures. Now the ui stage picks real options straight
+// from the scene per turn, with a label but no weight -- nothing transforms
+// anyone's values, and nothing constrains the selection to a fixed list.
 
 function slotObj(scene, elementId, slot) {
   const tex = scene.textures[elementId];
   return tex && tex[slot] && tex[slot].fn ? tex[slot] : null;
 }
 
-/** What an abstraction target ({elementId, slot, option}) actually names:
- * the slot's own brush/stamp option, or -- fill slots only -- a numeric
- * field of the fill's own PATTERN (hatch's gap/angleDeg, grid's dx/dy,
- * diamond's diag/fillGap). A fill has two independently-named option
- * spaces (its brush AND its pattern); the brush is checked first, so a
- * name that happens to exist on both (there are none today, but a future
- * brush/pattern pair could collide) resolves to the brush. Returns null
- * if `option` isn't a recognized numeric field in either space. */
-export function resolveTarget(scene, elementId, slot, option) {
+/** What a group member names, and where its value lives.
+ *
+ * A member is {level, elementId?, slot?, option}:
+ *   level "graphic"  a property of the whole graphic -- only `scale`
+ *   level "stroke"   an option that owns a brush's WALK (layer/pass
+ *                    count, arc-length spacing, priming/retract brackets)
+ *   level "brush"    an option of the brush's own local deposit (the
+ *                    tags added in BRUSH_OPTIONS distinguish these two)
+ *   level "pattern"  a fill pattern's own numeric field (hatch gap, grid
+ *                    dx/dy, diamond diag -- a different bag entirely)
+ *
+ * For a fill slot the brush/stroke options and the pattern's own fields
+ * are independently-named spaces; resolveMember accepts either level
+ * spelling by looking the name up when `level` is absent (the model does
+ * not have to know). Returns null when the option is not a recognized
+ * numeric field of the texture actually in that slot. */
+export function resolveMember(scene, member) {
+  const { elementId, slot, option } = member || {};
+  if (member?.level === "graphic" || (!elementId && !slot)) {
+    if (option !== "scale") return null;
+    return { level: "graphic", spec: GRAPHIC_OPTIONS.scale, location: "graphic" };
+  }
   const s = slotObj(scene, elementId, slot);
   if (!s) return null;
+  const wantPattern = member.level === "pattern";
   const brushSpec = optionSpecFor(s.fn)[option];
-  if (brushSpec && brushSpec.min != null && brushSpec.max != null) {
-    return { s, location: "options", spec: brushSpec, span: brushSpec.max - brushSpec.min, isInt: brushSpec.kind === "int" };
-  }
+  if (!wantPattern && brushSpec) return { level: brushSpec.level, s, spec: brushSpec, location: "options" };
   if (slot === "fill" && s.pattern) {
     const patSpec = (PATTERN_OPTIONS[s.pattern.kind] || {})[option];
-    if (patSpec && patSpec.min != null && patSpec.max != null) {
-      return { s, location: "pattern", spec: patSpec, span: patSpec.max - patSpec.min, isInt: patSpec.kind === "int" };
-    }
+    if (patSpec) return { level: "pattern", s, spec: patSpec, location: "pattern" };
   }
+  // asked for a pattern option that does not exist; fall back to the brush
+  if (wantPattern && brushSpec) return { level: brushSpec.level, s, spec: brushSpec, location: "options" };
   return null;
 }
 
-/** Which named bag (`s.options`/`s.bases` or `s.pattern`/`s.patternBases`)
- * a resolved target's value and rebase-base live in. */
-function targetBags(target) {
-  const { s, location } = target;
-  return location === "pattern"
-    ? { values: (s.pattern = s.pattern || {}), bases: (s.patternBases = s.patternBases || {}) }
-    : { values: (s.options = s.options || {}), bases: (s.bases = s.bases || {}) };
+/** Graphic-level parameters a group may surface. `scale` is stored as a
+ * multiplier on the transform; the panel shows it as a percentage. */
+export const GRAPHIC_OPTIONS = {
+  scale: { kind: "num", def: 1, min: 0.1, max: 4, step: 0.05 },
+};
+
+/** Read / write a resolved member's current value. */
+export function memberValue(scene, member) {
+  const r = resolveMember(scene, member);
+  if (!r) return undefined;
+  if (r.location === "graphic") return scene.transform.scale;
+  const bag = r.location === "pattern" ? r.s.pattern : r.s.options;
+  return (bag || {})[member.option];
 }
 
-/** Sum over every abstraction of direction * weight * (value - v0) * span
- * for one option. */
-export function abstractionContribution(scene, elementId, slot, option) {
-  let total = 0;
-  const target = resolveTarget(scene, elementId, slot, option);
-  if (!target) return 0;
-  for (const a of scene.abstractions) {
-    const targets = Array.isArray(a.targets) ? a.targets : [];
-    const w = normalizedWeights(targets);
-    targets.forEach((t, i) => {
-      if (t.elementId !== elementId || t.slot !== slot || t.option !== option) return;
-      const dir = Number(t.direction) < 0 ? -1 : 1;
-      total += dir * w[i] * ((Number(a.value) || 0) - (Number(a.v0) || 0)) * target.span;
-    });
+export function setMemberValue(scene, member, value) {
+  const r = resolveMember(scene, member);
+  if (!r) return false;
+  if (r.location === "graphic") {
+    if (Number(value) > 0) scene.transform.scale = Number(value);
+    return true;
   }
-  return total;
+  const bag = r.location === "pattern" ? (r.s.pattern = r.s.pattern || {}) : (r.s.options = r.s.options || {});
+  if (value === null || value === undefined || value === "") delete bag[member.option];
+  else bag[member.option] = value;
+  return true;
 }
 
-/** The abstraction rule: option = clamp(base + contributions, min, max)
- * for every option some abstraction targets -- the option may live on
- * the slot's brush or (fill only) its pattern, see resolveTarget().
- * `base` is stored alongside it (set from the parameters stage, or
- * rebased by a manual edit). Mutates the scene in place. */
-export function applyAbstractions(scene) {
-  const driven = new Set();
-  for (const a of scene.abstractions) for (const t of a.targets || []) driven.add(`${t.elementId} ${t.slot} ${t.option}`);
-  for (const key of driven) {
-    const [elementId, slot, option] = key.split(" ");
-    const target = resolveTarget(scene, elementId, slot, option);
-    if (!target) continue;
-    const { values, bases } = targetBags(target);
-    if (bases[option] == null) {
-      const cur = values[option];
-      bases[option] = Number.isFinite(Number(cur)) && cur !== null && cur !== "" ? Number(cur) : (target.spec.def ?? target.spec.min);
-    }
-    let v = bases[option] + abstractionContribution(scene, elementId, slot, option);
-    v = Math.min(target.spec.max, Math.max(target.spec.min, v));
-    v = target.isInt ? Math.round(v) : +v.toFixed(3);
-    values[option] = v;
-  }
+/** Which named bag a member's value lives in -- "graphic", "options" or
+ * "pattern". The panel needs it to read and write the right place. */
+export function memberLocation(scene, member) {
+  return resolveMember(scene, member)?.location ?? null;
 }
 
-/** A manual edit of a driven option keeps the sliders where they are:
- * base = edited - contributions. */
-export function rebaseOption(scene, elementId, slot, option, value) {
-  const target = resolveTarget(scene, elementId, slot, option);
-  if (!target) return;
-  targetBags(target).bases[option] = value - abstractionContribution(scene, elementId, slot, option);
+/** The groups that surface a given option (so the panel can list
+ * everything no group claims). */
+export function groupsOf(scene, elementId, slot, option) {
+  return (scene.groups || []).filter((g) => (g.members || []).some((m) => m.elementId === elementId && m.slot === slot && m.option === option));
 }
 
-/** Which named bag ("options" or "pattern") an abstraction target's value
- * lives in -- the UI needs this to read/write the right place. */
-export function targetLocation(scene, elementId, slot, option) {
-  const target = resolveTarget(scene, elementId, slot, option);
-  return target ? target.location : null;
+/** How many distinct real elements a group's members touch -- a
+ * graphic-level member (elementId undefined) never counts toward this. */
+function distinctElementIds(group) {
+  return [...new Set((group.members || []).map((m) => m.elementId).filter(Boolean))];
 }
 
-/** Which abstractions drive a given option (for grouping in the UI). */
-export function driversOf(scene, elementId, slot, option) {
-  const out = [];
-  for (const a of scene.abstractions) {
-    const targets = Array.isArray(a.targets) ? a.targets : [];
-    const w = normalizedWeights(targets);
-    targets.forEach((t, i) => { if (t.elementId === elementId && t.slot === slot && t.option === option) out.push({ abstraction: a, weight: w[i], direction: Number(t.direction) < 0 ? -1 : 1 }); });
-  }
-  return out;
+/** Every group NOT scoped to exactly one element -- zero (purely graphic,
+ * e.g. a lone "scale") or several (a felt quality spanning multiple
+ * elements, e.g. "tactility" pulling nLayers from more than one) -- shown
+ * whole, unfiltered, as its own top-level card. A single-element group is
+ * deliberately excluded: it already has a complete home in that element's
+ * own card (see groupsForElement), so a second top-level copy would just be
+ * a redundant duplicate of the exact same thing. */
+export function topLevelGroups(scene) {
+  return (scene.groups || []).filter((g) => distinctElementIds(g).length !== 1);
 }
 
-/** Drop targets whose element/slot/option no longer exists (after a
- * geometry or texture change). Returns the dropped targets' descriptions. */
-export function pruneAbstractions(scene) {
+/** This element's own slice of EVERY group that has at least one member
+ * here, whether that group is scoped to just this element or spans several.
+ * Filtered down to only this element's members, keeping the group's
+ * title/description for context. A member of a multi-element group
+ * legitimately appears both here (inside this element's card) and, whole,
+ * in topLevelGroups()'s rendering of that same group -- intentional, not a
+ * duplicate to dedupe away: the top-level card is "see the whole quality
+ * together," this is "see everything relevant to just this element."
+ *
+ * A group's graphic-level members ride along here only when this element is
+ * the group's one real element -- i.e. the whole group is otherwise already
+ * about to be nested in this element's card, so its graphic-level member
+ * (e.g. "scale" alongside this element's own pattern spacing) belongs here
+ * too rather than being silently dropped by an elementId match that can
+ * never equal undefined. For a group spanning several real elements, a
+ * graphic-level member has no single right element to attach to, so it only
+ * shows in topLevelGroups()'s whole-group rendering. */
+export function groupsForElement(scene, elementId) {
+  return (scene.groups || [])
+    .map((g) => {
+      const ids = distinctElementIds(g);
+      const soleElement = ids.length === 1 && ids[0] === elementId;
+      const members = (g.members || []).filter((m) => m.elementId === elementId || (soleElement && !m.elementId));
+      return { ...g, members };
+    })
+    .filter((g) => g.members.length);
+}
+
+// expandAttribute()/attributeGuideText() (attributes.js-backed) retired:
+// the ui stage now selects whichever options it judges relevant to the
+// turn's request directly from optionSpecsText()'s real option list,
+// instead of being constrained to a fixed attribute->option table.
+
+/** Drop members whose element/slot/option no longer exists (after a
+ * geometry or texture change), then empty groups. Returns descriptions of
+ * what was dropped. */
+export function pruneGroups(scene) {
   const dropped = [];
-  for (const a of scene.abstractions) {
-    a.targets = (a.targets || []).filter((t) => {
-      const ok = !!resolveTarget(scene, t.elementId, t.slot, t.option);
-      if (!ok) dropped.push(`${a.name}: ${t.elementId}.${t.slot}.${t.option}`);
+  for (const g of scene.groups || []) {
+    g.members = (g.members || []).filter((m) => {
+      const ok = !!resolveMember(scene, m);
+      if (!ok) dropped.push(`${g.title}: ${m.elementId || "graphic"}.${m.slot || ""}.${m.option}`);
       return ok;
     });
   }
-  scene.abstractions = scene.abstractions.filter((a) => a.targets.length);
+  scene.groups = (scene.groups || []).filter((g) => g.members.length);
   return dropped;
 }
 
@@ -1095,8 +1567,8 @@ export function sceneSummary(scene) {
       : el.kind === "line" && Array.isArray(el.paths) ? el.paths.length : null;
     lines.push(`${el.id} "${el.label || ""}" ${el.kind}${groupCount != null ? ` (group of ${groupCount})` : ""}${el.role ? ` role=${el.role}` : ""}${parts.length ? ` [${parts.join(", ")}]` : " [no texture]"}`);
   }
-  if (scene.abstractions.length) {
-    lines.push("abstractions: " + scene.abstractions.map((a) => `${a.id} "${a.name}"=${Number(a.value).toFixed(2)} -> ${(a.targets || []).map((t) => `${t.elementId}.${t.slot}.${t.option}`).join(", ")}`).join("; "));
+  if ((scene.groups || []).length) {
+    lines.push("surfaced parameter groups: " + scene.groups.map((g) => `${g.id} "${g.title}" (${g.attribute}) -> ${(g.members || []).map((m) => `${m.elementId || "graphic"}.${m.option}`).join(", ")}`).join("; "));
   }
   return lines.join("\n");
 }
@@ -1108,7 +1580,8 @@ export function elementsJson(scene, ids = null) {
     .map((el) => ({
       id: el.id, label: el.label, kind: el.kind, role: el.role || "",
       geometry: el.kind === "line" ? (Array.isArray(el.paths) ? { paths: el.paths } : { path: el.path })
-        : el.kind === "region" ? { boundary: el.boundary } : { at: el.at },
+        : el.kind === "region" ? (el.between ? { between: el.between } : { boundary: el.boundary })
+          : { at: el.at },
     }));
 }
 
@@ -1143,10 +1616,10 @@ export function optionSpecsText(scene, ids = null) {
     if (t.slot === "fill" && t.pattern && PATTERN_OPTIONS[t.pattern.kind]) patternKinds.add(t.pattern.kind);
   }
   const blocks = [];
-  for (const fn of fns) blocks.push(`${fn} (${isBrush(fn) ? "line brush" : "stamp"}):\n${specRows(optionSpecFor(fn)).join("\n")}`);
+  for (const fn of fns) blocks.push(`${fn} (brush${isPointSafe(fn) ? ", point-safe" : ""}):\n${specRows(optionSpecFor(fn)).join("\n")}`);
   // A fill has TWO option spaces: its brush's own options (above) and its
   // pattern's own numeric fields -- both are valid targets for an
-  // abstraction or a direct options edit on that same {elementId, slot:
+  // group member or a direct options edit on that same {elementId, slot:
   // "fill"} pair; the app tells them apart by name, not by anything you
   // need to say.
   for (const kind of patternKinds) blocks.push(`${kind} (fill pattern, on any "fill" slot using it):\n${specRows(PATTERN_OPTIONS[kind]).join("\n")}`);
@@ -1187,10 +1660,11 @@ export function validateStageOutput(stage, out, scene) {
   if (!out || typeof out !== "object") return { value: null, errors: ["output is not an object"] };
 
   if (stage === "route") {
-    const route = ["geometry", "texture", "parameters", "chat"].includes(out.route) ? out.route : null;
-    if (!route) errors.push(`route must be geometry|texture|parameters|chat (got "${out.route}")`);
+    const route = ["geometry", "texture", "ui", "chat"].includes(out.route) ? out.route : null;
+    if (!route) errors.push(`route must be geometry|texture|ui|chat (got "${out.route}")`);
     const targets = Array.isArray(out.targets) ? out.targets.filter((t) => ids.has(t)) : [];
-    return { value: { route, instruction: String(out.instruction || ""), targets, reply: String(out.reply || "") }, errors };
+    const acceptance = (Array.isArray(out.acceptance) ? out.acceptance : []).map((a) => String(a || "").trim()).filter(Boolean);
+    return { value: { route, instruction: String(out.instruction || ""), targets, acceptance, reply: String(out.reply || "") }, errors };
   }
 
   if (stage === "geometry") {
@@ -1200,11 +1674,11 @@ export function validateStageOutput(stage, out, scene) {
       const what = `element ${i + 1}`;
       const g = parseJsonField(e.geometry, `${what} geometry`, errors, {});
       let id = typeof e.id === "string" && e.id.trim() ? e.id.trim() : "";
-      if (!id || seen.has(id)) id = nextId({ elements: [...scene.elements, ...elements], abstractions: [] }, "el");
+      if (!id || seen.has(id)) id = nextId({ elements: [...scene.elements, ...elements], groups: [] }, "el");
       seen.add(id);
       const el = { id, label: String(e.label || id), kind: e.kind, role: String(e.role || "") };
       if (e.kind === "line") { if (Array.isArray(g.paths)) el.paths = g.paths; else el.path = g.path; }
-      else if (e.kind === "region") el.boundary = g.boundary;
+      else if (e.kind === "region") { if (g.between) el.between = g.between; else el.boundary = g.boundary; }
       else if (e.kind === "point") el.at = g.at;
       else errors.push(`${what}: kind must be line|region|point (got "${e.kind}")`);
       elements.push(el);
@@ -1223,65 +1697,88 @@ export function validateStageOutput(stage, out, scene) {
       const fn = String(t.fn || "");
       const pattern = t.slot === "fill" ? parseJsonField(t.pattern, `${what} pattern`, errors, null) : null;
       if (fn) {
-        if (el.kind === "point" && !isStamp(fn)) errors.push(`${what}: a point needs a stamp (${STAMP_NAMES.join(", ")}), got "${fn}"`);
-        else if ((el.kind === "line" || t.slot === "outline") && !isBrush(fn)) errors.push(`${what}: ${t.slot} needs a line brush (${BRUSH_NAMES.join(", ")}), got "${fn}"`);
+        if (el.kind === "point" && !isPointSafe(fn)) errors.push(`${what}: a point needs a point-safe brush (${[...POINT_SAFE_BRUSHES].join(", ")}), got "${fn}"`);
+        else if ((el.kind === "line" || t.slot === "outline") && !isStrokeCapable(fn)) errors.push(`${what}: ${t.slot} needs a brush that can walk a path, got "${fn}"`);
         else if (t.slot === "fill") {
           if (!pattern || !PATTERN_KINDS.includes(pattern.kind)) errors.push(`${what}: fill pattern kind must be one of ${PATTERN_KINDS.join(", ")}`);
-          else if (STAMP_PATTERNS.includes(pattern.kind) ? !isStamp(fn) : !isBrush(fn)) errors.push(`${what}: pattern "${pattern.kind}" needs a ${STAMP_PATTERNS.includes(pattern.kind) ? "stamp" : "line brush"}, got "${fn}"`);
+          else if (STAMP_PATTERNS.includes(pattern.kind) ? !isPointSafe(fn) : !isStrokeCapable(fn)) errors.push(`${what}: pattern "${pattern.kind}" needs a ${STAMP_PATTERNS.includes(pattern.kind) ? "point-safe brush" : "brush that can walk a path"}, got "${fn}"`);
         }
       }
-      textures.push({ elementId: t.elementId, slot: t.slot, fn, pattern });
+      // The texture stage sets the numbers for the texture it chose --
+      // the brush's own options and, for a fill, its pattern's fields,
+      // named the same way and sorted out here. Choosing a texture and
+      // choosing its values is one decision ("a hairy fill, strands about
+      // 4mm apart"); splitting them across two calls meant the stage that
+      // picked the texture could not say what it had in mind.
+      const values = parseJsonField(t.options, `${what} options`, errors, {});
+      const clean = {}, patternClean = {};
+      if (fn) {
+        const spec = optionSpecFor(fn);
+        const patSpec = t.slot === "fill" && pattern ? (PATTERN_OPTIONS[pattern.kind] || {}) : {};
+        for (const [k, v] of Object.entries(values || {})) {
+          const meta = spec[k] || patSpec[k];
+          if (!meta) { errors.push(`${what}: "${k}" is not an option of ${fn}${Object.keys(patSpec).length ? ` or its ${pattern.kind} pattern` : ""}`); continue; }
+          const c = coerceOptionValue(meta, v);
+          if (c.error) { errors.push(`${what}: "${k}" ${c.error} (got ${JSON.stringify(v)})`); continue; }
+          if (c.skip) continue;
+          if (k in spec) clean[k] = c.value; else patternClean[k] = c.value;
+        }
+      }
+      textures.push({ elementId: t.elementId, slot: t.slot, fn, pattern, options: clean, patternOptions: patternClean });
     });
     return { value: { chat: String(out.chat || ""), textures }, errors };
   }
 
-  if (stage === "parameters") {
-    const options = [];
-    (Array.isArray(out.options) ? out.options : []).forEach((o, i) => {
-      const what = `options ${i + 1}`;
-      const s = slotObj(scene, o.elementId, o.slot);
-      if (!s) { errors.push(`${what}: ${o.elementId}.${o.slot} has no texture`); return; }
-      const opts = parseJsonField(o.options, what, errors, {});
-      const spec = optionSpecFor(s.fn);
-      // A fill slot has two independently-named option spaces: its brush's
-      // own options, and its pattern's own numeric fields (hatch's gap,
-      // grid's dx/dy, diamond's diag/fillGap) -- route each name to
-      // whichever it belongs to (see resolveTarget()).
-      const patSpec = o.slot === "fill" && s.pattern ? (PATTERN_OPTIONS[s.pattern.kind] || {}) : {};
-      const clean = {}, patternClean = {};
-      for (const [k, v] of Object.entries(opts || {})) {
-        const meta = spec[k] || patSpec[k];
-        if (!meta) { errors.push(`${what}: "${k}" is not an option of ${s.fn}${Object.keys(patSpec).length ? ` or its ${s.pattern.kind} pattern` : ""}`); continue; }
-        const c = coerceOptionValue(meta, v);
-        if (c.error) { errors.push(`${what}: "${k}" ${c.error} (got ${JSON.stringify(v)})`); continue; }
-        if (c.skip) continue;
-        if (k in spec) clean[k] = c.value; else patternClean[k] = c.value;
-      }
-      options.push({ elementId: o.elementId, slot: o.slot, options: clean, patternOptions: patternClean });
-    });
-    const abstractions = [];
+  if (stage === "ui") {
+    // A group is a selection, not an assertion: the ui stage picks
+    // whichever real parameters (from the textures actually in the scene)
+    // it judges relevant to the turn's request, each with its own short
+    // label. No attribute name to validate against, no direction/weight --
+    // resolveMember() still does the one thing that has to be checked
+    // (the option genuinely exists on that texture); everything else is
+    // free-form curation.
+    const groups = [];
     const seen = new Set();
-    (Array.isArray(out.abstractions) ? out.abstractions : []).forEach((a, i) => {
-      const what = `abstraction ${i + 1}`;
-      const targetsRaw = parseJsonField(a.targets, `${what} targets`, errors, []);
-      const targets = [];
-      (Array.isArray(targetsRaw) ? targetsRaw : []).forEach((t) => {
-        const s = slotObj(scene, t.elementId, t.slot);
-        if (!s) { errors.push(`${what}: target ${t.elementId}.${t.slot} has no texture`); return; }
-        if (!resolveTarget(scene, t.elementId, t.slot, t.option)) {
-          const patHint = t.slot === "fill" && s.pattern ? ` or its ${s.pattern.kind} pattern` : "";
-          errors.push(`${what}: "${t.option}" is not a numeric option of ${s.fn}${patHint}`);
+    (Array.isArray(out.groups) ? out.groups : []).forEach((g, i) => {
+      const what = `group ${i + 1}`;
+      const membersRaw = parseJsonField(g.members, `${what} members`, errors, []);
+      const members = [];
+      (Array.isArray(membersRaw) ? membersRaw : []).forEach((m, j) => {
+        const where = `${what} member ${j + 1}`;
+        const resolved = resolveMember(scene, m);
+        if (!resolved) {
+          const s0 = m.elementId ? slotObj(scene, m.elementId, m.slot) : null;
+          errors.push(`${where}: "${m.option}" is not a parameter of ${m.level === "graphic" || !m.elementId ? "the graphic" : `${m.elementId}.${m.slot}${s0 ? ` (${s0.fn})` : " (no texture)"}`}`);
           return;
         }
-        targets.push({ elementId: t.elementId, slot: t.slot, option: t.option, weight: Number(t.weight), direction: Number(t.direction) < 0 ? -1 : 1 });
+        const label = String(m.label || m.option).trim();
+        if (!label) { errors.push(`${where}: needs a short label`); return; }
+        members.push({
+          level: resolved.level,
+          ...(resolved.level === "graphic" ? {} : { elementId: m.elementId, slot: m.slot }),
+          option: m.option,
+          label,
+        });
       });
-      let id = typeof a.id === "string" && a.id.trim() ? a.id.trim() : "";
-      if (!id || seen.has(id)) id = nextId({ elements: scene.elements, abstractions: [...scene.abstractions, ...abstractions] }, "ab");
+      let id = typeof g.id === "string" && g.id.trim() ? g.id.trim() : "";
+      if (!id || seen.has(id)) id = nextId({ elements: scene.elements, groups: [...(scene.groups || []), ...groups] }, "gr");
       seen.add(id);
-      const value = Number.isFinite(Number(a.value)) ? Math.min(1, Math.max(0, Number(a.value))) : 0.5;
-      if (targets.length) abstractions.push({ id, name: String(a.name || id), description: String(a.description || ""), value, v0: value, targets });
+      if (members.length) groups.push({ id, title: String(g.title || "relevant parameters"), description: String(g.description || ""), members });
     });
-    return { value: { chat: String(out.chat || ""), options, abstractions }, errors };
+    return { value: { chat: String(out.chat || ""), groups }, errors };
+  }
+
+  if (stage === "judge") {
+    // The judge reads the scene rather than writing to it, so there is
+    // nothing to resolve against -- only its own shape to normalize.
+    const failures = (Array.isArray(out.failures) ? out.failures : []).map((f) => ({
+      criterion: String(f.criterion || ""),
+      evidence: String(f.evidence || ""),
+      suspectedStage: ["geometry", "texture", "ui"].includes(f.suspectedStage) ? f.suspectedStage : "geometry",
+    })).filter((f) => f.criterion);
+    // "pass with failures listed" is a contradiction; trust the list.
+    const pass = !!out.pass && !failures.length;
+    return { value: { pass, failures, note: String(out.note || "") }, errors: [] };
   }
 
   return { value: null, errors: [`unknown stage "${stage}"`] };
@@ -1289,8 +1786,8 @@ export function validateStageOutput(stage, out, scene) {
 
 // ------------------------------------------------------------------ merge --
 
-/** Geometry stage output -> scene. Keeps textures/abstractions for ids
- * that survive; drops the rest (pruned targets are returned). */
+/** Geometry stage output -> scene. Keeps the textures and groups of ids
+ * that survive; drops the rest (what was pruned is returned). */
 export function mergeGeometry(scene, value) {
   scene.elements = value.elements;
   const ids = new Set(scene.elements.map((e) => e.id));
@@ -1305,11 +1802,13 @@ export function mergeGeometry(scene, value) {
     if (Array.isArray(value.transform.origin) && value.transform.origin.length === 2) scene.transform.origin = value.transform.origin.map(Number);
     else if (value.transform.origin === null) scene.transform.origin = null;
   }
-  return pruneAbstractions(scene);
+  return pruneGroups(scene);
 }
 
-/** Texture stage output -> scene. fn "" clears a slot; a changed fn resets
- * options to {} (the parameters stage runs next). */
+/** Texture stage output -> scene: the brush/stamp, the fill pattern, and
+ * the option values for both. Keeping a slot's existing values when the fn
+ * is unchanged means "make it hairier" can adjust one number without the
+ * stage having to restate the rest. `fn` of "" clears the slot. */
 export function mergeTextures(scene, value) {
   for (const t of value.textures) {
     scene.textures[t.elementId] = scene.textures[t.elementId] || {};
@@ -1317,27 +1816,22 @@ export function mergeTextures(scene, value) {
     if (!t.fn) { delete tex[t.slot]; continue; }
     const prev = tex[t.slot];
     const same = prev && prev.fn === t.fn;
-    tex[t.slot] = {
-      fn: t.fn, options: same ? prev.options : {}, bases: same ? prev.bases : {},
-      ...(t.slot === "fill" ? { pattern: t.pattern, patternBases: same ? prev.patternBases : {} } : {}),
-    };
+    const options = { ...(same ? prev.options || {} : {}), ...(t.options || {}) };
+    const slot = { fn: t.fn, options };
+    if (t.slot === "fill") {
+      const samePattern = same && prev.pattern && t.pattern && prev.pattern.kind === t.pattern.kind;
+      slot.pattern = { ...(samePattern ? prev.pattern : {}), ...(t.pattern || {}), ...(t.patternOptions || {}) };
+    }
+    tex[t.slot] = slot;
   }
-  return pruneAbstractions(scene);
+  return pruneGroups(scene);
 }
 
-/** Parameters stage output -> scene: options (brush and, for a fill,
- * pattern) become the new bases, the abstraction list is replaced, then
- * the rule is applied. */
-export function mergeParameters(scene, value) {
-  for (const o of value.options) {
-    const s = slotObj(scene, o.elementId, o.slot);
-    if (!s) continue;
-    s.options = { ...(s.options || {}), ...o.options };
-    if (o.patternOptions && Object.keys(o.patternOptions).length) s.pattern = { ...(s.pattern || {}), ...o.patternOptions };
-    s.bases = {};
-    s.patternBases = {};
-  }
-  scene.abstractions = value.abstractions;
-  for (const s of Object.values(scene.textures)) for (const slot of Object.values(s)) if (slot && typeof slot === "object") { slot.bases = {}; slot.patternBases = {}; }
-  applyAbstractions(scene);
+/** UI stage output -> scene. Groups are presentation only: they say what
+ * the panel surfaces and under which heading. Nothing here touches a
+ * value, which is exactly the point -- the numbers are the texture
+ * stage's, and what the user sees in the panel is those same numbers. */
+export function mergeUi(scene, value) {
+  scene.groups = value.groups;
+  return pruneGroups(scene);
 }

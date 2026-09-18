@@ -3,29 +3,27 @@
 // calls this once per call with `stage` in the body; each stage gets its
 // own JSON schema and generation settings, and its own 60s function budget:
 //
-//   route            cheap intent classifier: which stage(s) to run, a
-//                    self-contained instruction, target element ids
-//   geometry         element definitions (line x(t)/y(t) or point list,
-//                    region boundary pieces, points) -- plain generation
-//   geometry-check   reviews a just-generated element list against a
-//                    DETERMINISTIC report the app computed from that exact
-//                    geometry (bbox, closure, chart-role tables); returns
-//                    ok, or a patch of just the elements that need fixing
-//   texture          per element slot: brush/stamp + fill pattern
-//   texture-check    same idea for a free-form fill pattern (stamps/
-//                    strokes/curves/family), against the app's stroke/
-//                    stamp counts for the compiled pattern
-//   parameters       option values + parameter abstractions
+//   route      the manager: which specialist runs, a self-contained
+//              instruction, target element ids, acceptance criteria. Also
+//              runs in "refine" mode after a failed evaluation, to pick
+//              which specialist should try again.
+//   geometry   element definitions (line x(t)/y(t) or point list, region
+//              boundary pieces or a solved `between` region, points)
+//   texture    per element slot: brush/stamp, fill pattern, option values
+//   ui         which parameters the panel surfaces, grouped by the tactile
+//              attribute they affect
+//   judge      reads the finished scene against the acceptance criteria
+//              and the app's DETERMINISTIC report, and says which criteria
+//              are unmet and which specialist can fix each
 //
-// The *-check stages replace an earlier design that asked the generation
-// call itself to self-verify with Anthropic's server-side code_execution
-// tool: that tool loop competes with the JSON answer for the same token
-// and time budget, so a long element list could truncate mid-object
-// (invalid JSON) or blow the 60s maxDuration. Splitting generation from
-// review into two plain (non-tool) calls fixes both: generation gets its
-// full budget, and the review call is handed the app's own exact numbers
-// instead of asking the model to reconstruct them in a sandbox -- cheaper,
-// faster, and provider-agnostic (no Anthropic-only tool).
+// An earlier design had the generation call self-verify with Anthropic's
+// server-side code_execution tool. That tool loop competes with the JSON
+// answer for the same token and time budget, so a long element list could
+// truncate mid-object (invalid JSON) or blow the 60s maxDuration. It was
+// replaced by per-stage *-check calls, and those in turn by the current
+// split: a deterministic gate the app runs itself (schema, ranges, a real
+// compile) between calls, and one judge call at the end whose failures go
+// back to the manager. No stage requests a tool.
 //
 // Nested variable shapes (geometry, pattern, options, targets) travel as
 // JSON *strings* and are parsed + validated client-side against
