@@ -190,12 +190,19 @@ extent to include them in the check.
 | `RETRACT_MM` | 1.3mm | Default retraction — several functions override it (see below) |
 | `RETRACT_SPEED` | 900mm/min | Default retraction speed |
 | `LINE_START_PRIME_MM` | 0.3mm | Extra extrusion applied once per major element via `Emitter.newPattern()` |
+| `MAX_EXTRUSION_RATE_MM3_S` | 4.0mm³/s | Conservative placeholder pending a confirming print; caps `freeformVariableThickness`'s per-segment speed (`F ≤ maxRate/(width×height)×60`) so a thick/slow bead never over-pressures the hotend. Well under Takahashi & Miyashita's ~11mm³/s (UIST'16 Adjunct, "Thickness Control Technique for Printing Tactile Sheets with FDM"), which was measured on a different printer, not TPU specifically — TPU buckles under back-pressure sooner than a rigid filament would |
 
 ## Relief Height Floor
 
-Every texture must produce at least **0.4mm** of relief (`MIN_LAYERS = 2`
-× `LAYER_HEIGHT = 0.20mm`) to be reliably distinguishable as a tactile
-feature. Treat anything less as needing explicit justification.
+The **0.4mm** relief guideline (2 layers × `LAYER_HEIGHT = 0.20mm`) is a
+tactile-legibility RECOMMENDATION, not an enforced code-level floor —
+`circularDot`'s `height` only has the physical 1-layer minimum enforced
+(there has to be at least one layer to print anything). This mirrors the
+decision made for `parametric-with-tool`'s `LEGIBILITY_GUIDE`
+(`enforced: false`): the 0.4mm number is guesswork, never print-confirmed,
+so baking it in as a hard floor would manufacture authority the project
+doesn't have. Treat anything below 0.4mm as needing explicit
+justification, but it is no longer refused by the code.
 
 ## Retraction Is Not Uniform — Check Before Assuming
 

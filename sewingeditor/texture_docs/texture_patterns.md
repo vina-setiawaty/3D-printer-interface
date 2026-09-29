@@ -23,7 +23,8 @@ follows this same signature.
 - **Line styles** — called directly with `xFunc, yFunc` parametric path
   functions. Any of these can follow a straight line, an angle, or a curve.
 - **Fills** — called through `fill(em, region, style, options)`, where
-  `region = {x0, y0, w, h}`. All fills EXCEPT diamond route through the
+  `region` is `{x0, y0, w, h}` or a polygon (array of `[x, y]` points; see
+  "Fill-in Texture" below). All fills EXCEPT diamond route through the
   generic `fillRegion()` mechanism.
 
 **Before generating any multi-texture print**, call `verifyLayout()` and
@@ -269,7 +270,7 @@ outward, unlike `blobDot`'s derived-from-diameter dome).
 | Parameter | Unit | Default | Notes |
 |---|---|---|---|
 | `diameter` | mm | 1.6 | |
-| `height` | mm | 0.4 | Rounded to a multiple of `LAYER_HEIGHT` (0.2mm); floor is 0.4mm |
+| `height` | mm | 0.4 | Rounded to a multiple of `LAYER_HEIGHT` (0.2mm). 0.4mm/2-layer is a tactile-legibility RECOMMENDATION, not an enforced floor — pass a smaller `height` if genuinely wanted; only the 1-layer physical minimum is enforced (see "Relief Height Floor" in `global_printing_parameters.md`) |
 | `speed` | mm/min | 250 | |
 
 **Known gap**: "donut" (hollow-center) shape is NOT implemented — solid
@@ -645,6 +646,13 @@ history and §4 for the G91 note.
 change log in `global_printing_parameters.md` before lowering `zGap`
 below 0.25mm.
 
+**Speed cap**: height sweeps continuously along the path, so there's no
+fixed "type" to have pre-picked a safe speed for — `speed` is capped
+fresh per segment at `MAX_EXTRUSION_RATE_MM3_S/(beadWidth×hAvg)×60`
+(Takahashi & Miyashita, UIST'16 Adjunct — see `global_printing_parameters.md`).
+A no-op at the current defaults (cap ≈333mm/min vs. `speed=25`); only
+bites at a higher requested `speed` and/or larger `beadWidth`/height.
+
 **No step-count parameter** — the spec asked for a discrete number of
 steps; this uses a continuous sine profile sampled at a fixed `step` (mm)
 instead. A genuinely stepped (staircase) profile would be a different
@@ -686,9 +694,31 @@ component) leaves the order forward. `"forward"` / `"reverse"` force it.
 
 ## Fill-in Texture
 
-All fills take `region = {x0, y0, w, h}` — an axis-aligned rectangle.
-**No other region shape is implemented.** Polygon and circle regions were
-designed but not built; do not assume `region` accepts anything else.
+`region` is either `{x0, y0, w, h}` (an axis-aligned rectangle) or a
+polygon — an array of `[x, y]` points, SIMPLE and non-self-intersecting,
+single contour, no holes (behavior is undefined otherwise). `fill()` /
+`fillRegion()` dispatch on `Array.isArray(region)`; diamond fill
+(`DIAMOND`) stays rectangle-only. Circle regions are a natural further
+extension but are NOT implemented. Read `troubleshooting.md` §6 before
+touching `polygonFillLines()` — it sidesteps that section's winding-order
+bug by construction (scanline/even-odd crossing pairing, not edge-normal
+clipping), so don't "fix" it by adding winding normalization.
+
+**Polygon fill example**:
+`fillRegion(em, [[90, 41], [110, 41], [100, 58]], freeformSolid, {angleDeg: 0, gap: 4.0})`
+— for `verifyLayout()`, approximate a polygon region with its bounding
+rectangle (plus half the bead width as margin), same as the existing
+line-texture convention in `gen_template.mjs`; there is no native
+polygon-aware layout check.
+
+### Polygon regions — ✅ implemented (a region SHAPE, not a fill style)
+`polygonFillLines(polygon, angleDeg, gap)` — a shape axis orthogonal to
+the style headings below: any of Solid / Line shade / Dots / Hairy fill
+works unchanged against a polygon `region` (`fillRegion()` dispatches on
+`Array.isArray(region)`), since they're all just `freeform*` styles
+routed through the generic mechanism. **Diamond fill stays
+rectangle-only** — it doesn't go through `fillRegion()` at all (see the
+module note above), so this doesn't extend to it.
 
 ### Outline only — ⚠️ no dedicated function
 Draw the region's four edges as a closed `freeformSolid` path. No

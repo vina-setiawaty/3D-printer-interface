@@ -32,10 +32,18 @@ export const LINE_START_PRIME_MM = 0.3; // small extra extrusion applied once
 export const TRAVEL_SPEED = 3000;
 export const Z_HOP = 0.4;
 export const LAYER_HEIGHT = 0.20;
-export const MIN_LAYERS = 2;      // 0.4mm floor -- see "Relief Height Floor"
-                                   // in global_printing_parameters.md
 export const DEFAULT_WIDTH = 0.5;
 export const FLOW_PERCENT = 180;
+
+// Conservative placeholder pending a confirming print -- the extruder's
+// maximum volumetric flow rate, for the Ender 3 V2 / Sprite direct-drive,
+// 0.4mm nozzle, TPU. Well under Takahashi & Miyashita's ~11mm3/s (UIST'16
+// Adjunct, "Thickness Control Technique for Printing Tactile Sheets with
+// FDM"), which was measured on a different printer and not specifically
+// TPU -- TPU buckles under back-pressure well before a rigid filament
+// would, so published safe rates for it on a standard hotend commonly sit
+// lower. Currently only caps freeformVariableThickness's per-segment speed.
+export const MAX_EXTRUSION_RATE_MM3_S = 4.0;
 
 export const BED_X = 220.0;
 export const BED_Y = 220.0;
@@ -761,7 +769,14 @@ export function freeformVariableThickness(em, xFunc, yFunc, tStart, tEnd, {
     if (seg < 1e-9) continue;
     const h1 = hAt(s1);
     const hAvg = (prevH + h1) / 2.0;
-    em.printMove(x1, y1, seg * eRate(beadWidth, hAvg), speed, h1 + zGap);
+    // height sweeps continuously along this line's whole path (unlike a
+    // discrete per-layer or per-segment height), so there's no fixed
+    // "type" to have pre-picked a safe speed for -- cap it fresh per
+    // segment. F <= MaxExtrusionRate / (Height x Width) x 60 (Takahashi &
+    // Miyashita, UIST'16 Adjunct); see MAX_EXTRUSION_RATE_MM3_S above.
+    const maxSpeed = (MAX_EXTRUSION_RATE_MM3_S / (beadWidth * hAvg)) * 60;
+    const effectiveSpeed = Math.min(speed, maxSpeed);
+    em.printMove(x1, y1, seg * eRate(beadWidth, hAvg), effectiveSpeed, h1 + zGap);
     prevH = h1;
   }
   em.retract();
@@ -772,11 +787,20 @@ export function freeformVariableThickness(em, xFunc, yFunc, tStart, tEnd, {
  * ============================================================================
  * SECTION 4: REGIONS AND FILLS
  * ============================================================================
- * A region is {x0, y0, w, h} -- an axis-aligned rectangle. This is
- * deliberately the ONLY region type implemented right now, because it is
- * the only one this project has actually needed. Polygon and circle
- * regions are a natural extension (see troubleshooting.md "Polygon
- * winding order" for a real gotcha to avoid) but are NOT implemented here.
+ * A region is either {x0, y0, w, h} (an axis-aligned rectangle) or a
+ * polygon (an array of [x,y] points, SIMPLE and non-self-intersecting,
+ * single contour, no holes -- behavior is undefined otherwise). Circle
+ * regions are a natural further extension but are NOT implemented here.
+ * `fillRegion()`/`fill()` dispatch on `Array.isArray(region)`.
+ * See troubleshooting.md SS6 ("Polygon region winding order") before
+ * touching `polygonFillLines()` -- winding direction bit a real,
+ * confirmed bug the first time this was tried; `polygonFillLines()`
+ * sidesteps it entirely by using a scanline/even-odd crossing-count
+ * algorithm (pair up ALL of a sweep line's edge crossings in sorted
+ * order) rather than the edge-normal clipping `clipLineToRect()` uses for
+ * rectangles, so it works regardless of CW/CCW winding by construction --
+ * do not "fix" this by adding winding normalization, and do not replace
+ * it with an edge-normal approach without re-reading SS6 first.
  *
  * CRITICAL: diamond fill is NOT a generic "lines at a gap" pattern, even
  * though it looks like one. Its lattice lines fit the generic mechanism,
@@ -836,11 +860,59 @@ export function regionFillLines(region, angleDeg, gap) {
   return segments;
 }
 
-/** Generic fill: clip parallel lines across `region` at `angleDeg`, `gap`
- * apart, drawn with `styleFunc` (any freeform* line style). NEVER use
- * this for diamond fill -- see module docstring above. */
+/** Returns the [start,end] line segments needed to fill `polygon` (an
+ * array of [x,y] points, edges implied by consecutive pairs plus a
+ * closing edge back to the first point) with parallel lines at
+ * `angleDeg`, `gap` apart. The polygon analogue of regionFillLines():
+ * projects every vertex onto the sweep normal to find the scan range,
+ * then for each swept line finds ALL intersections with the polygon's
+ * edges (not just 2, as a rectangle guarantees), sorts them along the
+ * sweep direction, and pairs up consecutive crossings as filled
+ * sub-segments (standard scanline polygon fill -- see the module
+ * docstring above and troubleshooting.md SS6 for why this algorithm was
+ * chosen over edge-normal clipping). */
+export function polygonFillLines(polygon, angleDeg, gap) {
+  const theta = (angleDeg * Math.PI) / 180;
+  const dx = Math.cos(theta), dy = Math.sin(theta);
+  const nx = -Math.sin(theta), ny = Math.cos(theta);
+
+  const perpVals = polygon.map(([px, py]) => px * nx + py * ny);
+  const pMin = Math.min(...perpVals), pMax = Math.max(...perpVals);
+
+  const n = polygon.length;
+  const segments = [];
+  for (let p = pMin; p <= pMax; p += gap) {
+    const ox = p * nx, oy = p * ny; // a point on this sweep line
+    const hits = [];
+    for (let i = 0; i < n; i++) {
+      const [ax, ay] = polygon[i], [bx, by] = polygon[(i + 1) % n];
+      const ex = bx - ax, ey = by - ay;
+      const cx = ax - ox, cy = ay - oy;
+      const denom = ex * dy - ey * dx;
+      if (Math.abs(denom) < 1e-12) continue; // edge parallel to the sweep line
+      const s = (ex * cy - ey * cx) / denom;   // position along the sweep line
+      const u = (dx * cy - dy * cx) / denom;   // position along the edge
+      if (u < -1e-9 || u > 1 + 1e-9) continue; // intersection outside this edge segment
+      hits.push(s);
+    }
+    hits.sort((a, b) => a - b);
+    for (let i = 0; i + 1 < hits.length; i += 2) {
+      const s0 = hits[i], s1 = hits[i + 1];
+      if (s1 - s0 > 1e-6) {
+        segments.push([[ox + s0 * dx, oy + s0 * dy], [ox + s1 * dx, oy + s1 * dy]]);
+      }
+    }
+  }
+  return segments;
+}
+
+/** Generic fill: clip parallel lines across `region` (rect or polygon) at
+ * `angleDeg`, `gap` apart, drawn with `styleFunc` (any freeform* line
+ * style). NEVER use this for diamond fill -- see module docstring above. */
 export function fillRegion(em, region, styleFunc, { angleDeg = 0, gap = 4.0, ...styleOptions } = {}) {
-  const segments = regionFillLines(region, angleDeg, gap);
+  const segments = Array.isArray(region)
+    ? polygonFillLines(region, angleDeg, gap)
+    : regionFillLines(region, angleDeg, gap);
   for (const [p0, p1] of segments) {
     const ddx = p1[0] - p0[0], ddy = p1[1] - p0[1];
     const length = Math.hypot(ddx, ddy);
@@ -1328,10 +1400,14 @@ export function directionalBlobDot(em, cx, cy, options = {}) {
  * diameter'd disc is needed (diameter and height are independently
  * controlled here, unlike blobDot()'s derived-from-diameter dome).
  * height should be a multiple of LAYER_HEIGHT (0.2mm) -- e.g. height=0.4
- * -> 2 layers. NOTE: "donut" (hollow-center) shape is NOT implemented --
+ * -> 2 layers. The 0.4mm/2-layer default is a tactile-legibility
+ * RECOMMENDATION, not an enforced floor (see "Relief Height Floor" in
+ * global_printing_parameters.md) -- pass a smaller `height` for a shorter
+ * dot if that's genuinely wanted; only the 1-layer physical minimum is
+ * enforced here. NOTE: "donut" (hollow-center) shape is NOT implemented --
  * known gap. */
 export function circularDot(em, cx, cy, { diameter = 1.6, height = 0.4, speed = 250 } = {}) {
-  const nLayers = Math.max(MIN_LAYERS, Math.round(height / LAYER_HEIGHT));
+  const nLayers = Math.max(1, Math.round(height / LAYER_HEIGHT));
   const pts = spiralDisc([cx, cy], diameter / 2.0);
   em.newPattern();
   emitStroke(em, pts, nLayers, 0.42, speed);

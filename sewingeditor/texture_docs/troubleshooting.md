@@ -208,10 +208,23 @@ guess which direction their boundary was authored in.
 **Status**: confirmed as a real, reproducible bug (not hypothetical) —
 a hand-authored organic (Bézier-flattened) boundary was clockwise, a
 hand-authored triangle was counter-clockwise, and only the triangle
-worked before this fix. Polygon regions are not yet part of
-`texture_functions.js` (only rectangle regions are implemented) — if
-polygon support is added, this normalization must be included from the
-start, not retrofitted after a similar bug is independently rediscovered.
+worked before this fix.
+
+**Update**: polygon support was added to `texture_functions.js` via
+`polygonFillLines()` (ported from `parametric-with-tool`'s fork, which
+had independently faced this exact question). It sidesteps the bug
+*by construction* rather than by explicit winding normalization: instead
+of edge-normal clipping (the naive rectangle-clipping extension that
+triggered this bug), it uses a scanline/even-odd algorithm — for each
+sweep line, find ALL intersections with the polygon's edges (not just 2),
+sort them along the sweep direction, and pair up *consecutive* crossings
+as filled sub-segments. Pairing by sorted position, not by a
+direction-sensitive inside/outside test, is winding-independent
+regardless of CW/CCW. Still requires a SIMPLE, non-self-intersecting,
+single-contour, no-holes polygon — that constraint doesn't go away, only
+the winding-direction half of it does. Do not "fix" this by adding
+winding normalization, and do not swap in an edge-normal approach without
+re-reading this section first.
 
 ---
 

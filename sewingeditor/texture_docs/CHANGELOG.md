@@ -1990,3 +1990,117 @@ F150`; per thin `G1 X8 … E0.7450 F130`, per fat `G1 X4 … E1.1175 F60`;
 `G1 Z0.100 F600` before each fat / `G1 Z-0.100 F600` before each thin,
 `G4 P250` after each; one `G1 E-4.0000 F1000` at the end; 4 negative-E
 (1 + 2 + 1); `verifyLayout` ok; eTotal 10.9. **Not yet print-tested.**
+
+---
+
+## 54. Backport three improvements from the parametric-with-tool fork
+
+**Asked**: compare `parametric-with-tool/docs/texture_functions-with-tool.js`
+(a "PROTOTYPE fork" restructured around a brush/stamp/pattern split for
+the LLM tool, verified byte-identical to this file for a fixed test-option
+matrix via `tests/parametric/golden-brushes.mjs`) against this file, and
+port back anything that's a genuine difference rather than just the
+brush/stamp renaming, using the fork as reference. Three real differences
+found (everything else — `freeform*`→`brush*`, `*Dot`→`stamp*`, the
+`pts`-based API, `BRUSHES`/`STAMPS` catalogs — is with-tool-specific app
+plumbing, not backported).
+
+**Given**:
+- **`freeformVariableThickness`**: added `MAX_EXTRUSION_RATE_MM3_S = 4.0`
+  (Takahashi & Miyashita, UIST'16 Adjunct) and a per-segment speed cap
+  (`F ≤ maxRate/(beadWidth×hAvg)×60`) — a no-op at current defaults, real
+  headroom against over-pressuring the hotend at a higher requested
+  `speed` or larger `beadWidth`/height.
+- **`circularDot`**: relief floor relaxed from a hard `MIN_LAYERS=2`
+  (`Math.max(MIN_LAYERS, ...)`) to the 1-layer physical minimum
+  (`Math.max(1, ...)`) — `MIN_LAYERS` removed (was used nowhere else).
+  0.4mm/2-layer is now a documented RECOMMENDATION, not an enforced
+  floor, mirroring the `LEGIBILITY_GUIDE`/`enforced: false` decision
+  already made for `parametric-with-tool`. Same output at the current
+  default (`height=0.4` → 2 layers either way).
+- **Polygon fill** (genuinely new, not previously in this file): added
+  `polygonFillLines()` and generalized `fillRegion()`/`fill()` to dispatch
+  on `Array.isArray(region)`. Closes the gap `troubleshooting.md` §6 and
+  the old "Fill-in Texture" section both flagged ("designed but not
+  built"). Uses a scanline/even-odd crossing-pair algorithm rather than
+  edge-normal clipping, which sidesteps §6's winding-order bug by
+  construction — updated §6 to record this. Diamond fill stays
+  rectangle-only; `verifyLayout()` still has no native polygon awareness
+  — approximate with a bounding rectangle, per the existing line-texture
+  convention.
+- Updated `global_printing_parameters.md` (new constant + rewritten
+  "Relief Height Floor"), `texture_patterns.md` (Circular dot, Variable
+  thickness line, Fill-in Texture, and the module-level fills note),
+  `troubleshooting.md` §6.
+
+**Given** (file):
+`test_print_gcode/20260924-170610_backport-extrusion-cap-polygon-fill.gcode`
+— normal mode, calibration line x=120-180 y=90 (continuing the
+descending-by-5 sequence from y=95); Texture A `freeformVariableThickness`
+x=20-60 y=70 with `speed:1000` (forced above the cap to exercise it);
+Texture B a polygon fill (triangle `[[90,41],[110,41],[100,58]]`,
+`gap:9`) via `fillRegion(em, triangle, freeformSolid, {...})`. Verified
+by digest: 8 negative-E (1 header + 2 calibration + 1 texture A + 4
+texture B = 2 segments × 2 layers), matches expected; texture A's first
+printed segment lands at `F551` (hand-computed cap ≈550.96 at that
+segment's `hAvg`≈0.5445, `beadWidth`=0.8 — matches), and the cap visibly
+relaxes back toward the requested `F1000` as bead height drops away from
+`hMax`; texture B's first sweep line starts exactly at `G0 X90.000
+Y41.000` (the base edge) and the footer tail shows the second sweep
+line ending at `X104.706 Y50.000`, matching the hand-computed edge
+intersection at y=50. `verifyLayout` ok. **Not yet print-tested** — no
+existing default-option texture's G-code changed; the new capability
+(polygon fill) and the cap's active branch are both new and untested on
+hardware.
+
+---
+
+## 55. Full-catalog PLA calibration sheet — every texture, 3 tiers each, one bed
+
+**Asked**: generate one G-code file, one bed, one print, testing every
+texture possible in three different (meaningfully varied) parameter sets
+each, in **PLA** (not TPU), and collate what's printed where in a
+markdown map.
+
+**Given**: `gen_pla_catalog_sheet.mjs` (scratchpad, not a repo file — this
+is a one-off, not a per-turn `Task_FineTune.md` mechanism change; no
+`texture_functions.js` code changed this turn). Prints all 18 named
+textures in `texture_patterns.md`'s own catalog (4 dots, 9 lines, 5
+fills), 3 tiers each = 54 swatches, laid out in three columns (DOTS /
+LINES / FILLS) on one bed. PLA process settings via `em.header()`
+override only (library's TPU globals untouched): 205°C nozzle / 60°C bed
+/ 100% flow (down from TPU's 180%, which is firmware compensation for
+TPU's own extruder slip and would over-extrude a rigid filament). Each
+row sweeps ONE primary knob per texture (diameter, gap, width, angle,
+etc. — see the map for the full table), holding everything else at
+documented defaults except the hairy-family functions, which are
+anchored on `hairLength=3`/`hairThickness=0.8` (the one combo
+`texture_patterns.md` flags as TPU-validated, not because it's known-good
+on PLA, but as the least-arbitrary anchor available). Calibration line
+(`freeformSolid`, x=120-180) placed at **y=200**, above the whole grid —
+this file deliberately does NOT continue the normal descending-by-5
+single-texture sequence (last value: y=90); the next single-texture file
+should resume from y=85.
+
+Full swatch-by-swatch table, PLA-vs-TPU rationale, and verification
+detail: `test_print_gcode/20260925-172719_pla-full-catalog-calibration-sheet-MAP.md`.
+
+**Verification** (adapted — `Task_FineTune.md`'s per-line hand-verify
+doesn't scale to 54 swatches): `verifyLayout` ok (0 errors/warnings, 3mm
+min-gap); `verifyCheckerboard` 0 violations on all 3 diamond-fill tiers
+(mandatory per `troubleshooting.md` §3, run even though the diamond code
+itself wasn't touched); stray-E guard clean; per-row negative-E counts
+computed by the generator and cross-checked against each function's
+documented retract pattern (2/segment for `freeformSolid`, 1/segment for
+`freeformSegmented`/`freeformVariableThickness`, 1/stamp for the
+`blobDot` family, etc.) — all matched; one hand spot-check (`blobDot`
+tier 1, diameter=1.2mm, volume-model E for the first build step:
+hand-computed 4.694mm vs. emitted 4.6940mm — matches). 25,016 total
+lines, 644 negative-E, eTotal 315.1mm.
+
+**Given** (file):
+`test_print_gcode/20260925-172719_pla-full-catalog-calibration-sheet.gcode`
+(+ its `-MAP.md` companion). **Not yet print-tested** — this is the first
+print of any of this library's mechanisms in PLA; treat it as testing
+whether TPU-tuned anti-stringing/timing mechanisms even make sense on a
+different filament, not as a confirmed-good PLA config.
