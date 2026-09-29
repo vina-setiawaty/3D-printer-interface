@@ -1811,3 +1811,15 @@ export function verifyLayout(regions, { minGap = 0.5, bedMargin = 15.0 } = {}) {
 
   return { ok: errors.length === 0, errors, warnings };
 }
+
+/**
+ * ============================================================================
+ * SECTION 7: SKETCHED BRUSHES (re-exported from sketched_brushes.js)
+ * ============================================================================
+ * Textures prompted by drawing the nozzle's motion on the brush-sketch page
+ * live in their own file, which imports this one for the Emitter and path
+ * engine. Re-exported here so any script importing texture_functions.js
+ * gets them too. The import is circular -- see the header of
+ * sketched_brushes.js for the one rule that keeps it safe.
+ */
+export * from "./sketched_brushes.js";

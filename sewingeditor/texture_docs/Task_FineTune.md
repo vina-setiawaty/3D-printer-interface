@@ -162,6 +162,15 @@ stringing/oozing is actually fixed. Common reply shapes and what to do:
 
 ## 5. Things to never do without being asked
 
+- Don't hand-edit a generated block in `sketched_brushes.js` (between
+  `// <sketch-brush name=...>` markers). Those brushes came from the
+  brush-sketch page and are defined by their program JSON
+  (`sketch_brushes/<name>/vN.program.json`); the page overwrites the block
+  on the next promotion. Change the program instead -- see
+  `system_prompt.md` → Sketched brushes. Their test files follow the same
+  calibration conventions (§3 / §6) and are saved into `test_print_gcode/`
+  by the page, so check them when continuing a position sequence.
+
 - Don't switch back to absolute extrusion (`M82`) — the whole file is
   relative (`M83`) by deliberate architecture decision (`troubleshooting.md`
   §11).

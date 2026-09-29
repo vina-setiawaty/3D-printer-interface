@@ -209,3 +209,30 @@ runs unmodified in a browser. If you need to write the resulting G-code
 to a file for the user, that's an environment-specific concern (e.g.
 triggering a browser download) layered on top of this library, not
 something to add to `texture_functions.js` itself.
+
+## Sketched brushes (`sketched_brushes.js`)
+
+Some textures were prompted by DRAWING the nozzle's motion on the
+brush-sketch page (`sewingeditor/brush-sketch/`) rather than by text.
+Each one is a **brush program** -- JSON steps in a local frame around one
+stamp point -- run by a single shared interpreter in
+`sketched_brushes.js`, which `texture_functions.js` re-exports. A promoted
+brush `x` exposes `x(em, cx, cy, options)` (one stamp),
+`freeformXDotted(em, xFunc, yFunc, tStart, tEnd, options)` (the standard
+line-style signature, so it also works in `fill()`), and
+`brushXDotted(em, pts, options)` (the parametric-with-tool shape). They
+are listed in `texture_patterns.md` → Sketched brushes and recorded in
+`troubleshooting.md` like every other texture.
+
+**To change a sketched brush, edit its program, never the generated
+block.** The program lives in `sketch_brushes/<name>/v<N>.program.json`
+and is embedded between `// <sketch-brush name="x" ...>` markers in
+`sketched_brushes.js`; the page replaces that block on every promotion,
+so a hand edit to it is silently lost. Either use the page, or change the
+program JSON (both copies) and add the version entry to the docs as the
+page would.
+
+`sketched_brushes.js` imports from `texture_functions.js` and is
+re-exported by it -- a circular import that is safe only because nothing
+at the top level of `sketched_brushes.js` reads an imported name. Keep it
+that way (see the file's header).

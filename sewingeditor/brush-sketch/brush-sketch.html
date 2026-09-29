@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="UTF-8">
+  <title>Brush Sketch</title>
+  <link rel="icon" href="data:,">
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.3.1/p5.js"></script>
+  <script src="../lib/p5.fab.sewing.js" type="text/javascript"></script>
+  <script src="https://unpkg.com/p5-webserial@0.1.1/build/p5.webserial.js"></script>
+</head>
+
+<style>
+  *, html { box-sizing: border-box; font-family: sans-serif; font-size: 12px; font-weight: 400; margin: 0; padding: 0; }
+  body { background: #FFF; color: #222; }
+  canvas.p5Canvas { position: absolute; top: 0; left: 0; z-index: -1; }
+  h1 { font-size: 0.8rem; font-weight: 500; text-transform: uppercase; display: block; margin-bottom: 0.6em; }
+  #container { position: relative; width: 100vw; min-height: 100vh; padding: 1em; }
+
+  .btn { padding: 0.45em 0.7em; cursor: pointer; background: #666; color: white; border-radius: 0.7em; transition: all 100ms ease-in; user-select: none; display: inline-block; }
+  .btn:hover { background: #777; }
+  .btn:active { background: #888; }
+  .btn.active { background: #33AA00; }
+  .btn.disabled { opacity: 0.4; pointer-events: none; }
+  .btn.small { font-size: 0.85em; padding: 0.25em 0.55em; }
+  .btn.ai { background: #5b3fa0; }
+  .btn.ai:hover { background: #6d50b5; }
+  .btn.go { background: #2a7a3a; }
+  .btn.go:hover { background: #33913f; }
+
+  div.ui-frame { margin: 1em; padding: 0.5em 0.75em; border: 1px solid #999; border-radius: 0.5em; position: relative; float: left; display: block; }
+  div.ui-group { position: relative; display: block; clear: both; margin-top: 0.5em; }
+  div.ui-group::after { content: ""; display: table; clear: both; }
+  div.ui-item { position: relative; float: left; margin: 0 1em 0.3em 0; border-radius: 0.2em; }
+  span.label { font-family: monospace; font-size: 0.8em; display: inline-block; padding-right: 0.4em; }
+  div.ui-item input[type=number] { width: 5em; }
+  #messages { width: 220px; height: 18em; overflow: scroll; }
+  #messages h1 span u { position: absolute; right: 0; top: 0.5em; font-size: 0.7em; color: #CCC; cursor: pointer; }
+  #messages li { position: relative; clear: both; font-family: monospace; font-size: 0.8em; list-style: none; }
+  .motion.btn { background: white; border: 1px solid #999; color: black; width: 3em; height: 3em; display: flex; align-items: center; justify-content: center; }
+  .motion.btn:hover { background: #EEE; }
+  #printer-controls { clear: both; padding-top: 0.5em; }
+  #printer-controls h2 { font-size: 0.75rem; text-transform: uppercase; color: #666; margin: 0 0 0 1em; }
+
+  /* ---- workspace ---- */
+  #bs-workspace { display: grid; grid-template-columns: 700px minmax(320px, 1fr) minmax(320px, 1fr); gap: 1em; padding: 1em; align-items: start; }
+  .bs-col { border: 1px solid #999; border-radius: 0.5em; padding: 0.6em 0.75em; min-width: 0; }
+  .bs-row { display: flex; gap: 0.5em; align-items: center; flex-wrap: wrap; margin: 0.35em 0; }
+  .bs-tabs .btn { background: #BBB; }
+  .bs-tabs .btn.on { background: #333; }
+  .bs-canvases { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .bs-canvas-wrap { position: relative; }
+  .bs-canvas-wrap .cap { position: absolute; left: 6px; top: 4px; font-family: monospace; font-size: 10px; color: #888; pointer-events: none; }
+  canvas.bs-view { display: block; border: 1px solid #DDD; border-radius: 4px; touch-action: none; cursor: crosshair; }
+  #bs-pen { font-family: monospace; font-size: 0.85em; color: #444; }
+  .bs-flow-dots span { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #DDD; margin-right: 2px; vertical-align: middle; }
+  .bs-flow-dots span.on { background: #1f5fbf; }
+  .bs-keys { font-size: 0.85em; color: #555; }
+  .bs-keys table { border-collapse: collapse; margin-top: 0.3em; }
+  .bs-keys td { padding: 0.1em 0.5em 0.1em 0; vertical-align: top; }
+  .bs-keys kbd { font-family: monospace; background: #F2F2F2; border: 1px solid #DDD; border-radius: 3px; padding: 0 0.3em; }
+  .bs-section { font-family: monospace; font-size: 0.75em; text-transform: uppercase; color: #666; border-bottom: 1px solid #DDD; margin: 0.9em 0 0.4em; padding-bottom: 0.15em; }
+  .bs-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 0.25em 0.5em; }
+  .bs-field { display: flex; flex-direction: column; font-size: 0.9em; }
+  .bs-field.wide { grid-column: 1 / -1; }
+  .bs-field > span { font-family: monospace; font-size: 0.75em; color: #666; }
+  .bs-field input, .bs-field select, .bs-field textarea { width: 100%; }
+  textarea.bs-text { width: 100%; font-size: 0.95em; resize: vertical; }
+  textarea.bs-json { width: 100%; height: 16em; font-family: monospace; font-size: 0.8em; resize: vertical; }
+  textarea.bs-json.bad { border-color: #c00; background: #FFF4F4; }
+  .bs-params table { width: 100%; border-collapse: collapse; font-size: 0.9em; }
+  .bs-params td, .bs-params th { padding: 0.1em 0.2em; text-align: left; }
+  .bs-params th { font-family: monospace; font-size: 0.75em; color: #666; font-weight: 400; }
+  .bs-params input { width: 100%; }
+  .bs-steps { list-style: none; font-family: monospace; font-size: 0.85em; max-height: 16em; overflow-y: auto; border: 1px solid #EEE; border-radius: 4px; }
+  .bs-steps li { padding: 0.15em 0.4em; cursor: pointer; display: flex; gap: 0.4em; align-items: baseline; }
+  .bs-steps li:hover { background: #F6F6F6; }
+  .bs-steps li.sel { background: #FFE6F3; }
+  .bs-steps li .op { font-weight: 600; min-width: 6.5em; }
+  .bs-steps li .del { margin-left: auto; color: #c00; }
+  .bs-inspector { border-left: 3px solid #ff2d95; padding-left: 0.5em; margin-top: 0.4em; }
+  .bs-f { display: flex; gap: 0.2em; }
+  .bs-f button { font-size: 0.8em; }
+  .bs-errs { color: #c00; }
+  .bs-warns { color: #a35b00; }
+  .bs-errs ul, .bs-warns ul { margin: 0.2em 0 0.4em 1.2em; }
+  .bs-ok { color: #2a7; font-weight: 600; }
+  .bs-notok { color: #c00; font-weight: 600; }
+  .bs-muted { color: #888; font-size: 0.9em; }
+  .bs-ai { font-size: 0.95em; }
+  .bs-ai .msg { background: #F4F1FA; border-radius: 0.4em; padding: 0.4em 0.55em; margin: 0.3em 0; white-space: pre-wrap; }
+  .bs-ai .msg .who { font-family: monospace; font-size: 0.75em; color: #7a4fb3; text-transform: uppercase; display: block; }
+  .bs-notes { margin: 0.3em 0 0 1.1em; }
+  .bs-notes li { margin: 0.15em 0; }
+  .bs-notes .ref { font-family: monospace; font-size: 0.85em; color: #888; }
+  #raw-gcode-textarea { width: 100%; height: 14em; resize: vertical; font-family: monospace; font-size: 0.8em; }
+  .bs-digest pre, .bs-diff pre { font-family: monospace; font-size: 0.78em; white-space: pre-wrap; background: #FAFAFA; border: 1px solid #EEE; border-radius: 4px; padding: 0.4em; max-height: 18em; overflow: auto; }
+  .bs-diff .file { font-family: monospace; font-weight: 600; margin-top: 0.6em; }
+  .bs-diff .add { color: #1d6b2c; background: #EEF9F0; display: block; }
+  .bs-diff .rem { color: #a11; background: #FDEEEE; display: block; }
+  .bs-diff .ctx { color: #888; display: block; }
+  .bs-status { font-family: monospace; font-size: 0.85em; color: #555; }
+  #bs-config summary, details.bs-fold summary { cursor: pointer; font-family: monospace; font-size: 0.8em; color: #666; }
+  #bs-config .ui-group { margin-top: 0.35em; }
+  .llm-cost-tracker { font-size: 0.75em; font-family: monospace; color: #888; margin-top: 0.4em; }
+  .bs-badge { display: inline-block; font-size: 0.7em; font-weight: 600; text-transform: uppercase; color: white; background: #a35b00; border-radius: 0.3em; padding: 0.15em 0.5em; margin-left: 0.4em; vertical-align: middle; }
+</style>
+
+<body>
+  <div id="container">
+    <div id="bs-workspace">
+
+      <!-- ============ Column 1: sketch ============ -->
+      <div class="bs-col" id="bs-col-sketch">
+        <h1>Sketch one stamp <span class="bs-badge">exploration</span></h1>
+        <div class="bs-row bs-tabs">
+          <span class="btn small" data-mode="freehand">freehand</span>
+          <span class="btn small" data-mode="vector">vector</span>
+          <span class="label" style="margin-left:1em;">view ±</span>
+          <select data-k="zoom">
+            <option value="4">4mm</option><option value="8" selected>8mm</option><option value="15">15mm</option><option value="30">30mm</option>
+          </select>
+          <span class="label">side plane</span>
+          <select data-k="az">
+            <option value="0">XZ (0°)</option><option value="90">YZ (90°)</option><option value="45">45°</option><option value="135">135°</option>
+          </select>
+          <span class="btn small" id="bs-new-btn" style="margin-left:auto;">new</span>
+        </div>
+
+        <div class="bs-canvases">
+          <div class="bs-canvas-wrap"><canvas class="bs-view" id="bs-top"></canvas><span class="cap">TOP · x→ y↑</span></div>
+          <div class="bs-canvas-wrap"><canvas class="bs-view" id="bs-side"></canvas><span class="cap">SIDE · z↑</span></div>
+        </div>
+        <div class="bs-canvas-wrap" style="margin-top:8px;"><canvas class="bs-view" id="bs-timeline"></canvas></div>
+
+        <div class="bs-row">
+          <span id="bs-pen"></span>
+          <span class="bs-flow-dots" id="bs-flow-dots"></span>
+        </div>
+
+        <div id="bs-freehand-controls">
+          <div class="bs-row">
+            <span class="btn small" id="bs-undo-stroke">undo</span>
+            <span class="btn small" id="bs-clear-sketch">clear sketch</span>
+            <span class="label">hold-still time ×</span><input type="number" data-k="timeScale" step="0.25" min="0.1" value="1" style="width:4em;">
+            <span class="label">retract mm</span><input type="number" data-k="drawRetractMm" step="0.1" min="0" value="1.3" style="width:4em;">
+            <label class="label"><input type="checkbox" data-k="useDrawSpeed"> my drawing speed sets feed</label>
+            <label class="label"><input type="checkbox" data-k="showStrokes" checked> show my raw strokes</label>
+          </div>
+        </div>
+
+        <details class="bs-fold bs-keys" open>
+          <summary>mouse &amp; keyboard</summary>
+          <table id="bs-keys-freehand">
+            <tr><td><kbd>drag</kbd> in TOP</td><td>reshape the <b>XY</b> of the movement at the playhead (shaded blue on the timeline), stretched over it -- height, timing and extrusion stay</td></tr>
+            <tr><td><kbd>drag</kbd> in SIDE</td><td>reshape its <b>Z</b>: draw the height profile over the path as you see it from the side (matched by position; by time if the path doubles back in that view)</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+drag</td><td>add a <b>new movement</b> at the playhead instead (the first stroke always does)</td></tr>
+            <tr><td><kbd>Shift</kbd>+drag</td><td>dry move: nozzle moves, nothing comes out</td></tr>
+            <tr><td><kbd>wheel</kbd> / <kbd>0</kbd>–<kbd>5</kbd></td><td>flow level, live while drawing (0 = none) -- for new movements; reshaping keeps the existing extrusion</td></tr>
+            <tr><td>hold <kbd>W</kbd> / <kbd>S</kbd></td><td>raise / lower Z while drawing in TOP (2mm/s)</td></tr>
+            <tr><td>hold still</td><td>flow &gt; 0: a puddle that grows · flow 0: a dwell</td></tr>
+            <tr><td><kbd>R</kbd> / <kbd>P</kbd></td><td>retract / prime (while drawing: at that moment of the stroke; otherwise: at the playhead)</td></tr>
+            <tr><td><kbd>D</kbd> / <kbd>H</kbd></td><td>add a dwell / a stationary extrusion at the playhead</td></tr>
+            <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>rotate the side plane 15°</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd> · <kbd>Esc</kbd></td><td>undo · cancel the stroke in progress</td></tr>
+          </table>
+          <table id="bs-keys-timeline">
+            <tr><td colspan="2" style="padding-top:0.4em;"><b>TIMELINE</b> -- everything new happens at the <span style="color:#ff2d95;">playhead</span>; the ring in TOP/SIDE is where the nozzle is then</td></tr>
+            <tr><td><kbd>click</kbd>/<kbd>drag</kbd> time ruler or events</td><td>move the playhead (snaps to step boundaries; <kbd>Alt</kbd> = no snap)</td></tr>
+            <tr><td><kbd>drag</kbd> in Z lane</td><td>paint the nozzle height over time onto what is drawn (left to right) -- XY from TOP + Z from here = one 3D movement</td></tr>
+            <tr><td><kbd>,</kbd> <kbd>.</kbd> · <kbd>Home</kbd> <kbd>End</kbd></td><td>playhead to the previous / next step boundary · to the start / the end</td></tr>
+            <tr><td><kbd>wheel</kbd> · <kbd>Shift</kbd>+wheel · double-click</td><td>zoom time · pan · show the whole stamp</td></tr>
+          </table>
+          <table id="bs-keys-vector" style="display:none;">
+            <tr><td><kbd>click</kbd> empty</td><td>add a move to there at the playhead (TOP: at the nozzle's height; SIDE: in its plane). Selecting a step puts the playhead after it</td></tr>
+            <tr><td><kbd>drag</kbd> node</td><td>move it (0.05mm snap; <kbd>Alt</kbd> = free). ƒ = driven by a param, edit in the inspector</td></tr>
+            <tr><td><kbd>X</kbd></td><td>new moves extrude / are dry</td></tr>
+            <tr><td><kbd>E</kbd></td><td>toggle extrude on the selected move</td></tr>
+            <tr><td><kbd>D</kbd> <kbd>R</kbd> <kbd>P</kbd> <kbd>H</kbd></td><td>add dwell / retract / prime / stationary extrusion at the playhead</td></tr>
+            <tr><td><kbd>Tab</kbd> · <kbd>Del</kbd></td><td>next step (Shift = previous) · delete the selected step</td></tr>
+            <tr><td><kbd>←↑→↓</kbd> · <kbd>PgUp</kbd>/<kbd>PgDn</kbd></td><td>nudge 0.1mm in XY · Z (Shift = 1mm)</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd></td><td>undo</td></tr>
+          </table>
+        </details>
+
+        <div class="bs-section">what you are going for (optional)</div>
+        <textarea class="bs-text" data-k="intent" rows="2" placeholder="e.g. a comma: a small dome that drags into a thin tail, raked along the line"></textarea>
+        <div class="bs-row">
+          <span class="btn ai" id="bs-interpret-btn" title="Ask the model to make the drawing printable and parametric (lists every change)">interpret sketch</span>
+          <span class="btn small" id="bs-use-literal-btn" title="Undo the model's changes: the program as it was before the last interpretation">back to my drawing</span>
+          <label class="label"><input type="checkbox" data-k="showLiteral" checked> show my drawing under it</label>
+          <span class="bs-status" id="bs-ai-status"></span>
+        </div>
+        <div class="bs-ai" id="bs-ai"></div>
+        <div id="bs-cost-tracker" class="llm-cost-tracker"></div>
+      </div>
+
+      <!-- ============ Column 2: program ============ -->
+      <div class="bs-col" id="bs-col-program">
+        <h1>Brush program <span class="bs-status" id="bs-source"></span></h1>
+
+        <details id="bs-config">
+          <summary>model &amp; material settings</summary>
+          <div class="ui-group"><span class="label">Material</span>
+            <select data-k="material"><option value="TPU" selected>TPU (default)</option><option value="PLA">PLA</option></select></div>
+          <div class="ui-group"><span class="label">OpenAI API key</span><input type="password" id="bs-openai-key" placeholder="sk-..."></div>
+          <div class="ui-group"><span class="label">Anthropic API key</span><input type="password" id="bs-anthropic-key" placeholder="sk-ant-..."></div>
+          <div class="ui-group"><span class="label">Provider</span>
+            <select id="bs-provider"><option value="openai" selected>OpenAI</option><option value="anthropic">Claude (Anthropic)</option></select></div>
+          <div class="ui-group"><span class="label">Model</span><select id="bs-model"></select></div>
+          <div class="ui-group"><span class="label">Effort</span>
+            <select id="bs-effort"><option value="low">low</option><option value="medium" selected>medium</option><option value="high">high</option></select></div>
+          <div class="ui-group"><span class="label">Thinking</span>
+            <select id="bs-thinking"><option value="off" selected>off (faster)</option><option value="on">on (Claude only)</option></select></div>
+          <div class="ui-group">
+            <span class="btn small" id="bs-save-log-btn">save debug log</span>
+            <span class="btn small" id="bs-clear-log-btn">clear log</span>
+          </div>
+        </details>
+
+        <div class="bs-fields" id="bs-meta"></div>
+
+        <div class="bs-section">params <span class="bs-muted">(def · range · level)</span></div>
+        <div class="bs-params" id="bs-params"></div>
+        <div class="bs-row">
+          <span class="btn small" id="bs-add-param">+ param</span>
+          <span class="btn small ai" id="bs-suggest-params" title="Ask the model which drawn numbers should become params (motion unchanged)">suggest params</span>
+          <span class="btn small ai" id="bs-review" title="Ask the model what the printer will likely do with this (changes nothing)">review</span>
+        </div>
+
+        <div class="bs-section">preview at</div>
+        <div class="bs-fields" id="bs-values"></div>
+
+        <div class="bs-section">steps <span class="bs-muted">(click to select)</span></div>
+        <ol class="bs-steps" id="bs-steps"></ol>
+        <div id="bs-inspector"></div>
+
+        <div class="bs-section">check</div>
+        <div id="bs-gate"></div>
+
+        <div class="bs-section">changes from the drawing</div>
+        <div id="bs-notes" class="bs-muted">none</div>
+
+        <details class="bs-fold" style="margin-top:0.8em;">
+          <summary>program JSON</summary>
+          <textarea class="bs-json" id="bs-json" spellcheck="false"></textarea>
+          <div class="bs-row"><span class="btn small" id="bs-json-apply">apply JSON</span><span class="bs-status" id="bs-json-status"></span></div>
+        </details>
+      </div>
+
+      <!-- ============ Column 3: test print & library ============ -->
+      <div class="bs-col" id="bs-col-library">
+        <h1>Test print &amp; library</h1>
+
+        <div class="bs-row">
+          <span class="btn small go" id="bs-connect-btn">connect texture_docs</span>
+          <span class="bs-status" id="bs-lib-status">not connected</span>
+        </div>
+        <div class="bs-row">
+          <span class="label">open from library</span>
+          <select id="bs-lib-open"><option value="">—</option></select>
+        </div>
+
+        <div class="bs-section">test file</div>
+        <div class="bs-fields">
+          <label class="bs-field"><span>calibration</span>
+            <select data-k="calMode"><option value="normal">normal (horizontal line x120–180)</option><option value="test">test mode (vertical stripe)</option></select></label>
+          <label class="bs-field"><span>normal: line y</span><input type="number" data-k="calY" step="1"></label>
+          <label class="bs-field"><span>test: stripe x</span><input type="number" data-k="calX" step="1"></label>
+          <label class="bs-field"><span>test: stripe band y</span><select data-k="calBand"><option value="40">40 → 100</option><option value="110">110 → 170</option></select></label>
+          <div class="bs-field wide"><span class="bs-muted" id="bs-cal-source">connect texture_docs to continue the position sequence from test_print_gcode/</span></div>
+          <label class="bs-field"><span>texture start x</span><input type="number" data-k="texX" step="1" value="30"></label>
+          <label class="bs-field"><span>texture y (first row)</span><input type="number" data-k="texY" step="1" value="85"></label>
+          <label class="bs-field"><span>line length (mm)</span><input type="number" data-k="texLen" step="1" value="30"></label>
+          <label class="bs-field"><span>azimuth offset (°)</span><input type="number" data-k="optAz" step="5" value="0"></label>
+          <label class="bs-field"><span>gap (blank = default)</span><input type="number" data-k="optGap" step="0.5"></label>
+          <label class="bs-field"><span>sweep param</span><select data-k="sweepParam"><option value="">(none: one row)</option></select></label>
+          <label class="bs-field wide"><span>sweep values (comma-separated, one row each, stacked downward)</span><input type="text" data-k="sweepValues" placeholder="e.g. 1.5, 2.5, 3.5"></label>
+          <label class="bs-field wide"><span>file description</span><input type="text" data-k="fileDesc" placeholder="e.g. comma-dot-v1-tail3"></label>
+          <div class="bs-field wide"><span class="bs-muted" id="bs-filename"></span></div>
+        </div>
+        <div class="bs-row">
+          <span class="btn small" id="bs-build-btn">build test G-code</span>
+          <span class="btn small go" id="bs-save-test-btn">save to test_print_gcode/</span>
+        </div>
+        <div class="bs-digest" id="bs-digest"></div>
+        <textarea id="raw-gcode-textarea" spellcheck="false"></textarea>
+        <div class="bs-row">
+          <span class="btn small" id="run-gcode-btn">run gcode</span>
+          <span class="btn small" id="save-gcode-btn">download gcode</span>
+          <input type="hidden" id="gcode-filename-input">
+        </div>
+
+        <div class="bs-section">promote to library</div>
+        <div class="bs-muted" id="bs-promote-info"></div>
+        <div class="bs-row">
+          <span class="btn ai" id="bs-promote-btn" title="Writes sketched_brushes.js + texture_patterns.md + troubleshooting.md + CHANGELOG.md (after you review the diff)">prepare promotion</span>
+          <span class="btn go" id="bs-write-btn" style="display:none;">write files</span>
+          <span class="bs-status" id="bs-promote-status"></span>
+        </div>
+        <div class="bs-diff" id="bs-diffs"></div>
+
+        <div class="bs-section">after printing</div>
+        <textarea class="bs-text" data-k="report" rows="3" placeholder="what happened on the printer, in your own words"></textarea>
+        <div class="bs-row">
+          <span class="btn ai" id="bs-feedback-btn">record print result</span>
+          <span class="btn go" id="bs-feedback-write-btn" style="display:none;">write files</span>
+          <span class="btn small" id="bs-load-proposed-btn" style="display:none;">load proposed version</span>
+          <span class="bs-status" id="bs-feedback-status"></span>
+        </div>
+        <div class="bs-diff" id="bs-feedback-diffs"></div>
+      </div>
+    </div>
+
+    <!-- Printer controls (shared with index.html / parametric pages; script.js wires them) -->
+    <div id="printer-controls">
+      <h2>Printer controls</h2>
+      <div class="ui-frame" id="messages">
+        <h1>Messages <span onclick="clearMsg()"><u>clear</u></span></h1>
+        <div id="message-container"></div>
+      </div>
+      <div class="ui-frame" id="main-controller">
+        <h1>Main Controller</h1>
+        <div class="ui-group"><div class="ui-item"><div class="btn" id="connect-btn" onclick="_fab.serial.requestPort()">connect to printer</div></div></div>
+        <div class="ui-group"><div class="ui-item"><span class="label">Origin</span></div></div>
+        <div class="ui-group">
+          <div class="ui-item"><span class="label">X</span> <input type="number" min="0" step="1" value="100" id="start-x"></div>
+          <div class="ui-item"><span class="label">Y</span> <input type="number" min="0" step="1" value="100" id="start-y"></div>
+          <div class="ui-item"><span class="label">Z</span> <input type="number" min="0" step="1" value="10" id="start-z"></div>
+        </div>
+        <div class="ui-group">
+          <div class="ui-item"><div class="btn" id="start-btn">initialize printer</div></div>
+          <div class="ui-item"><div class="btn" id="stop-btn">stop printing</div></div>
+        </div>
+        <div class="ui-group">
+          <div class="ui-item"><span class="label">Nozzle Temp</span> <input type="number" min="0" step="1" value="220" id="nozzle-temp"></div>
+          <div class="ui-item"><span class="label">Bed Temp</span> <input type="number" min="0" step="1" value="50" id="bed-temp"></div>
+        </div>
+        <div class="ui-group">
+          <div class="ui-item"><div class="btn" id="heat-btn">heat nozzle/bed</div></div>
+          <div class="ui-item"><div class="btn" id="cool-btn">cool nozzle/bed</div></div>
+        </div>
+        <div class="ui-group">
+          <div class="ui-item"><span class="label">Fan Speed (0&ndash;255)</span> <input type="number" min="0" step="1" value="255" id="fan-speed"></div>
+          <div class="ui-item"><span class="label">fan on</span> <input type="checkbox" id="fan-on"></div>
+        </div>
+      </div>
+      <div class="ui-frame" id="motion-controller">
+        <h1>Motion controller</h1>
+        <div class="ui-group">
+          <div class="ui-item"><span class="label">motion step</span> <input type="number" min="0" step="0.1" value="5.0" id="motion-step-size"></div>
+          <div class="ui-item"><span class="label">feedrate</span> <input type="number" min="0" step="1" value="300" id="motion-feedrate"></div>
+        </div>
+        <div class="ui-group">
+          <div class="ui-item"><div class="btn motion" id="motion-z-up-btn">Z+</div></div>
+          <div class="ui-item"><div class="btn motion" id="motion-y-up-btn">Y+</div></div>
+          <div class="ui-item"><div class="btn motion" id="motion-e-down-btn">E-</div></div>
+        </div>
+        <div class="ui-group">
+          <div class="ui-item"><div class="btn motion" id="motion-x-down-btn">X-</div></div>
+          <div class="ui-item"><div class="btn motion" id="motion-home-btn">O</div></div>
+          <div class="ui-item"><div class="btn motion" id="motion-x-up-btn">X+</div></div>
+        </div>
+        <div class="ui-group">
+          <div class="ui-item"><div class="btn motion" id="motion-z-down-btn">Z-</div></div>
+          <div class="ui-item"><div class="btn motion" id="motion-y-down-btn">Y-</div></div>
+          <div class="ui-item"><div class="btn motion" id="motion-e-up-btn">E+</div></div>
+        </div>
+        <div class="ui-group"><div class="ui-item"><span class="label">enable cold extrusion</span> <input type="checkbox" id="cold-extrusion"></div></div>
+        <div class="ui-group"><div class="ui-item"><span class="label">keyboard control</span> <input type="checkbox" id="motion-keyboard-control"></div></div>
+        <div class="ui-group" id="motion-keyboard-control-instructions" style="display: none;">
+          <div class="ui-item"><span class="label">A/D: X-/+; S/W: Y-/+; Z/Q: Z-/+; R/E: E-/+</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="text/javascript" src="../script.js?v=4"></script>
+  <script type="text/javascript" src="../llm.js?v=1"></script>
+  <script type="module" src="brush-sketch.js?v=1"></script>
+  <script type="text/javascript" src="brush-sketch-compat.js?v=1"></script>
+</body>
+
+</html>

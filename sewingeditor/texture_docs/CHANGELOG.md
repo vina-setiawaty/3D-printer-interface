@@ -2104,3 +2104,50 @@ lines, 644 negative-E, eTotal 315.1mm.
 print of any of this library's mechanisms in PLA; treat it as testing
 whether TPU-tuned anti-stringing/timing mechanisms even make sense on a
 different filament, not as a confirmed-good PLA config.
+
+---
+
+## 56. Sketched brushes: `sketched_brushes.js` + the brush-sketch page
+
+**Asked**: an interface to prompt texture exploration by DRAWING the
+toolpath of one point of a brush (freehand with the mouse, or as vector
+nodes) instead of describing it in text; the drawing translated into a
+printable brush function, mostly by the LLM, respecting the printer's
+limits; no matching to existing textures ("if it is matching with
+something existing, it should be on the author to recognise it"); an easy
+test G-code; and updating the library the way this fine-tune workflow
+does. The generated code goes in "a separate file that is imported by
+texture_functions.js"; test files saved into `test_print_gcode/` with the
+usual timestamp + a description from a text input.
+
+**Given**:
+- New `sketched_brushes.js`: a brush-program interpreter (safe expression
+  grammar, no `eval`; ops `travel` / `move` / `dwell` / `retract` /
+  `prime` / `extrudeHere` / `repeat`), `stampSketch`,
+  `freeformSketchDotted` (the standard six-style line signature, usable in
+  `fill()`), `brushSketchDotted` (parametric-with-tool shape), and the
+  `SKETCH_BRUSHES` registry. Promoted brushes are appended between
+  `// <sketch-brushes>` markers as a program literal plus thin wrappers,
+  so the page's previews/test prints and the library run the SAME code.
+- `texture_functions.js`: one line, `export * from "./sketched_brushes.js"`
+  (new SECTION 7). Circular import: `sketched_brushes.js` imports the path
+  engine from here -- safe only because nothing at its top level reads an
+  imported name (documented in its header, checked by the tests). No
+  existing function's output changes.
+- `system_prompt.md` → new "Sketched brushes" section; `Task_FineTune.md`
+  §5: never hand-edit a generated block, edit the program.
+- The page: `sewingeditor/brush-sketch/brush-sketch.html` (plan and
+  design record: `sewingeditor/docs/brush-sketch-plan.md`). It writes
+  into this folder through the browser's File System Access API (Chrome /
+  Edge), only after showing a per-file diff, and refuses to write a file
+  that changed on disk since it was read. A promotion writes
+  `sketched_brushes.js`, a `texture_patterns.md` → Sketched brushes entry,
+  a numbered `troubleshooting.md` section, a CHANGELOG entry, and
+  `sketch_brushes/<name>/vN.program.json` (+ the raw sketch). Print
+  reports add status bullets and troubleshooting subsections.
+- Tests: `node tests/brush-sketch/{runtime-and-checks,draft-and-testprint,promote,llm-plumbing}.mjs`
+  (36 checks, offline); plus an end-to-end browser run against a
+  browser-private copy of this folder (interpret with one repair round,
+  connect, save a test file, promote, generated code runs).
+
+No brush has been promoted yet, and nothing sketched has been printed.
