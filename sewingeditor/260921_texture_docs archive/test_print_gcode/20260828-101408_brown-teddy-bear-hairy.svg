@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="140 110 400 625" width="400" height="625">
+  <rect x="140" y="110" width="400" height="625" fill="#faf6f0"/>
+  <text x="150" y="130" font-size="15" font-family="sans-serif" font-weight="bold" fill="#1a1a1a">teddy bear -- hairy-texture region map (soft to hard)</text>
+  <ellipse cx="340" cy="560" rx="150" ry="20" fill="#cfcfcf" fill-opacity="0.35" stroke="#3a2a1a" stroke-width="1.5"/>
+  <text x="340" y="560" font-size="11" text-anchor="middle" fill="#1a1a1a" font-family="sans-serif">shadow</text>
+  <ellipse cx="255" cy="185" rx="55" ry="55" fill="#a9743f" fill-opacity="0.8" stroke="#3a2a1a" stroke-width="1.5"/>
+  <text x="255" y="185" font-size="11" text-anchor="middle" fill="#1a1a1a" font-family="sans-serif">L-ear</text>
+  <ellipse cx="425" cy="185" rx="55" ry="55" fill="#a9743f" fill-opacity="0.8" stroke="#3a2a1a" stroke-width="1.5"/>
+  <text x="425" y="185" font-size="11" text-anchor="middle" fill="#1a1a1a" font-family="sans-serif">R-ear</text>
+  <ellipse cx="255" cy="185" rx="26" ry="26" fill="#c99b6a" fill-opacity="0.8" stroke="#3a2a1a" stroke-width="1.5"/>
+  <text x="255" y="185" font-size="11" text-anchor="middle" fill="#1a1a1a" font-family="sans-serif">L-ear-in</text>
+  <ellipse cx="425" cy="185" rx="26" ry="26" fill="#c99b6a" fill-opacity="0.8" stroke="#3a2a1a" stroke-width="1.5"/>
+  <text x="425" y="185" font-size="11" text-anchor="middle" fill="#1a1a1a" font-family="sans-serif">R-ear-in</text>
+  <ellipse cx="230" cy="430" rx="70" ry="90" fill="#a9743f" fill-opacity="0.8" stroke="#3a2a1a" stroke-width="1.5"/>
+  <text x="230" y="430" font-size="11" text-anchor="middle" fill="#1a1a1a" font-family="sans-serif">L-arm</text>
+  <ellipse cx="450" cy="430" rx="70" ry="90" fill="#a9743f" fill-opacity="0.8" stroke="#3a2a1a" stroke-width="1.5"/>
+  <text x="450" y="430" font-size="11" text-anchor="middle" fill="#1a1a1a" font-family="sans-serif">R-arm</text>
+  <ellipse cx="200" cy="500" rx="34" ry="26" fill="#8f8f8f" fill-opacity="0.8" stroke="#3a2a1a" stroke-width="1.5"/>
+  <text x="200" y="500" font-size="11" text-anchor="middle" fill="#1a1a1a" font-family="sans-serif">L-paw</text>
+  <ellipse cx="480" cy="500" rx="34" ry="26" fill="#8f8f8f" fill-opacity="0.8" stroke="#3a2a1a" stroke-width="1.5"/>
+  <text x="480" y="500" font-size="11" text-anchor="middle" fill="#1a1a1a" font-family="sans-serif">R-paw</text>
+  <ellipse cx="255" cy="500" rx="90" ry="80" fill="#a9743f" fill-opacity="0.8" stroke="#3a2a1a" stroke-width="1.5"/>
+  <text x="255" y="500" font-size="11" text-anchor="middle" fill="#1a1a1a" font-family="sans-serif">L-leg</text>
+  <ellipse cx="425" cy="500" rx="90" ry="80" fill="#a9743f" fill-opacity="0.8" stroke="#3a2a1a" stroke-width="1.5"/>
+  <text x="425" y="500" font-size="11" text-anchor="middle" fill="#1a1a1a" font-family="sans-serif">R-leg</text>
+  <ellipse cx="255" cy="565" rx="42" ry="30" fill="#8f8f8f" fill-opacity="0.8" stroke="#3a2a1a" stroke-width="1.5"/>
+  <text x="255" y="565" font-size="11" text-anchor="middle" fill="#1a1a1a" font-family="sans-serif">L-foot</text>
+  <ellipse cx="425" cy="565" rx="42" ry="30" fill="#8f8f8f" fill-opacity="0.8" stroke="#3a2a1a" stroke-width="1.5"/>
+  <text x="425" y="565" font-size="11" text-anchor="middle" fill="#1a1a1a" font-family="sans-serif">R-foot</text>
+  <ellipse cx="340" cy="380" rx="150" ry="140" fill="#8a5a2b" fill-opacity="0.8" stroke="#3a2a1a" stroke-width="1.5"/>
+  <text x="340" y="380" font-size="11" text-anchor="middle" fill="#1a1a1a" font-family="sans-serif">body</text>
+  <ellipse cx="340" cy="410" rx="80" ry="75" fill="#d8c9a0" fill-opacity="0.8" stroke="#3a2a1a" stroke-width="1.5"/>
+  <text x="340" y="410" font-size="11" text-anchor="middle" fill="#1a1a1a" font-family="sans-serif">belly</text>
+  <ellipse cx="340" cy="240" rx="105" ry="105" fill="#8a5a2b" fill-opacity="0.8" stroke="#3a2a1a" stroke-width="1.5"/>
+  <text x="340" y="240" font-size="11" text-anchor="middle" fill="#1a1a1a" font-family="sans-serif">head</text>
+  <ellipse cx="340" cy="270" rx="60" ry="45" fill="#c99b6a" fill-opacity="0.8" stroke="#3a2a1a" stroke-width="1.5"/>
+  <text x="340" y="270" font-size="11" text-anchor="middle" fill="#1a1a1a" font-family="sans-serif">muzzle</text>
+  <ellipse cx="300" cy="215" rx="9" ry="9" fill="#1e1e1e" fill-opacity="0.95" stroke="#3a2a1a" stroke-width="1.5"/>
+  <ellipse cx="380" cy="215" rx="9" ry="9" fill="#1e1e1e" fill-opacity="0.95" stroke="#3a2a1a" stroke-width="1.5"/>
+  <ellipse cx="340" cy="255" rx="14" ry="10" fill="#1e1e1e" fill-opacity="0.95" stroke="#3a2a1a" stroke-width="1.5"/>
+  <rect x="150" y="640" width="16" height="16" fill="#cfcfcf"/><text x="172" y="653" font-size="12" font-family="sans-serif" fill="#1a1a1a">shadow</text>
+  <rect x="250" y="640" width="16" height="16" fill="#a9743f"/><text x="272" y="653" font-size="12" font-family="sans-serif" fill="#1a1a1a">plush hair</text>
+  <rect x="350" y="640" width="16" height="16" fill="#c99b6a"/><text x="372" y="653" font-size="12" font-family="sans-serif" fill="#1a1a1a">firm hair</text>
+  <rect x="450" y="640" width="16" height="16" fill="#8f8f8f"/><text x="472" y="653" font-size="12" font-family="sans-serif" fill="#1a1a1a">hard pad</text>
+  <rect x="150" y="666" width="16" height="16" fill="#8a5a2b"/><text x="172" y="679" font-size="12" font-family="sans-serif" fill="#1a1a1a">soft hair</text>
+  <rect x="250" y="666" width="16" height="16" fill="#d8c9a0"/><text x="272" y="679" font-size="12" font-family="sans-serif" fill="#1a1a1a">hard patch</text>
+  <rect x="350" y="666" width="16" height="16" fill="#1e1e1e"/><text x="372" y="679" font-size="12" font-family="sans-serif" fill="#1a1a1a">hard dome</text>
+</svg>
