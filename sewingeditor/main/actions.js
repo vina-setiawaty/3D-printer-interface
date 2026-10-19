@@ -161,7 +161,7 @@ function loadActions() {
 
         return g;
       });
-      gcode = gcode.map(g => (checkGcode(g)));
+      gcode = gcode.map(g => (checkGcode(g))).filter(g => g !== "");
       console.log(gcode);
       fab.commands.push(...gcode);
       fab.print();

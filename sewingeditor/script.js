@@ -125,7 +125,7 @@ function setup() {
   document.querySelector("#run-gcode-btn").addEventListener("click", () => {
     if (fab.isPrinting) {
       let gcode = document.querySelector("#raw-gcode-textarea").value.split("\n");
-      gcode = gcode.map(g => (checkGcode(g)));
+      gcode = gcode.map(g => (checkGcode(g))).filter(g => g !== "");
       fab.commands = gcode;
       fab.print();
       pushMessage("running raw gcode", "blue");
@@ -427,8 +427,12 @@ function windowResized() {
   syncRawGcodeHeight();
 }
 
+// Returns "" for comment-only, blank and invalid lines -- callers must filter
+// those out, since Marlin never answers "ok" to an empty line and the
+// ok-driven stream in p5.fab.sewing.js would stall waiting for it.
 function checkGcode(_gcode) {
-  let _g = _gcode.trim();
+  let _g = _gcode.split(";")[0].trim();
+  if (_g === "") return "";
   if (gcodeCheck.includes(_g.split(" ")[0])) {
     return _g;
   } else {

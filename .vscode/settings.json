@@ -1,5 +1,7 @@
 {
   "liveServer.settings.ignoreFiles": [
-    "**/texture_docs/**"
-  ]
+    "**/texture_docs/**",
+    "**/texture-actions/texture_functions.js"
+  ],
+  "liveServer.settings.port": 5501
 }
