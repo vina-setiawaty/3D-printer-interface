@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="UTF-8">
+  <title>Sketch Studio</title>
+  <link rel="icon" href="data:,">
+</head>
+
+<style>
+  *, html { box-sizing: border-box; font-family: sans-serif; font-size: 12px; font-weight: 400; margin: 0; padding: 0; }
+  body { background: #FFF; color: #222; }
+  h1 { font-size: 0.8rem; font-weight: 500; text-transform: uppercase; display: block; margin-bottom: 0.6em; }
+  #container { position: relative; width: 100vw; min-height: 100vh; padding: 1em; }
+  div.ui-group { position: relative; display: block; clear: both; margin-top: 0.5em; }
+
+  .btn { padding: 0.35em 0.65em; cursor: pointer; background: #BBB; color: white; border-radius: 0.7em; user-select: none; display: inline-block; }
+  .btn:hover { background: #999; }
+  .btn.on { background: #333; }
+
+  #ss-workspace { display: grid; grid-template-columns: 600px minmax(320px, 1fr); gap: 1em; padding: 1em; align-items: start; }
+  .ss-col { border: 1px solid #999; border-radius: 0.5em; padding: 0.6em 0.75em; min-width: 0; }
+  .ss-col.empty { border-style: dashed; border-color: #CCC; color: #AAA; min-height: 200px; }
+  .ss-row { display: flex; gap: 0.5em; align-items: center; flex-wrap: wrap; margin: 0.35em 0; }
+  canvas.ss-view { display: block; border: 1px solid #DDD; border-radius: 4px; touch-action: none; }
+  #ss-draw { cursor: crosshair; }
+  #ss-timeline { cursor: text; margin-top: 8px; }
+  #ss-status { font-family: monospace; font-size: 0.85em; color: #555; min-height: 1.3em; }
+  .ss-keys { font-size: 0.85em; color: #777; margin-top: 0.4em; }
+  kbd { font-family: monospace; border: 1px solid #CCC; border-radius: 3px; padding: 0 3px; background: #F6F6F6; }
+</style>
+
+<body>
+  <div id="container">
+    <div id="ss-workspace">
+      <div class="ss-col">
+        <h1>Sketch</h1>
+        <div class="ss-row" id="ss-tools">
+          <span class="btn" data-tool="select" title="V">select</span>
+          <span class="btn" data-tool="freehand" title="B">freehand</span>
+          <span class="btn" data-tool="pen" title="P">pen</span>
+          <span style="flex:1"></span>
+          <span class="btn" data-cmd="undo" title="Ctrl+Z">undo</span>
+          <span class="btn" data-cmd="redo" title="Ctrl+Shift+Z">redo</span>
+          <span class="btn" data-cmd="clear">clear</span>
+        </div>
+        <canvas id="ss-draw" class="ss-view"></canvas>
+        <div id="ss-status"></div>
+        <canvas id="ss-timeline" class="ss-view"></canvas>
+        <div class="ss-row">
+          <span class="btn" data-cmd="play" title="Space">play</span>
+          <span id="ss-time" style="font-family:monospace"></span>
+        </div>
+        <div class="ss-keys">
+          <kbd>V</kbd> select · <kbd>B</kbd> freehand · <kbd>P</kbd> pen
+          (<kbd>Enter</kbd>/<kbd>Esc</kbd>/double-click ends) ·
+          <kbd>Del</kbd> node or path · arrows nudge 0.1 mm (<kbd>Shift</kbd> 1 mm) ·
+          <kbd>Ctrl</kbd>+<kbd>Z</kbd> undo ·
+          <kbd>Space</kbd> play · <kbd>Home</kbd>/<kbd>End</kbd>
+        </div>
+      </div>
+      <div class="ss-col empty">(empty for now)</div>
+    </div>
+  </div>
+
+  <script type="module" src="sketch-studio.js?v=1"></script>
+  <script type="text/javascript" src="../nav.js?v=1"></script>
+</body>
+
+</html>

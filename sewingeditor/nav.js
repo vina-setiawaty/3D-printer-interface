@@ -8,6 +8,7 @@
     ["gcode-session/gcode-session.html", "printing session"],
     ["texture-actions/texture-actions.html", "textures"],
     ["brush-sketch/brush-sketch.html", "brush sketch"],
+    ["sketch-studio/sketch-studio.html", "sketch studio"],
     ["parametric/parametric.html", "parametric tactile graphics"],
     ["parametric-on-client/parametric-on-client.html", "parametric (client-side LLM)"],
     ["parametric-with-tool/parametric-with-tool.html", "parametric (staged pipeline)"],
