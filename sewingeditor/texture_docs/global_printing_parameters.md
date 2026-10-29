@@ -109,6 +109,22 @@ air and stale filament and establishes consistent pressure in the nozzle.
 It is placed outside the usable pattern area, so it never collides with
 generated textures.
 
+**⚠️ On a reused sheet the prime line stacks up.** Its position is fixed,
+so every file prints it in exactly the same spot (x=10-10.4, y=15-100).
+When test prints are added one after another to a sheet that already has
+prints on it, each new file's prime line lands on top of the last one's
+and the pile keeps growing -- a long-standing, recurring problem in this
+project. The calibration line does NOT have this problem: it moves down
+5mm per file (see `texture_patterns.md`), so it always lands on clean bed.
+
+So when generating a file for a sheet that already has a print on it,
+**leave out the header's four prime-line moves** (the `G1 X10 ...` /
+`G1 X10.4 ...` lines; the rest of the header stays). The calibration line
+is then the first extrusion and doubles as the prime -- its first few mm
+may print slightly thin. Only a fresh sheet needs the full prime line.
+Example: `test_print_gcode/261029 - arch loop/arch_test.mjs` drops it for
+follow-up rows marked `noPurge` (row J onward).
+
 **Configurable parameters** (all default to the constants in this file):
 
 ```js
