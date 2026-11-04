@@ -193,6 +193,46 @@
     resize: none;
   }
 
+  /* ---- toolpath viewer (gcode-viewer.js, from parametric-with-tool) ---- */
+  .raw-gcode-viewer-col {
+    flex: 1.4;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  #pg-toolpath-wrap {
+    position: relative;
+    height: 22em;
+    border: 1px solid #DDD;
+    border-radius: 0.3em;
+    overflow: hidden;
+    margin-top: 0.4em;
+  }
+  /* override the page-wide `canvas` rule meant for p5's background canvas */
+  #pg-toolpath-canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: 0;
+    width: 100%;
+    height: 100%;
+    cursor: grab;
+  }
+  #pg-toolpath-canvas:active { cursor: grabbing; }
+  .pg-toolpath-bar { display: flex; flex-wrap: wrap; gap: 0.4em; align-items: center; margin: 0.4em 0 0; }
+  .pg-toolpath-bar .btn { font-size: 0.75em; padding: 0.25em 0.55em; }
+  #pg-toolpath-slider { flex: 1; min-width: 0; }
+  #pg-toolpath-label {
+    font-family: monospace;
+    font-size: 0.75em;
+    color: #666;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-top: 0.3em;
+  }
+  .pg-toolpath-hint { font-family: monospace; font-size: 0.7em; color: #999; }
+
   .raw-gcode-llm-col {
     flex: 1;
     min-width: 0;
@@ -311,6 +351,64 @@
     font-size: 0.8em;
     color: #999;
   }
+
+  /* ---- function editor (editor.js) ---- */
+  #texture-editor-container { width: 95%; }
+  #texture-editor-close { cursor: pointer; float: right; text-transform: none; }
+  .te-head { display: flex; gap: 1em; align-items: center; flex-wrap: wrap; }
+  .te-where { font-family: monospace; font-size: 0.8em; color: #999; }
+  .te-steps {
+    display: flex;
+    list-style: none;
+    margin: 0.8em 0 0.5em;
+    padding: 0;
+    gap: 0.3em;
+  }
+  .te-steps li {
+    flex: 1;
+    text-align: center;
+    padding: 0.3em 0.5em;
+    border-radius: 0.3em;
+    background: #F0F0F0;
+    color: #999;
+    font-size: 0.85em;
+  }
+  .te-steps li.done { background: #CDEBD6; color: #1E6B35; }
+  .te-steps li.current { background: #FFF3B8; color: #7A5B00; font-weight: 600; outline: 2px solid #E6C84A; }
+  .te-steps.te-steps-error li.current { background: #F8D3D3; color: #A00; outline-color: #D88; }
+  .te-status { font-size: 0.9em; line-height: 1.5; margin-bottom: 0.5em; }
+  .te-dirty { color: #B36B00; font-weight: 600; }
+  .te-draft-error { color: #C00; }
+  .te-draft-printed, .te-draft-pushed { color: #1E6B35; }
+  .te-next { color: #333; font-style: italic; }
+  .te-warn { color: #C00; }
+  .te-code {
+    width: 100%;
+    height: 28em;
+    font-family: monospace;
+    font-size: 0.8em;
+    tab-size: 2;
+    white-space: pre;
+    resize: vertical;
+  }
+  .te-buttons { display: flex; gap: 0.5em; flex-wrap: wrap; margin-top: 0.5em; }
+  .te-buttons .te-gap { flex: 1; }
+  .te-buttons .btn.te-disabled { opacity: 0.35; cursor: not-allowed; }
+  .te-result {
+    font-family: monospace;
+    font-size: 0.8em;
+    white-space: pre-wrap;
+    margin: 0.5em 0 0;
+    min-height: 1.2em;
+  }
+  .te-result.te-ok { color: #1E6B35; }
+  .te-result.te-err { color: #C00; }
+  .te-note { font-size: 0.8em; color: #999; margin-top: 0.5em; }
+  .te-badge { display: block; font-size: 0.8em; margin: -0.5em 0 0.5em; min-height: 0; }
+  .te-badge-dirty { color: #B36B00; }
+  .te-badge-error { color: #C00; }
+  .te-badge-saved { color: #7A5B00; }
+  .te-badge-printed, .te-badge-pushed { color: #1E6B35; }
 
   #texture-save-modal {
     max-width: 640px;
@@ -627,7 +725,7 @@
         </div>
       </div>
     </div>
-    <div class="ui-frame" id="raw-gcode-container" style="width: 360px;">
+    <div class="ui-frame" id="raw-gcode-container" style="width: 820px;">
       <h1>Raw gcode</h1>
       <div class="raw-gcode-columns">
         <div class="raw-gcode-editor-col">
@@ -643,7 +741,29 @@
             </div>
           </div>
         </div>
+        <!-- toolpath preview of the textarea (gcode-viewer.js) -->
+        <div class="raw-gcode-viewer-col">
+          <div class="pg-toolpath-bar">
+            <span class="btn" id="pg-toolpath-top">top</span>
+            <span class="btn" id="pg-toolpath-iso">3D</span>
+            <span class="btn" id="pg-toolpath-fit">fit</span>
+            <span class="btn" id="pg-toolpath-travel" title="show travel (non-extruding) moves">travel</span>
+            <span class="pg-toolpath-hint">drag: orbit · right/shift-drag: pan · wheel: zoom</span>
+          </div>
+          <div id="pg-toolpath-wrap"><canvas id="pg-toolpath-canvas"></canvas></div>
+          <div class="pg-toolpath-bar">
+            <span class="btn" id="pg-toolpath-play">play</span>
+            <input type="range" id="pg-toolpath-slider" min="0" max="0" value="0" step="1">
+          </div>
+          <div id="pg-toolpath-label"></div>
+        </div>
       </div>
+    </div>
+
+    <!-- function editor (editor.js), opened by "edit code" on a card -->
+    <div class="ui-frame" id="texture-editor-container" style="display: none;">
+      <h1>Function editor <span id="texture-editor-close"><u>close</u></span></h1>
+      <div id="texture-editor"></div>
     </div>
 
     <div class="ui-frame" id="textures-container">
@@ -657,7 +777,8 @@
 
   <script type="text/javascript" src="../script.js?v=4"></script>
   <script type="text/javascript" src="texture-actions-compat.js"></script>
-  <script type="module" src="texture-actions.js?v=1"></script>
+  <script type="module" src="texture-actions.js?v=2"></script>
+  <script type="text/javascript" src="gcode-viewer.js?v=1"></script>
   <script type="text/javascript" src="../nav.js?v=1"></script>
 </body>
 

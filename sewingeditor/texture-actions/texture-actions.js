@@ -11,6 +11,14 @@
  * directly through the File System Access API (Chrome/Edge -- you pick the
  * texture-actions folder once per session), or as a download otherwise.
  *
+ * "edit code" on a card opens the function editor (editor.js): edit the
+ * function itself, save (test-runs it), run the saved draft on the
+ * printer, then push it into texture_functions.js.
+ *
+ * Cards generate G-code through runner.js from the current `source` text,
+ * not from the module imported at load, so pushed code takes effect
+ * without a reload.
+ *
  * Inputs here have no `id`, on purpose: script.js's storeLocalData() /
  * loadLocalData() persist every input WITH an id, and would fight this
  * module's own storage (localStorage "textureActions", which keeps only
@@ -19,7 +27,8 @@
 import * as TF from "./texture_functions.js";
 import { TEXTURES, PARAMS } from "./spec.js";
 import { parseDefaults, patchDefaults, optionsText } from "./signature.js";
-import { buildGcode, findOutOfBounds } from "./generate.js";
+import { runInWorker } from "./runner.js";
+import { initEditor } from "./editor.js";
 
 const SOURCE_URL = new URL("./texture_functions.js", import.meta.url);
 const SOURCE_NAME = "texture_functions.js";
@@ -34,6 +43,7 @@ let source = "";       // texture_functions.js text the defaults were read from
 let defaults = {};     // texture name -> parseDefaults() list
 let dirHandle = null;  // picked texture-actions folder (File System Access)
 let store = loadStore();
+let editor = null;     // initEditor() result
 
 // ---------------------------------------------------------------- storage --
 function loadStore() {
@@ -175,9 +185,12 @@ function renderCard(t) {
   });
   const saveBtn = el("span", { class: "action-modify-btn", textContent: "save as default" });
   saveBtn.addEventListener("click", () => openSaveModal(t, card));
+  const editBtn = el("span", { class: "action-modify-btn", textContent: "edit code" });
+  editBtn.addEventListener("click", () => editor.open(t));
   card.append(
-    el("div", { class: "action-meta-menu" }, [resetBtn, saveBtn]),
+    el("div", { class: "action-meta-menu" }, [resetBtn, saveBtn, editBtn]),
     el("h1", { textContent: t.name }),
+    editor.badge(t),
     el("p", { textContent: t.description }),
   );
 
@@ -254,29 +267,39 @@ function readSettings() {
   return s;
 }
 
-function generate(t, card) {
-  const { lines, filamentMm } = buildGcode(TF, t, cardValues(t, card), cardPlacement(t, card), readSettings());
-  const oob = findOutOfBounds(lines, TF.BED_X, TF.BED_Y);
-  if (oob) throw new Error(`moves off the ${TF.BED_X}x${TF.BED_Y} bed: "${oob}"`);
-  return { lines, filamentMm };
+/** {values, placement, settings} of t's card; throws on bad input. */
+function cardInputs(t, card = document.querySelector(`#texture-${t.name}`)) {
+  return { values: cardValues(t, card), placement: cardPlacement(t, card), settings: readSettings() };
 }
 
-function preview(t, card) {
+/** G-code for a card from the file's current text (see runner.js). */
+function generate(t, card) {
+  return runInWorker({ source, texture: t, ...cardInputs(t, card) });
+}
+
+function showGcode(lines) {
+  const text = lines.join("\n");
+  const box = document.querySelector("#raw-gcode-textarea");
+  if (box) box.value = text;
+  window.gcodeViewer?.setGcode(text);
+}
+
+async function preview(t, card) {
   try {
-    const { lines, filamentMm } = generate(t, card);
-    const box = document.querySelector("#raw-gcode-textarea");
-    if (box) box.value = lines.join("\n");
+    const { lines, filamentMm } = await generate(t, card);
+    showGcode(lines);
     message(`${t.name}: ${lines.length} lines, ${filamentMm.toFixed(1)} mm filament -> raw gcode box`, "blue");
   } catch (e) {
     message(`${t.name}: ${e.message}`, "red");
   }
 }
 
-function run(t, card, runBtn) {
+async function run(t, card, runBtn) {
   if (typeof fab === "undefined" || !fab.isPrinting) { message("initialize printer first", "red"); return; }
   if (fab.commands.length > 0) { message("wait for gcode stream completion", "red"); return; }
   let lines;
-  try { ({ lines } = generate(t, card)); } catch (e) { message(`${t.name}: ${e.message}`, "red"); return; }
+  try { ({ lines } = await generate(t, card)); } catch (e) { message(`${t.name}: ${e.message}`, "red"); return; }
+  if (fab.commands.length > 0) { message("wait for gcode stream completion", "red"); return; }
   const gcode = lines.map((g) => checkGcode(g)).filter((g) => g !== "");
   fab.commands.push(...gcode);
   fab.print();
@@ -432,6 +455,12 @@ function renderCards() {
   for (const t of TEXTURES) box.append(renderCard(t));
 }
 
+function setSource(text) {
+  source = text;
+  readDefaults();
+  renderCards();
+}
+
 async function init() {
   try {
     const res = await fetch(SOURCE_URL, { cache: "no-store" });
@@ -442,6 +471,16 @@ async function init() {
     message(`textures: could not read ${SOURCE_NAME} (${e.message})`, "red");
     return;
   }
+  editor = initEditor({
+    textures: TEXTURES,
+    getSource: () => source,
+    setSource,
+    inputs: (t) => cardInputs(t),
+    showGcode,
+    message,
+    sourceFileHandle,
+    download,
+  });
   renderSettings();
   renderCards();
 }

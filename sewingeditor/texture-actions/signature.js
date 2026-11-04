@@ -181,3 +181,60 @@ export function patchDefaults(src, fnName, changes) {
   for (const e of edits) out = out.slice(0, e.start) + e.text + out.slice(e.end);
   return out;
 }
+
+// ------------------------------------------------------ whole functions --
+// Used by the function editor (editor.js): read one function's full text,
+// and swap it for an edited version without touching any other byte.
+
+/** {start, end} of `fnName`'s whole declaration in `src`: from `export`
+ * (or `function`) through the body's closing brace, end exclusive.
+ * `exported` says whether it started with `export`. */
+export function functionRange(src, fnName) {
+  const masked = maskComments(src);
+  const re = new RegExp(`(\\bexport\\s+)?\\bfunction\\s+${fnName}\\s*\\(`, "g");
+  const m = re.exec(masked);
+  if (!m) throw new Error(`function ${fnName} not found`);
+  const open = m.index + m[0].length - 1;
+  const close = matchBracket(masked, open);
+  const body = masked.indexOf("{", close);
+  if (body === -1 || masked.slice(close + 1, body).trim() !== "") {
+    throw new Error(`function ${fnName} has no body`);
+  }
+  return { start: m.index, end: matchBracket(masked, body) + 1, exported: !!m[1] };
+}
+
+/** The full text of `fnName`'s declaration. */
+export function functionText(src, fnName) {
+  const { start, end } = functionRange(src, fnName);
+  return src.slice(start, end);
+}
+
+/** Throw unless `text` is exactly one declaration of `fnName` (nothing
+ * before or after it but whitespace and comments), exported only if the
+ * original was -- renaming it or dropping `export` would break the
+ * BRUSHES / STAMPS tables that call it. */
+export function checkFunctionText(text, fnName, exported) {
+  let r;
+  try { r = functionRange(text, fnName); } catch (e) {
+    throw new Error(`the editor must hold one "function ${fnName}(...) { ... }" (${e.message})`);
+  }
+  const masked = maskComments(text);
+  if (masked.slice(0, r.start).trim() !== "" || masked.slice(r.end).trim() !== "") {
+    throw new Error(`only the ${fnName} function can be in the editor -- move other code into the file directly`);
+  }
+  if (r.exported !== exported) {
+    throw new Error(exported ? `keep "export" in front of function ${fnName}` : `${fnName} is not exported in the file -- remove "export"`);
+  }
+}
+
+/** `src` with `fnName`'s declaration replaced by `text` (checked first). */
+export function replaceFunction(src, fnName, text) {
+  const r = functionRange(src, fnName);
+  checkFunctionText(text, fnName, r.exported);
+  return src.slice(0, r.start) + text.trim() + src.slice(r.end);
+}
+
+/** 1-based line on which `fnName`'s declaration starts in `src`. */
+export function functionStartLine(src, fnName) {
+  return src.slice(0, functionRange(src, fnName).start).split("\n").length;
+}

@@ -14,12 +14,20 @@
  *                        options
  *  4. valid G-code    -- every emitted line passes script.js's allow-list
  *                        and stays on the bed
+ *  5. function swap    -- the editor's whole-function read / replace keeps
+ *                        every other byte, rejects renamed / extra code,
+ *                        and an edited copy of the file imports and runs
+ *  6. edit states      -- edit-state.js through every transition
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import * as TF from "../texture_functions.js";
 import { TEXTURES, PARAMS } from "../spec.js";
-import { parseDefaults, defaultsObject, patchDefaults } from "../signature.js";
+import {
+  parseDefaults, defaultsObject, patchDefaults,
+  functionText, functionRange, replaceFunction, functionStartLine,
+} from "../signature.js";
+import { editStatus } from "../edit-state.js";
 import { buildGcode, findOutOfBounds } from "../generate.js";
 
 const here = (p) => fileURLToPath(new URL(p, import.meta.url));
@@ -106,6 +114,67 @@ for (const t of TEXTURES) {
   const oob = findOutOfBounds(lines, TF.BED_X, TF.BED_Y);
   check(!oob, `${t.name}: off the bed: ${oob}`);
   check(lines.at(-1) === "M221 S100", `${t.name}: flow not restored`);
+}
+
+console.log("5. function swap");
+for (const t of TEXTURES) {
+  const text = functionText(src, t.sig);
+  const r = functionRange(src, t.sig);
+  check(text.trimEnd().endsWith("}"), `${t.name}: ${t.sig} text does not end at its closing brace`);
+  check(replaceFunction(src, t.sig, text) === src, `${t.name}: replacing ${t.sig} with itself changed the file`);
+  check(replaceFunction(src, t.sig, `\n  ${text}\n\n`) === src, `${t.name}: surrounding whitespace leaked into the file`);
+  const edited = `${text.slice(0, -1)}  // edited\n}`;
+  const out = replaceFunction(src, t.sig, edited);
+  check(out.startsWith(src.slice(0, r.start)) && out.endsWith(src.slice(r.end)), `${t.name}: bytes outside ${t.sig} changed`);
+  check(functionText(out, t.sig) === edited, `${t.name}: edited text did not round-trip`);
+  check(src.split("\n")[functionStartLine(src, t.sig) - 1].includes(`function ${t.sig}`), `${t.name}: start line wrong`);
+}
+const throws = (fn) => { try { fn(); return false; } catch { return true; } };
+const dotted = functionText(src, "brushDotted");
+check(throws(() => replaceFunction(src, "brushDotted", dotted.replace("brushDotted", "brushDotted2"))), "renamed function accepted");
+check(throws(() => replaceFunction(src, "brushDotted", dotted + "\nconst x = 1;")), "extra code after the function accepted");
+check(throws(() => replaceFunction(src, "brushDotted", dotted.replace(/^export\s+/, ""))), "dropping export accepted");
+check(throws(() => replaceFunction(src, "emitBlobDot", "export " + functionText(src, "emitBlobDot"))), "adding export accepted");
+check(!throws(() => replaceFunction(src, "brushDotted", "// note\n" + dotted)), "leading comment rejected");
+{
+  // an edited copy of the whole file imports, and its edit changes the output
+  const t = TEXTURES.find((x) => x.name === "dotted");
+  const patched = patchDefaults(src, "brushDotted", { gap: 9 });
+  const mod = await import(`data:text/javascript;base64,${Buffer.from(patched).toString("base64")}`);
+  const a = buildGcode(TF, t, {}, PLACEMENT.brush, SETTINGS).lines;
+  const b = buildGcode(mod, t, {}, PLACEMENT.brush, SETTINGS).lines;
+  const c = buildGcode(TF, t, { gap: 9 }, PLACEMENT.brush, SETTINGS).lines;
+  check(a.join("\n") !== b.join("\n"), "edited copy produced the same gcode as the original");
+  check(b.join("\n") === c.join("\n"), "edited copy's new default not used");
+}
+
+console.log("6. edit states");
+{
+  const F = "function f() { return 1; }", E = "function f() { return 2; }", E2 = "function f() { return 3; }";
+  const st = (buf, d, file = F) => editStatus(buf, d, file);
+  const can = (s) => Object.entries(s.can).filter(([, v]) => v).map(([k]) => k).sort().join(",");
+  let s = st(undefined, undefined);
+  check(s.step === 0 && s.label === "unchanged" && can(s) === "", `fresh: ${s.label} [${can(s)}]`);
+  s = st(E, undefined);
+  check(s.dirty && s.step === 1 && can(s) === "discard,revert,save", `edited: ${s.label} [${can(s)}]`);
+  const saved = { base: F, saved: E, savedOk: true };
+  s = st(E, saved);
+  check(!s.dirty && s.step === 2 && s.label === "saved · not printed" && can(s) === "revert,run", `saved: ${s.label} [${can(s)}]`);
+  s = st(E, { ...saved, savedOk: false, savedError: "x" });
+  check(s.draft.key === "error" && !s.can.run && !s.can.push && s.can.revert, `error: ${s.label} [${can(s)}]`);
+  const printed = { ...saved, printed: E };
+  s = st(E, printed);
+  check(s.step === 3 && s.label === "printed · not pushed" && can(s) === "push,revert,run", `printed: ${s.label} [${can(s)}]`);
+  s = st(E2, printed);
+  check(s.dirty && s.step === 1 && !s.can.run && !s.can.push && s.draft.key === "printed", `edit after print: ${s.label} [${can(s)}]`);
+  s = st(E2, { ...printed, saved: E2, savedOk: true });
+  check(s.step === 2 && !s.can.push, `re-saved after print needs a new print: ${s.label} [${can(s)}]`);
+  s = st(E, printed, "function f() { return 0; }");
+  check(s.draft.stale && !s.can.push && s.can.run, `stale: push must be blocked [${can(s)}]`);
+  s = st(E, { pushedText: E, pushedAt: 1 }, E);
+  check(s.step === 4 && s.label === "pushed" && can(s) === "", `pushed: ${s.label} [${can(s)}]`);
+  s = st(E2, { pushedText: E, pushedAt: 1 }, E);
+  check(s.dirty && s.step === 1 && s.can.save, `edit after push: ${s.label} [${can(s)}]`);
 }
 
 console.log(failures ? `\n${failures} failure(s)` : "\nall checks passed");
