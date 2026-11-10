@@ -762,31 +762,42 @@ function emitVariableThicknessSegment(em, p0, p1, { width, height, speed, z }) {
   em.printMove(x1, y1, seg * eRate(width, height), effectiveSpeed, z);
 }
 
-/** STROKE: the sine-wave bulge technique -- bead height varies as a
- * function of ARC LENGTH along the path. Walks the given `pts` exactly as
- * handed to it -- no new points are inserted here; resolution comes
- * entirely from however finely samplePath()/polylineToPts() already
- * sampled the path upstream. */
+/** STROKE: thickness control after Takahashi & Miyashita (UIST'16 Adjunct).
+ * Height follows arc length, low -> high -> low per bump, with a whole
+ * number of bumps fitted to the path. The nozzle rides on the bead top
+ * (Z = H). Each micromovement extrudes E = W x H x L / filament area
+ * (Eq. 1) at F = volRate / (H x W) x 60 (Eq. 2), so volumetric flow stays
+ * constant and only nozzle speed changes with thickness. Keep volRate
+ * below the measured extruder limit. Speeds are mm/min. */
 export function brushVariableThickness(em, pts, {
-  hMin = 0.16, hMax = 0.9, wavelength = 8.0, beadWidth = 0.8,
-  zGap = 0.25, speed = 25, peakDwellMs = 300,
+  hMin = 0.24, hMax = 0.9, wavelength = 8.0, beadWidth = 0.8,
+  volRate = 4.0,        // mm³/s, held constant (measured limit: 16.8)
+  maxSpeed = 1500,      // mm/min safety cap, only hit if hMin is very small
+  stepsPerWave = 25,    // micromovements per bump
+  phase = 0,            // in bumps; 0.5 on alternate rows
 } = {}) {
-  const hAt = (s) => hMin + (hMax - hMin) * 0.5 * (1 + Math.sin((2 * Math.PI * s) / wavelength));
+  const total = pts[pts.length - 1][2];
+  const nBumps = Math.max(1, Math.round(total / wavelength));
+  const lambda = total / nBumps;
+  const hAt = (s) => hMin + (hMax - hMin) * 0.5 * (1 - Math.cos(2 * Math.PI * (s / lambda + phase)));
+  const feedFor = (h) => Math.min(maxSpeed, (volRate / (h * beadWidth)) * 60);
+  const nSteps = Math.max(1, nBumps * stepsPerWave);
 
-  const firstH = hAt(0);
-  em.goto(pts[0][0], pts[0][1], firstH + zGap);
+  let j = 1;
+  let px = pts[0][0], py = pts[0][1], ph = hAt(0);
+  em.goto(px, py, ph);
   em.unretract();
-  let prevPt = pts[0];
-  let prevH = firstH;
-  for (let i = 1; i < pts.length; i++) {
-    const [x0, y0] = prevPt;
-    const [x1, y1, s1] = pts[i];
-    if (Math.hypot(x1 - x0, y1 - y0) < 1e-9) continue;
-    const h1 = hAt(s1);
-    const hAvg = (prevH + h1) / 2.0;
-    emitVariableThicknessSegment(em, prevPt, pts[i], { width: beadWidth, height: hAvg, speed, z: h1 + zGap });
-    prevPt = pts[i];
-    prevH = h1;
+  for (let k = 1; k <= nSteps; k++) {
+    const s = (total * k) / nSteps;
+    while (j < pts.length - 1 && pts[j][2] < s) j++;
+    const [xa, ya, sa] = pts[j - 1], [xb, yb, sb] = pts[j];
+    const t = sb > sa ? (s - sa) / (sb - sa) : 1;
+    const x = xa + (xb - xa) * t, y = ya + (yb - ya) * t;
+    const h = hAt(s);
+    const hAvg = (ph + h) / 2;
+    const L = Math.hypot(x - px, y - py);
+    em.printMove(x, y, (beadWidth * hAvg * L) / FIL_AREA, feedFor(hAvg), h);
+    px = x; py = y; ph = h;
   }
   em.retract();
   return pts;
