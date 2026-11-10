@@ -238,3 +238,112 @@ export function replaceFunction(src, fnName, text) {
 export function functionStartLine(src, fnName) {
   return src.slice(0, functionRange(src, fnName).start).split("\n").length;
 }
+
+// ---------------------------------------------------- function groups --
+// The editor shows a texture's main function together with every helper
+// it calls (emit*() and the rest), as one block of text. These read and
+// replace such a group.
+
+const IDENT = "[A-Za-z_$][\\w$]*";
+
+/** Names of the top-level function declarations in `src`, in file order
+ * (class methods are not included). */
+export function topLevelFunctions(src) {
+  const masked = maskComments(src);
+  const re = new RegExp(`^(?:export\\s+)?function\\s+(${IDENT})\\s*\\(`, "gm");
+  return [...masked.matchAll(re)].map((m) => m[1]);
+}
+
+/** The function a BRUSHES / STAMPS table maps `key` to, or null. */
+export function tableFunction(src, table, key) {
+  const masked = maskComments(src);
+  const m = new RegExp(`\\bconst\\s+${table}\\s*=\\s*\\{`).exec(masked);
+  if (!m) return null;
+  const open = m.index + m[0].length - 1;
+  const body = masked.slice(open, matchBracket(masked, open));
+  return new RegExp(`\\b${key}\\s*:\\s*(${IDENT})`).exec(body)?.[1] ?? null;
+}
+
+/** `roots` plus every top-level function they use, directly or through
+ * another one. The roots come first (in the given order), the rest in
+ * file order. */
+export function relatedFunctions(src, roots) {
+  const masked = maskComments(src);
+  const all = topLevelFunctions(src);
+  const seen = new Set(roots);
+  const queue = [...roots];
+  while (queue.length) {
+    const r = functionRange(src, queue.shift());
+    const body = masked.slice(r.start, r.end);
+    for (const name of all) {
+      if (!seen.has(name) && new RegExp(`(?<![\\w$.])${name.replace(/\$/g, "\\$")}(?![\\w$])`).test(body)) {
+        seen.add(name);
+        queue.push(name);
+      }
+    }
+  }
+  return [...roots, ...all.filter((n) => seen.has(n) && !roots.includes(n))];
+}
+
+/** The group's text as the editor shows it: each function, blank-line separated. */
+export function groupText(src, names) {
+  return names.map((n) => functionText(src, n)).join("\n\n");
+}
+
+/** Split editor text into its function declarations:
+ * [{name, text, exported}]. Comments between functions go with the
+ * function after them (trailing ones with the last). Throws on any other
+ * code outside a function. */
+export function splitFunctions(text) {
+  const masked = maskComments(text);
+  const re = new RegExp(`(\\bexport\\s+)?\\bfunction\\s+(${IDENT})\\s*\\(`, "g");
+  const parts = [];
+  let pos = 0, pieceStart = 0;
+  while (pos < masked.length) {
+    re.lastIndex = pos;
+    const m = re.exec(masked);
+    if (!m) {
+      if (masked.slice(pos).trim() !== "") throw new Error("code after the last function -- only whole functions can be in the editor");
+      break;
+    }
+    if (masked.slice(pos, m.index).trim() !== "") {
+      throw new Error(`code outside a function before ${m[2]} -- only whole functions can be in the editor`);
+    }
+    const close = matchBracket(masked, m.index + m[0].length - 1);
+    const body = masked.indexOf("{", close);
+    if (body === -1 || masked.slice(close + 1, body).trim() !== "") throw new Error(`function ${m[2]} has no body`);
+    const end = matchBracket(masked, body) + 1;
+    parts.push({ name: m[2], exported: !!m[1], start: pieceStart, end });
+    pos = pieceStart = end;
+  }
+  if (parts.length) parts.at(-1).end = text.length;
+  return parts.map((p) => ({ name: p.name, exported: p.exported, text: text.slice(p.start, p.end).trim() }));
+}
+
+/**
+ * `src` with each function of the group replaced by its version in
+ * `text`. `text` must hold every function in `names`, once each, and
+ * nothing else; renaming or changing `export` is refused (the tables and
+ * other textures call them by name). All checks run before any change.
+ */
+export function replaceGroup(src, names, text) {
+  const parts = splitFunctions(text);
+  const got = parts.map((p) => p.name);
+  for (const n of got) {
+    if (!names.includes(n)) throw new Error(`${n} is not one of this texture's functions -- add new functions to texture_functions.js directly`);
+    if (got.indexOf(n) !== got.lastIndexOf(n)) throw new Error(`function ${n} is in the editor twice`);
+  }
+  const missing = names.filter((n) => !got.includes(n));
+  if (missing.length) throw new Error(`keep every function in the editor -- missing: ${missing.join(", ")}`);
+
+  const edits = parts.map((p) => {
+    const r = functionRange(src, p.name);
+    if (r.exported !== p.exported) {
+      throw new Error(r.exported ? `keep "export" in front of function ${p.name}` : `${p.name} is not exported in the file -- remove "export"`);
+    }
+    return { ...r, text: p.text };
+  }).sort((a, b) => b.start - a.start);
+  let out = src;
+  for (const e of edits) out = out.slice(0, e.start) + e.text + out.slice(e.end);
+  return out;
+}

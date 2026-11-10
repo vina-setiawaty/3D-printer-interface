@@ -26,6 +26,7 @@ import { TEXTURES, PARAMS } from "../spec.js";
 import {
   parseDefaults, defaultsObject, patchDefaults,
   functionText, functionRange, replaceFunction, functionStartLine,
+  tableFunction, relatedFunctions, groupText, replaceGroup,
 } from "../signature.js";
 import { editStatus } from "../edit-state.js";
 import { buildGcode, findOutOfBounds } from "../generate.js";
@@ -136,6 +137,33 @@ check(throws(() => replaceFunction(src, "brushDotted", dotted + "\nconst x = 1;"
 check(throws(() => replaceFunction(src, "brushDotted", dotted.replace(/^export\s+/, ""))), "dropping export accepted");
 check(throws(() => replaceFunction(src, "emitBlobDot", "export " + functionText(src, "emitBlobDot"))), "adding export accepted");
 check(!throws(() => replaceFunction(src, "brushDotted", "// note\n" + dotted)), "leading comment rejected");
+
+// function groups: what the editor shows -- the sig, its table entry, and every helper they call
+const groupFor = (t) => relatedFunctions(src, [...new Set([t.sig, tableFunction(src, t.kind === "brush" ? "BRUSHES" : "STAMPS", t.fn)])]);
+for (const t of TEXTURES) {
+  const names = groupFor(t);
+  check(names[0] === t.sig, `${t.name}: group does not start with ${t.sig}`);
+  check(names.includes(TF[t.kind === "brush" ? "BRUSHES" : "STAMPS"][t.fn].name), `${t.name}: group misses its table function`);
+  const text = groupText(src, names);
+  check(replaceGroup(src, names, text) === src, `${t.name}: replacing the group with itself changed the file`);
+  const last = names.at(-1);
+  const edited = text.replace(/\}$/, "  // edited\n}");
+  const out = replaceGroup(src, names, edited);
+  check(functionText(out, last).endsWith("// edited\n}"), `${t.name}: edit to helper ${last} did not reach the file`);
+}
+{
+  const hd = TEXTURES.find((x) => x.name === "hairyDotted");
+  const names = groupFor(hd);
+  check(names.includes("emitHairyDot") && names.includes("resolveHairDir"), "hairyDotted group misses emitHairyDot / resolveHairDir");
+  check(!names.includes("brushSolid") && !names.includes("Emitter"), "hairyDotted group has unrelated functions");
+  const text = groupText(src, names);
+  check(throws(() => replaceGroup(src, names, text.replace(/\n\n[^]*?function emitHairyDot[^]*$/, ""))), "dropping a helper accepted");
+  check(throws(() => replaceGroup(src, names, text + "\n\nfunction notInFile() {}")), "unknown function accepted");
+  check(throws(() => replaceGroup(src, names, text + "\n\nconst x = 1;")), "code outside functions accepted");
+  check(throws(() => replaceGroup(src, names, text + "\n\n" + functionText(src, "emitHairyDot"))), "duplicate function accepted");
+  check(throws(() => replaceGroup(src, names, text.replace("export function brushHairyDotted", "function brushHairyDotted"))), "dropping export in a group accepted");
+  check(!throws(() => replaceGroup(src, names, text.replace("function emitHairyDot", "// helper\nfunction emitHairyDot"))), "comment between functions rejected");
+}
 {
   // an edited copy of the whole file imports, and its edit changes the output
   const t = TEXTURES.find((x) => x.name === "dotted");

@@ -26,9 +26,9 @@
  */
 import * as TF from "./texture_functions.js";
 import { TEXTURES, PARAMS } from "./spec.js";
-import { parseDefaults, patchDefaults, optionsText } from "./signature.js";
+import { parseDefaults, patchDefaults, optionsText } from "./signature.js?v=2";
 import { runInWorker } from "./runner.js";
-import { initEditor } from "./editor.js?v=2";
+import { initEditor } from "./editor.js?v=4";
 
 const SOURCE_URL = new URL("./texture_functions.js", import.meta.url);
 const SOURCE_NAME = "texture_functions.js";
@@ -80,11 +80,16 @@ function el(tag, props = {}, children = []) {
   return e;
 }
 
-function readDefaults() {
-  defaults = {};
-  for (const t of TEXTURES) defaults[t.name] = parseDefaults(source, t.sig);
+/** The code t's card reads its options from and runs: the file, with t's
+ * saved draft from the function editor swapped in when there is one. */
+function codeFor(t) {
+  return editor?.savedSource(t) ?? source;
+}
+
+function readDefaults(only = TEXTURES) {
+  for (const t of only) defaults[t.name] = parseDefaults(codeFor(t), t.sig);
   // drop stored overrides that now equal the default
-  for (const t of TEXTURES) {
+  for (const t of only) {
     const values = cardStore(t.name).values;
     for (const p of defaults[t.name]) {
       if (!p.required && p.key in values && values[p.key] === p.value) delete values[p.key];
@@ -108,7 +113,7 @@ function shownValue(t, p) {
 }
 
 // ------------------------------------------------------------------ input --
-function paramInput(t, p) {
+function paramInput(t, p, box) {
   const meta = PARAMS[p.key] ?? { step: 0.1 };
   const value = shownValue(t, p);
   let input;
@@ -123,7 +128,7 @@ function paramInput(t, p) {
     input.value = value === null || value === undefined ? "" : value;
   }
   input.dataset.key = p.key;
-  input.addEventListener("change", () => onParamChange(t, p, input));
+  input.addEventListener("change", () => onParamChange(t, p, input, box));
   markModified(p, input, value);
   const label = el("span", { class: "label", textContent: p.key });
   if (meta.unit) label.append(el("span", { class: "texture-unit", textContent: ` ${meta.unit}` }));
@@ -150,7 +155,7 @@ function markModified(p, input, value) {
   input.classList.toggle("texture-modified", !p.required && value !== p.value);
 }
 
-function onParamChange(t, p, input) {
+function onParamChange(t, p, input, box) {
   const r = readInput(p, input);
   if (!r.ok) { message(`${t.name}: ${r.error}`, "red"); return; }
   const values = cardStore(t.name).values;
@@ -158,6 +163,36 @@ function onParamChange(t, p, input) {
   else values[p.key] = r.value;
   markModified(p, input, r.value);
   saveStore();
+  syncViews(t, box);
+}
+
+// ------------------------------------------------------------ param boxes --
+// A texture's placement + option inputs are shown twice: on its card and in
+// the function editor. Both are built here from the same store, and a change
+// in one rebuilds the other.
+const views = {}; // texture name -> Set of param boxes currently showing it
+
+function renderParams(t) {
+  const box = el("div", { class: "texture-params" });
+  (views[t.name] ??= new Set()).add(box);
+  fillParams(box, t);
+  return box;
+}
+
+/** Rebuild every connected param box of t, except `except`. */
+function syncViews(t, except = null) {
+  for (const box of views[t.name] ?? []) {
+    if (!box.isConnected) views[t.name].delete(box);
+    else if (box !== except) fillParams(box, t);
+  }
+}
+
+/** t's saved draft changed (saved, reverted, cleared): re-read its options
+ * and redraw its card and the editor's param box. */
+function onDraftChange(t) {
+  readDefaults([t]);
+  document.querySelector(`#texture-${t.name}`)?.replaceWith(renderCard(t));
+  syncViews(t);
 }
 
 // ------------------------------------------------------------------- card --
@@ -181,6 +216,7 @@ function renderCard(t) {
     cs.values = {};
     saveStore();
     card.replaceWith(renderCard(t));
+    syncViews(t);
     message(`${t.name}: reset to source defaults`, "black");
   });
   const saveBtn = el("span", { class: "action-modify-btn", textContent: "save as default" });
@@ -194,36 +230,7 @@ function renderCard(t) {
     el("p", { textContent: t.description }),
   );
 
-  // placement
-  const place = el("div", { class: "texture-grid" });
-  for (const k of placementFields(t)) {
-    const input = el("input", { type: "number", step: 0.5, value: cs.placement[k] });
-    input.dataset.place = k;
-    input.addEventListener("change", () => {
-      const n = Number(input.value);
-      if (Number.isFinite(n)) { cs.placement[k] = n; saveStore(); }
-    });
-    place.append(el("span", { class: "label", textContent: `${k} mm` }), input);
-  }
-  card.append(el("div", { class: "ui-group texture-placement" }, place));
-
-  // options
-  const params = defaults[t.name];
-  const basic = el("div", { class: "texture-grid" });
-  const advanced = el("div", { class: "texture-grid" });
-  for (const key of t.basic) {
-    const p = params.find((q) => q.key === key);
-    if (p) basic.append(...paramInput(t, p));
-  }
-  const rest = params.filter((p) => !t.basic.includes(p.key));
-  for (const p of rest) advanced.append(...paramInput(t, p));
-  card.append(el("div", { class: "ui-group" }, basic));
-  if (rest.length) {
-    card.append(el("details", { class: "texture-advanced" }, [
-      el("summary", { textContent: `advanced (${rest.length})` }), advanced,
-    ]));
-  }
-  card.append(el("div", { class: "texture-sig", textContent: `defaults: ${t.sig}()` }));
+  card.append(renderParams(t));
 
   const previewBtn = el("div", { class: "btn", textContent: "preview in raw gcode" });
   previewBtn.addEventListener("click", () => preview(t, card));
@@ -231,6 +238,48 @@ function renderCard(t) {
   runBtn.addEventListener("click", () => run(t, card, runBtn));
   card.append(previewBtn, runBtn);
   return card;
+}
+
+/** Fill `box` with t's placement and option inputs (from the store and
+ * the options of codeFor(t)). */
+function fillParams(box, t) {
+  const cs = cardStore(t.name);
+  box.replaceChildren();
+
+  // placement
+  const place = el("div", { class: "texture-grid" });
+  for (const k of placementFields(t)) {
+    const input = el("input", { type: "number", step: 0.5, value: cs.placement[k] });
+    input.dataset.place = k;
+    input.addEventListener("change", () => {
+      const n = Number(input.value);
+      if (Number.isFinite(n)) { cs.placement[k] = n; saveStore(); syncViews(t, box); }
+    });
+    place.append(el("span", { class: "label", textContent: `${k} mm` }), input);
+  }
+  box.append(el("div", { class: "ui-group texture-placement" }, place));
+
+  // options
+  const params = defaults[t.name];
+  const basic = el("div", { class: "texture-grid" });
+  const advanced = el("div", { class: "texture-grid" });
+  for (const key of t.basic) {
+    const p = params.find((q) => q.key === key);
+    if (p) basic.append(...paramInput(t, p, box));
+  }
+  const rest = params.filter((p) => !t.basic.includes(p.key));
+  for (const p of rest) advanced.append(...paramInput(t, p, box));
+  box.append(el("div", { class: "ui-group" }, basic));
+  if (rest.length) {
+    box.append(el("details", { class: "texture-advanced" }, [
+      el("summary", { textContent: `advanced (${rest.length})` }), advanced,
+    ]));
+  }
+  const fromDraft = editor?.savedSource(t) != null;
+  box.append(el("div", {
+    class: "texture-sig",
+    textContent: `defaults: ${t.sig}()${fromDraft ? " -- from the saved draft (not pushed yet)" : ""}`,
+  }));
 }
 
 /** Current option values of a card, or throws with every input error. */
@@ -272,9 +321,10 @@ function cardInputs(t, card = document.querySelector(`#texture-${t.name}`)) {
   return { values: cardValues(t, card), placement: cardPlacement(t, card), settings: readSettings() };
 }
 
-/** G-code for a card from the file's current text (see runner.js). */
+/** G-code for a card from the file's current text, with t's saved draft
+ * swapped in if it has one (see runner.js). */
 function generate(t, card) {
-  return runInWorker({ source, texture: t, ...cardInputs(t, card) });
+  return runInWorker({ source: codeFor(t), texture: t, ...cardInputs(t, card) });
 }
 
 function showGcode(lines) {
@@ -321,6 +371,10 @@ function ensureModal() {
 }
 
 function openSaveModal(t, card) {
+  if (editor.savedSource(t) != null) {
+    message(`${t.name}: has a saved draft -- change its defaults in "edit code", or push / revert the draft first`, "orange");
+    return;
+  }
   let values;
   try { values = cardValues(t, card); } catch (e) { message(`${t.name}: ${e.message}`, "red"); return; }
   const changes = {};
@@ -453,6 +507,7 @@ function renderCards() {
   const box = document.querySelector("#textures");
   box.innerHTML = "";
   for (const t of TEXTURES) box.append(renderCard(t));
+  for (const t of TEXTURES) syncViews(t); // the editor's param box too
 }
 
 function setSource(text) {
@@ -475,12 +530,15 @@ async function init() {
     textures: TEXTURES,
     getSource: () => source,
     setSource,
-    inputs: (t) => cardInputs(t),
+    inputs: (t, box) => cardInputs(t, box),
+    renderParams,
+    onDraftChange,
     showGcode,
     message,
     sourceFileHandle,
     download,
   });
+  readDefaults(); // again, now with any saved drafts swapped in
   renderSettings();
   renderCards();
 }
