@@ -28,7 +28,7 @@ import * as TF from "./texture_functions.js";
 import { TEXTURES, PARAMS } from "./spec.js";
 import { parseDefaults, patchDefaults, optionsText } from "./signature.js";
 import { runInWorker } from "./runner.js";
-import { initEditor } from "./editor.js";
+import { initEditor } from "./editor.js?v=2";
 
 const SOURCE_URL = new URL("./texture_functions.js", import.meta.url);
 const SOURCE_NAME = "texture_functions.js";

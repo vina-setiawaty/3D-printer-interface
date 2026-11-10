@@ -118,6 +118,7 @@
       this.bindMouse();
       this.bindControls();
 
+      if (!textarea) return; // a viewer without a textarea (the function editor's)
       let inputTimer = null;
       textarea.addEventListener("input", () => {
         clearTimeout(inputTimer);
@@ -351,6 +352,7 @@
     }
   }
 
+  window.GcodeViewer = GcodeViewer; // editor.js builds a second one in its modal
   const $ = (s) => document.querySelector(s);
   window.gcodeViewer = new GcodeViewer({
     canvas: $("#pg-toolpath-canvas"),

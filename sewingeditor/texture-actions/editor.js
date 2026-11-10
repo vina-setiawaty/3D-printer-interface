@@ -38,9 +38,31 @@ export function initEditor(ctx) {
   const badges = {};    // texture name -> badge element on the card
   let current = null;   // texture shown in the panel
 
-  const frame = document.querySelector("#texture-editor-container");
+  const frame = document.querySelector("#texture-editor-modal");
   const root = document.querySelector("#texture-editor");
-  document.querySelector("#texture-editor-close").addEventListener("click", () => { frame.style.display = "none"; });
+  const isOpen = () => frame.classList.contains("active");
+  const close = () => { frame.classList.remove("active"); viewer?.stop(); };
+  document.querySelector("#texture-editor-close").addEventListener("click", close);
+  document.addEventListener("keydown", (ev) => { if (ev.key === "Escape" && isOpen()) close(); });
+
+  // the modal's own toolpath preview (gcode-viewer.js); the page's viewer behind it still updates too
+  const $ = (s) => document.querySelector(s);
+  const viewer = window.GcodeViewer ? new window.GcodeViewer({
+    canvas: $("#te-toolpath-canvas"),
+    slider: $("#te-toolpath-slider"),
+    label: $("#te-toolpath-label"),
+    buttons: {
+      top: $("#te-toolpath-top"), iso: $("#te-toolpath-iso"), fit: $("#te-toolpath-fit"),
+      travel: $("#te-toolpath-travel"), play: $("#te-toolpath-play"),
+    },
+  }) : null;
+  const previewByTexture = {}; // texture name -> last gcode text shown in the modal
+  function preview(t, lines) {
+    ctx.showGcode(lines);
+    const text = lines.join("\n");
+    previewByTexture[t.name] = text;
+    if (viewer && current === t) viewer.setGcode(text);
+  }
 
   // ------------------------------------------------------------ storage --
   function load() {
@@ -133,7 +155,7 @@ export function initEditor(ctx) {
 
   function refresh() {
     for (const t of ctx.textures) updateBadge(t);
-    if (!current || frame.style.display === "none") return;
+    if (!current || !isOpen()) return;
     const t = current, s = status(t);
     if (!s) { refs.warn.textContent = `${t.sig} could not be found in texture_functions.js`; return; }
     const d = s.draft;
@@ -182,6 +204,7 @@ export function initEditor(ctx) {
     }
     refs.picker.value = t.name;
     refs.code.value = buffers[t.name];
+    if (viewer) { viewer.fitted = false; viewer.setGcode(previewByTexture[t.name] ?? ""); }
     refs.where.textContent = `function ${t.sig}() in texture_functions.js`;
     refs.note.textContent = `Save and run use the ${t.name} card's current option values and placement, ` +
       `plus the flow / Z offset / lift settings. Push writes only the ${t.sig} function; the rest of the file is untouched.`;
@@ -244,8 +267,8 @@ export function initEditor(ctx) {
       const { lines, filamentMm } = await runInWorker(job);
       if (drafts[t.name] !== draft) return; // superseded by a newer save / revert
       draft.savedOk = true;
-      ctx.showGcode(lines);
-      setResult(t, `saved ${time(draft.savedAt)} and test-ran: ${lines.length} lines, ${filamentMm.toFixed(1)} mm filament -> raw gcode box + viewer`, true);
+      preview(t, lines);
+      setResult(t, `saved ${time(draft.savedAt)} and test-ran: ${lines.length} lines, ${filamentMm.toFixed(1)} mm filament -> preview + raw gcode box`, true);
     } catch (e) {
       if (drafts[t.name] !== draft) return;
       draft.savedError = errorText(e, patched, t);
@@ -269,7 +292,7 @@ export function initEditor(ctx) {
     const pw = printerWhy();
     if (pw) { setResult(t, pw, false); return; }
 
-    ctx.showGcode(lines);
+    preview(t, lines);
     const gcode = lines.map((g) => checkGcode(g)).filter((g) => g !== "");
     fab.commands.push(...gcode);
     const stream = fab.commands;    // fab.print() streams from this same array
@@ -371,9 +394,8 @@ export function initEditor(ctx) {
   return {
     /** Open the panel on texture `t`. */
     open(t) {
-      frame.style.display = "";
+      frame.classList.add("active");
       show(t);
-      frame.scrollIntoView({ behavior: "smooth", block: "start" });
       refs.code.focus();
     },
     /** A status badge for t's card (kept up to date by refresh()). */
