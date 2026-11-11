@@ -18,7 +18,7 @@
  */
 import {
   functionText, functionRange, functionStartLine, parseDefaults,
-  tableFunction, relatedFunctions, groupText, replaceGroup,
+  tableFunction, relatedFunctions, groupText, replaceGroup, splitFunctions,
 } from "./signature.js?v=2";
 import { STEPS, editStatus } from "./edit-state.js";
 import { runInWorker } from "./runner.js";
@@ -149,14 +149,8 @@ export function initEditor(ctx) {
       ctx.textures.map((t) => el("option", { value: t.name, textContent: `${t.name}  (${t.sig})` })));
     picker.addEventListener("change", () => show(ctx.textures.find((t) => t.name === picker.value)));
 
-    const code = el("textarea", { class: "te-code", spellcheck: false, wrap: "off" });
-    code.addEventListener("input", () => { buffers[current.name] = code.value; refresh(); });
-    code.addEventListener("keydown", (ev) => {
-      if (ev.key !== "Tab" || ev.shiftKey) return;
-      ev.preventDefault();
-      code.setRangeText("  ", code.selectionStart, code.selectionEnd, "end");
-      code.dispatchEvent(new Event("input"));
-    });
+    // one box per function (setCode); the draft is still one text, the boxes joined
+    const code = el("div", { class: "te-codes" });
 
     const btn = (label, fn) => {
       const b = el("div", { class: "btn", textContent: label });
@@ -191,6 +185,44 @@ export function initEditor(ctx) {
       refs.result,
       refs.note,
     );
+  }
+
+  /** What a function is to the current texture, for its box's heading. */
+  function roleOf(t, name) {
+    const kind = (/^(stroke|brush|stamp)/.exec(name) || [])[1];
+    let entry = null;
+    try { entry = tableFunction(ctx.getSource(), t.kind === "brush" ? "BRUSHES" : "STAMPS", t.fn); } catch { /* not in the table */ }
+    const roles = [];
+    if (name === entry) roles.push("what the card calls");
+    if (name === t.sig) roles.push("holds the card's defaults");
+    if (!roles.length) roles.push("helper");
+    return { kind: kind ? kind.toUpperCase() : "", what: roles.join(" · ") };
+  }
+
+  /** Show `text` (a draft or the file's group) as one box per function. */
+  function setCode(text) {
+    let parts;
+    try { parts = splitFunctions(text); } catch { parts = null; }
+    if (!parts || !parts.length) parts = [{ name: null, text }]; // can't split: one box, as typed
+    refs.code.replaceChildren(...parts.map((p) => {
+      const area = el("textarea", { class: "te-code", spellcheck: false, wrap: "off", value: p.text });
+      area.rows = Math.min(40, Math.max(6, p.text.split("\n").length + 1));
+      area.addEventListener("input", () => {
+        buffers[current.name] = [...refs.code.querySelectorAll("textarea")].map((a) => a.value.trim()).join("\n\n");
+        refresh();
+      });
+      area.addEventListener("keydown", (ev) => {
+        if (ev.key !== "Tab" || ev.shiftKey) return;
+        ev.preventDefault();
+        area.setRangeText("  ", area.selectionStart, area.selectionEnd, "end");
+        area.dispatchEvent(new Event("input"));
+      });
+      const r = p.name ? roleOf(current, p.name) : null;
+      const head = el("div", { class: "te-fn-head" }, r
+        ? [el("b", { textContent: `${r.kind ? r.kind + " " : ""}${p.name}` }), el("span", { textContent: ` -- ${r.what}` })]
+        : [el("b", { textContent: "code" })]);
+      return el("div", { class: "te-fn" }, [head, area]);
+    }));
   }
 
   function setBtn(b, enabled, why) {
@@ -248,7 +280,7 @@ export function initEditor(ctx) {
       try { buffers[t.name] = drafts[t.name]?.saved ?? fileText(t); } catch (e) { buffers[t.name] = `// ${e.message}`; }
     }
     refs.picker.value = t.name;
-    refs.code.value = buffers[t.name];
+    setCode(buffers[t.name]);
     if (viewer) { viewer.fitted = false; viewer.setGcode(previewByTexture[t.name] ?? ""); }
     let names = [t.sig];
     try { names = groupOf(t); } catch { /* refresh() shows the warning */ }
@@ -285,7 +317,10 @@ export function initEditor(ctx) {
         const end = patched.slice(0, functionRange(patched, n).end).split("\n").length;
         if (e.line < start || e.line > end) continue;
         let at = "";
-        try { at = `line ${functionStartLine(text, n) + e.line - start} of the editor, `; } catch { /* not in the text */ }
+        try {
+          const part = splitFunctions(text).find((p) => p.name === n);
+          at = `line ${functionStartLine(part.text, n) + e.line - start} of the ${n} box, `;
+        } catch { /* not in the text */ }
         return `${msg}\n(${at}in ${n})`;
       }
       msg += `\n(line ${e.line} of texture_functions.js, outside the editor's functions)`;
@@ -303,7 +338,7 @@ export function initEditor(ctx) {
       drafts[t.name] = pushed ? { pushedText: pushed.pushedText, pushedAt: pushed.pushedAt } : undefined;
       if (!drafts[t.name]) delete drafts[t.name];
       buffers[t.name] = file;
-      refs.code.value = file;
+      setCode(file);
       persist();
       ctx.onDraftChange(t);
       setResult(t, "editor matches the file again -- draft cleared", true);
@@ -416,7 +451,7 @@ export function initEditor(ctx) {
       buffers[t.name] = pushedText;
       persist();
       ctx.setSource(patched);
-      if (current === t) refs.code.value = pushedText;
+      if (current === t) setCode(pushedText);
       setResult(t, `pushed ${time(drafts[t.name].pushedAt)}: ${names.join(", ")} written to texture_functions.js`, true);
       ctx.message(`${t.name}: pushed ${t.sig} and its helpers to texture_functions.js`, "green");
     } catch (e) {
@@ -427,7 +462,7 @@ export function initEditor(ctx) {
 
   function discard(t) {
     buffers[t.name] = drafts[t.name]?.saved ?? fileText(t);
-    refs.code.value = buffers[t.name];
+    setCode(buffers[t.name]);
     setResult(t, "unsaved edits discarded", true);
   }
 
@@ -437,7 +472,7 @@ export function initEditor(ctx) {
     persist();
     ctx.onDraftChange(t);
     buffers[t.name] = fileText(t);
-    refs.code.value = buffers[t.name];
+    setCode(buffers[t.name]);
     setResult(t, "reverted to the file", true);
   }
 
@@ -465,7 +500,7 @@ export function initEditor(ctx) {
     open(t) {
       frame.classList.add("active");
       show(t);
-      refs.code.focus();
+      refs.code.querySelector("textarea")?.focus();
     },
     /** A status badge for t's card (kept up to date by refresh()). */
     badge(t) {

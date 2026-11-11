@@ -104,7 +104,9 @@ export const PARAMS = {
   hMax: { step: 0.05, min: 0.05, unit: "mm" },
   wavelength: { step: 0.5, min: 0.5, unit: "mm" },
   beadWidth: { step: 0.05, min: 0.1, unit: "mm" },
-  zGap: { step: 0.05, min: 0, unit: "mm" },
+  volRate: { step: 0.5, min: 0.1, unit: "mm³/s" },
+  stepsPerWave: { step: 1, min: 1, unit: "steps" },
+  phase: { step: 0.25, unit: "waves" },
 };
 
 export const TEXTURES = [
@@ -154,8 +156,8 @@ export const TEXTURES = [
   {
     name: "variableThickness", kind: "brush", fn: "variableThickness",
     sig: "brushVariableThickness",
-    description: "Bead height sweeps between hMin and hMax with the given wavelength.",
-    basic: ["hMin", "hMax", "wavelength", "beadWidth", "speed"],
+    description: "Bead height sweeps between hMin and hMax, one wave every wavelength mm, at constant volumetric flow (speed follows thickness).",
+    basic: ["hMin", "hMax", "wavelength", "beadWidth", "volRate"],
   },
 
   // ------------------------------------------------------------- stamps --

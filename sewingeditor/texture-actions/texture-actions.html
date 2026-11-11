@@ -427,9 +427,11 @@
   .te-draft-printed, .te-draft-pushed { color: #1E6B35; }
   .te-next { color: #333; font-style: italic; }
   .te-warn { color: #C00; }
+  .te-codes { display: flex; flex-direction: column; gap: 0.75em; }
+  .te-fn-head { font-size: 0.85em; margin-bottom: 0.2em; }
   .te-code {
     width: 100%;
-    height: 28em;
+    box-sizing: border-box;
     font-family: monospace;
     font-size: 0.8em;
     tab-size: 2;
@@ -846,7 +848,7 @@
 
   <script type="text/javascript" src="../script.js?v=4"></script>
   <script type="text/javascript" src="texture-actions-compat.js"></script>
-  <script type="module" src="texture-actions.js?v=6"></script>
+  <script type="module" src="texture-actions.js?v=7"></script>
   <script type="text/javascript" src="gcode-viewer.js?v=2"></script>
   <script type="text/javascript" src="../nav.js?v=1"></script>
 </body>

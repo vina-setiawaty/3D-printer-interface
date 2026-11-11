@@ -397,8 +397,8 @@ export function polylineToPts(points, step = 0.1) {
  * the three continuous-ridge brushes whose height is either constant for
  * a whole pass or one of a small number of author-chosen discrete values,
  * so no per-call speed safety check is needed (contrast
- * emitVariableThicknessSegment below, whose height sweeps continuously
- * and DOES need one). `z`, like printMove()'s own z argument, is optional
+ * brushVariableThickness below, whose height sweeps continuously and
+ * whose speed follows it). `z`, like printMove()'s own z argument, is optional
  * -- omit it when the caller has already set height via goto() for a
  * whole pass (solid, dashed); pass it when height changes every segment
  * (segmented). */
@@ -745,50 +745,43 @@ export function brushSegmented(em, pts, {
   return pts;
 }
 
-/** BRUSH for brushVariableThickness ONLY -- not shared with
- * emitSweptSegment. Height sweeps continuously along this Stroke's whole
- * path (unlike solid's constant-per-layer height or segmented's two
- * author-tuned discrete heights), so there's no discrete "type" to have
- * pre-picked a safe speed for -- the cap has to be computed fresh per
- * call. Follows Takahashi & Miyashita, "Thickness Control Technique for
- * Printing Tactile Sheets with Fused Deposition Modeling" (UIST'16
- * Adjunct): F <= MaxExtrusionRate / (Height x Width) x 60. */
-function emitVariableThicknessSegment(em, p0, p1, { width, height, speed, z }) {
-  const [x0, y0] = p0, [x1, y1] = p1;
-  const seg = Math.hypot(x1 - x0, y1 - y0);
-  if (seg < 1e-9) return;
-  const maxSpeed = (MAX_EXTRUSION_RATE_MM3_S / (width * height)) * 60;
-  const effectiveSpeed = Math.min(speed, maxSpeed);
-  em.printMove(x1, y1, seg * eRate(width, height), effectiveSpeed, z);
-}
-
-/** STROKE: thickness control after Takahashi & Miyashita (UIST'16 Adjunct).
- * Height follows arc length, low -> high -> low per bump, with a whole
- * number of bumps fitted to the path. The nozzle rides on the bead top
+/** BRUSH: one wave of thickness control after Takahashi & Miyashita,
+ * "Thickness Control Technique for Printing Tactile Sheets with Fused
+ * Deposition Modeling" (UIST'16 Adjunct). Prints the first `wavelength` mm
+ * of `pts` (less if the path is shorter) and returns how many mm it used,
+ * so a Stroke can call it again from there. Height follows a cosine bump,
+ * hMin -> hMax -> hMin, starting `phase` of the way into it (0.5 starts on
+ * a peak -- use it on alternate rows). The nozzle rides on the bead top
  * (Z = H). Each micromovement extrudes E = W x H x L / filament area
  * (Eq. 1) at F = volRate / (H x W) x 60 (Eq. 2), so volumetric flow stays
- * constant and only nozzle speed changes with thickness. Keep volRate
- * below the measured extruder limit. Speeds are mm/min. */
-export function brushVariableThickness(em, pts, {
+ * constant and only nozzle speed changes with thickness. If the nozzle is
+ * retracted (the start of a line) it travels to the start and primes
+ * first; otherwise it carries on from where it is. Keep volRate below the
+ * measured extruder limit. Speeds are mm/min. */
+function brushVariableThickness(em, pts, {
   hMin = 0.24, hMax = 0.9, wavelength = 8.0, beadWidth = 0.8,
   volRate = 4.0,        // mm³/s, held constant (measured limit: 16.8)
-  maxSpeed = 1500,      // mm/min safety cap, only hit if hMin is very small
-  stepsPerWave = 25,    // micromovements per bump
-  phase = 0,            // in bumps; 0.5 on alternate rows
+  stepsPerWave = 25,    // micromovements per wave
+  phase = 0,            // in waves; 0.5 on alternate rows
 } = {}) {
-  const total = pts[pts.length - 1][2];
-  const nBumps = Math.max(1, Math.round(total / wavelength));
-  const lambda = total / nBumps;
-  const hAt = (s) => hMin + (hMax - hMin) * 0.5 * (1 - Math.cos(2 * Math.PI * (s / lambda + phase)));
-  const feedFor = (h) => Math.min(maxSpeed, (volRate / (h * beadWidth)) * 60);
-  const nSteps = Math.max(1, nBumps * stepsPerWave);
+  if (!(hMin >= 0)) throw new RangeError(`brushVariableThickness: hMin must be >= 0 mm (got ${hMin})`);
+  if (!(hMax >= hMin)) throw new RangeError(`brushVariableThickness: hMax must be >= hMin (got ${hMax} < ${hMin})`);
+  if (!(hMax > 0)) throw new RangeError(`brushVariableThickness: hMax must be > 0 mm (got ${hMax})`);
+  if (!(wavelength > 0)) throw new RangeError(`brushVariableThickness: wavelength must be > 0 mm (got ${wavelength})`);
+
+  const len = Math.min(wavelength, pts[pts.length - 1][2]);
+  if (!(len > 0)) return 0;
+  const hAt = (s) => hMin + (hMax - hMin) * 0.5 * (1 - Math.cos(2 * Math.PI * (s / wavelength + phase)));
+  const n = Math.max(1, Math.round((stepsPerWave * len) / wavelength));
 
   let j = 1;
   let px = pts[0][0], py = pts[0][1], ph = hAt(0);
-  em.goto(px, py, ph);
-  em.unretract();
-  for (let k = 1; k <= nSteps; k++) {
-    const s = (total * k) / nSteps;
+  if (em.retracted) {
+    em.goto(px, py, ph);
+    em.unretract();
+  }
+  for (let k = 1; k <= n; k++) {
+    const s = (len * k) / n;
     while (j < pts.length - 1 && pts[j][2] < s) j++;
     const [xa, ya, sa] = pts[j - 1], [xb, yb, sb] = pts[j];
     const t = sb > sa ? (s - sa) / (sb - sa) : 1;
@@ -796,8 +789,29 @@ export function brushVariableThickness(em, pts, {
     const h = hAt(s);
     const hAvg = (ph + h) / 2;
     const L = Math.hypot(x - px, y - py);
-    em.printMove(x, y, (beadWidth * hAvg * L) / FIL_AREA, feedFor(hAvg), h);
+    em.printMove(x, y, (beadWidth * hAvg * L) / FIL_AREA, (volRate / (hAvg * beadWidth)) * 60, h);
     px = x; py = y; ph = h;
+  }
+  return len;
+}
+
+/** STROKE: a variable-thickness line -- brushVariableThickness() wave after
+ * wave until the path runs out (the last wave is cut short where the path
+ * ends), then one retract. Knows nothing about waves: each brush call says
+ * how far it got, and the options pass straight through. */
+export function strokeVariableThickness(em, pts, options = {}) {
+  const total = pts[pts.length - 1][2];
+  // the path from arc length `a` on, re-based to start at 0
+  const rest = (a) => {
+    const out = [[...pointAtArcLength(pts, a), 0]];
+    for (const [x, y, s] of pts) if (s > a) out.push([x, y, s - a]);
+    return out;
+  };
+  let s = 0;
+  while (total - s > 1e-9) {
+    const used = brushVariableThickness(em, s === 0 ? pts : rest(s), options);
+    if (!(used > 0)) break;
+    s += used;
   }
   em.retract();
   return pts;
@@ -1390,7 +1404,7 @@ export const BRUSHES = {
   solid: brushSolid, dashed: brushDashed, dotted: brushDotted,
   blobDotted: brushBlobDotted, directionalBlobDotted: brushDirectionalBlobDotted,
   hairy: brushHairy, hairyDotted: brushHairyDotted, segmented: brushSegmented,
-  variableThickness: brushVariableThickness,
+  variableThickness: strokeVariableThickness,
 };
 export const STAMPS = {
   blob: stampBlob, disc: stampDisc, directionalBlob: stampDirectionalBlob, hairyDot: stampHairy,
