@@ -7,7 +7,12 @@
  * handlers, after p5's setup() has run.
  *
  * Defaults come from texture_functions.js itself (fetched as text and read
- * by signature.js). "save as default" rewrites those literals in that file:
+ * by signature.js). By default that is the copy served with the page; "link
+ * texture_functions.js" above the cards reads your local file instead (the
+ * folder is remembered across reloads), so a deployed copy (Vercel) can
+ * edit and push to the checkout on your disk. The page holds the text as
+ * LF and writes back in the disk file's own line endings.
+ * "save as default" rewrites those literals in that file:
  * directly through the File System Access API (Chrome/Edge -- you pick the
  * texture-actions folder once per session), or as a download otherwise.
  *
@@ -28,7 +33,7 @@ import * as TF from "./texture_functions.js";
 import { TEXTURES, PARAMS } from "./spec.js";
 import { parseDefaults, patchDefaults, optionsText } from "./signature.js?v=2";
 import { runInWorker } from "./runner.js";
-import { initEditor } from "./editor.js?v=4";
+import { initEditor } from "./editor.js?v=5";
 
 const SOURCE_URL = new URL("./texture_functions.js", import.meta.url);
 const SOURCE_NAME = "texture_functions.js";
@@ -39,9 +44,10 @@ const SETTINGS = [
   { key: "liftMm", label: "lift after", unit: "mm", value: 2, step: 0.5, min: 0 },
 ];
 
-let source = "";       // texture_functions.js text the defaults were read from
+let source = "";       // texture_functions.js text the defaults were read from (always LF)
 let defaults = {};     // texture name -> parseDefaults() list
-let dirHandle = null;  // picked texture-actions folder (File System Access)
+let dirHandle = null;  // picked texture-actions folder (File System Access), remembered in IndexedDB
+let linked = false;    // `source` was read from that folder, not from the served copy
 let store = loadStore();
 let editor = null;     // initEditor() result
 
@@ -433,10 +439,30 @@ function openSaveModal(t, card) {
   m.classList.add("active");
 }
 
+// The picked folder handle survives reloads in IndexedDB (localStorage
+// can't hold one). Permission doesn't: the browser may ask again once per
+// session, and only from a click.
+function handleStore(mode, op) {
+  return new Promise((resolve, reject) => {
+    const open = indexedDB.open("textureActions", 1);
+    open.onupgradeneeded = () => open.result.createObjectStore("handles");
+    open.onerror = () => reject(open.error);
+    open.onsuccess = () => {
+      const tx = open.result.transaction("handles", mode);
+      const req = op(tx.objectStore("handles"));
+      tx.oncomplete = () => resolve(req.result);
+      tx.onerror = () => reject(tx.error);
+    };
+  });
+}
+const saveDirHandle = (h) => handleStore("readwrite", (s) => s.put(h, "dir")).catch(() => {});
+const loadDirHandle = () => handleStore("readonly", (s) => s.get("dir")).catch(() => null);
+
 async function sourceFileHandle() {
   if (!dirHandle) {
     message(`pick the texture-actions folder (the one containing ${SOURCE_NAME})`, "blue");
     dirHandle = await window.showDirectoryPicker({ id: "texture-actions", mode: "readwrite" });
+    saveDirHandle(dirHandle);
   }
   const opts = { mode: "readwrite" };
   if ((await dirHandle.queryPermission(opts)) !== "granted" &&
@@ -451,9 +477,60 @@ async function sourceFileHandle() {
   }
 }
 
-async function writeToDisk(t, changes) {
+// Line endings: the page works in LF throughout. A Windows checkout is
+// CRLF while a copy served from git (Vercel) is LF, so text read from disk
+// is normalized, and writes go back in whatever the file on disk uses.
+const toLF = (text) => text.replace(/\r\n/g, "\n");
+
+async function readDisk() {
   const handle = await sourceFileHandle();
-  const disk = await (await handle.getFile()).text();
+  return toLF(await (await handle.getFile()).text());
+}
+
+async function writeDisk(text) {
+  const handle = await sourceFileHandle();
+  const crlf = (await (await handle.getFile()).text()).includes("\r\n");
+  const w = await handle.createWritable();
+  await w.write(crlf ? toLF(text).replace(/\n/g, "\r\n") : toLF(text));
+  await w.close();
+  // every caller adopts what it wrote as `source`, so the page now holds
+  // the local file
+  linked = true;
+  renderLinkBar();
+}
+
+/** "link" / "reload from file": read texture_functions.js from the picked
+ * folder instead of the copy this page was served with. */
+async function linkSource() {
+  try {
+    const text = await readDisk();
+    linked = true;
+    setSource(text);
+    message(`textures: using ${SOURCE_NAME} from your folder`, "green");
+  } catch (e) {
+    if (e.name !== "AbortError") message(`textures: ${e.message}`, "red");
+  }
+  renderLinkBar();
+}
+
+function renderLinkBar() {
+  const bar = document.querySelector("#texture-link");
+  if (!bar) return;
+  bar.innerHTML = "";
+  if (!("showDirectoryPicker" in window)) {
+    bar.append(el("span", { class: "label", textContent: `${SOURCE_NAME}: the copy served with this page (this browser can't open local folders)` }));
+    return;
+  }
+  const btn = el("button", { textContent: linked ? "reload from file" : dirHandle ? `reconnect ${SOURCE_NAME}` : `link ${SOURCE_NAME}` });
+  btn.addEventListener("click", linkSource);
+  const where = linked
+    ? `${SOURCE_NAME}: your local file (${dirHandle?.name ?? "folder"})`
+    : `${SOURCE_NAME}: the copy served with this page${dirHandle ? " -- click to read your local file again" : ""}`;
+  bar.append(el("div", { class: "ui-item" }, btn), el("span", { class: "label", textContent: where }));
+}
+
+async function writeToDisk(t, changes) {
+  const disk = await readDisk();
 
   // Patch what is on disk now (keeps any edits made since page load), but
   // only if the values being replaced are still the ones shown here.
@@ -466,10 +543,7 @@ async function writeToDisk(t, changes) {
     }
   }
   const patched = patchDefaults(disk, t.sig, changes);
-
-  const w = await handle.createWritable();
-  await w.write(patched);
-  await w.close();
+  await writeDisk(patched);
 
   source = patched;
   readDefaults();
@@ -511,7 +585,7 @@ function renderCards() {
 }
 
 function setSource(text) {
-  source = text;
+  source = toLF(text);
   readDefaults();
   renderCards();
 }
@@ -520,11 +594,24 @@ async function init() {
   try {
     const res = await fetch(SOURCE_URL, { cache: "no-store" });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    source = await res.text();
+    source = toLF(await res.text());
     readDefaults();
   } catch (e) {
     message(`textures: could not read ${SOURCE_NAME} (${e.message})`, "red");
     return;
+  }
+  // A folder linked on an earlier visit: read from it straight away if the
+  // browser still allows it without asking; otherwise the link bar offers
+  // a "reconnect" click (a permission prompt needs one).
+  if ("showDirectoryPicker" in window) {
+    dirHandle = (await loadDirHandle()) ?? null;
+    try {
+      if (dirHandle && (await dirHandle.queryPermission({ mode: "readwrite" })) === "granted") {
+        source = await readDisk();
+        linked = true;
+        readDefaults();
+      }
+    } catch { /* folder moved or gone: stay on the served copy */ }
   }
   editor = initEditor({
     textures: TEXTURES,
@@ -535,10 +622,12 @@ async function init() {
     onDraftChange,
     showGcode,
     message,
-    sourceFileHandle,
+    readDisk,
+    writeDisk,
     download,
   });
   readDefaults(); // again, now with any saved drafts swapped in
+  renderLinkBar();
   renderSettings();
   renderCards();
 }

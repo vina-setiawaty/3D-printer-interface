@@ -35,7 +35,8 @@ const STORE_KEY = "textureEdits";
  *   onDraftChange(t),            t's saved draft changed: re-read its options, redraw card + param box
  *   showGcode(lines),            put lines in the raw gcode box + viewer
  *   message(text, color),
- *   sourceFileHandle(),          File System Access handle for texture_functions.js
+ *   readDisk(),                  texture_functions.js as on disk now, line endings as LF
+ *   writeDisk(text),             write it back, in the disk file's own line endings
  *   download(text, filename),
  * }
  */
@@ -98,6 +99,11 @@ export function initEditor(ctx) {
     for (const t of ctx.textures) {
       const d = drafts[t.name];
       if (!d) continue;
+      // the page now holds the file as LF; a draft started from a CRLF copy
+      // would otherwise read as stale forever
+      for (const k of ["base", "saved", "printed", "pushedText"]) {
+        if (typeof d[k] === "string" && d[k].includes("\r")) { d[k] = d[k].replace(/\r\n/g, "\n"); changed = true; }
+      }
       let names;
       try { names = groupOf(t); } catch { continue; }
       const extra = names.slice(1);
@@ -394,17 +400,16 @@ export function initEditor(ctx) {
       return;
     }
     try {
-      const handle = await ctx.sourceFileHandle();
-      const disk = await (await handle.getFile()).text();
+      // LF on both sides: a Windows checkout is CRLF, a served copy (e.g.
+      // Vercel, built from git) is LF -- the same code must compare equal.
+      const disk = await ctx.readDisk();
       const names = groupOf(t, disk);
-      if (groupText(disk, names) !== draft.base) {
+      if (groupText(disk, names) !== draft.base.replace(/\r\n/g, "\n")) {
         throw new Error(`${t.sig} or one of its helpers in texture_functions.js on disk changed since this draft started -- not pushed`);
       }
       const patched = replaceGroup(disk, names, draft.saved);
       parseDefaults(patched, t.sig);
-      const w = await handle.createWritable();
-      await w.write(patched);
-      await w.close();
+      await ctx.writeDisk(patched);
 
       const pushedText = groupText(patched, groupOf(t, patched));
       drafts[t.name] = { pushedText, pushedAt: Date.now() };
