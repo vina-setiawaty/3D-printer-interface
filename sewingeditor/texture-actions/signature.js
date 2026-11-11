@@ -102,7 +102,8 @@ export function parseDefaults(src, fnName) {
     const text = masked.slice(pieceStart, pieceEnd);
     const lead = text.length - text.trimStart().length;
     const body = text.trim();
-    if (body) {
+    // `...brush` -- a stroke passing every other option on to its brush
+    if (body && !body.startsWith("...")) {
       const eq = /^([A-Za-z_$][\w$]*)\s*(=\s*)?/.exec(body);
       if (!eq) throw new Error(`can't parse "${body}" in ${fnName}`);
       const key = eq[1];
@@ -134,6 +135,45 @@ export function parseDefaults(src, fnName) {
   }
   flush(end);
   return params;
+}
+
+/**
+ * A texture's options are spread over its stroke and its brush: parse
+ * each of `fnNames` in order and tag every param with the `fn` it lives
+ * in. A key in more than one keeps the first (the stroke's -- e.g.
+ * directionalBlobDotted's azimuthDeg is the stroke's offset, which it
+ * turns into the brush's own). A function without an options object adds
+ * nothing.
+ */
+export function parseAllDefaults(src, fnNames) {
+  const seen = new Set(), out = [];
+  for (const fn of fnNames) {
+    let params;
+    try { params = parseDefaults(src, fn); } catch (e) {
+      if (/has no options object/.test(e.message)) continue;
+      throw e;
+    }
+    for (const p of params) {
+      if (seen.has(p.key)) continue;
+      seen.add(p.key);
+      out.push({ ...p, fn });
+    }
+  }
+  return out;
+}
+
+/** patchDefaults() across a texture's functions: each changed key is
+ * written into the function parseAllDefaults() found it in. */
+export function patchAllDefaults(src, fnNames, changes) {
+  const owner = Object.fromEntries(parseAllDefaults(src, fnNames).map((p) => [p.key, p.fn]));
+  const byFn = {};
+  for (const [key, value] of Object.entries(changes)) {
+    if (!owner[key]) throw new Error(`${fnNames.join(" / ")} has no option "${key}"`);
+    (byFn[owner[key]] ??= {})[key] = value;
+  }
+  let out = src;
+  for (const [fn, ch] of Object.entries(byFn)) out = patchDefaults(out, fn, ch);
+  return out;
 }
 
 /** Defaults as a plain `{key: value}` object (required keys omitted). */
@@ -240,8 +280,8 @@ export function functionStartLine(src, fnName) {
 }
 
 // ---------------------------------------------------- function groups --
-// The editor shows a texture's main function together with every helper
-// it calls (emit*() and the rest), as one block of text. These read and
+// The editor shows a texture's stroke and brush together with every
+// helper they call, as one block of text. These read and
 // replace such a group.
 
 const IDENT = "[A-Za-z_$][\\w$]*";

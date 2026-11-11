@@ -36,7 +36,7 @@ export function findOutOfBounds(lines, bedX, bedY) {
  * @param TF        the texture_functions.js module
  * @param texture   a TEXTURES entry from spec.js
  * @param values    {option: value} -- the full option set to pass
- * @param placement brush: {x0, y0, x1, y1}; stamp: {x, y}
+ * @param placement {x0, y0, x1, y1} -- the line the stroke walks
  * @param settings  {flowPercent, zOffset, liftMm, startZ}
  * @returns {lines, bodyLines, filamentMm}
  */
@@ -51,14 +51,10 @@ export function buildGcode(TF, texture, values, placement, settings) {
   em.retracted = true;
   em.newPattern();
 
-  if (texture.kind === "brush") {
-    const { x0, y0, x1, y1 } = placement;
-    if (Math.hypot(x1 - x0, y1 - y0) < 1e-6) throw new Error("line start and end are the same point");
-    const pts = TF.polylineToPts([[x0, y0], [x1, y1]], 0.1);
-    TF.BRUSHES[texture.fn](em, pts, values);
-  } else {
-    TF.STAMPS[texture.fn](em, placement.x, placement.y, values);
-  }
+  const { x0, y0, x1, y1 } = placement;
+  if (Math.hypot(x1 - x0, y1 - y0) < 1e-6) throw new Error("line start and end are the same point");
+  const pts = TF.polylineToPts([[x0, y0], [x1, y1]], 0.1);
+  TF.BRUSHES[texture.fn](em, pts, values);
   em.retract();
 
   const bodyLines = em.lines.map((l) => offsetZ(l, zOffset));

@@ -31,9 +31,9 @@
  */
 import * as TF from "./texture_functions.js";
 import { TEXTURES, PARAMS } from "./spec.js";
-import { parseDefaults, patchDefaults, optionsText } from "./signature.js?v=2";
+import { parseAllDefaults, patchAllDefaults, optionsText } from "./signature.js?v=3";
 import { runInWorker } from "./runner.js";
-import { initEditor } from "./editor.js?v=6";
+import { initEditor } from "./editor.js?v=7";
 
 const SOURCE_URL = new URL("./texture_functions.js", import.meta.url);
 const SOURCE_NAME = "texture_functions.js";
@@ -45,7 +45,7 @@ const SETTINGS = [
 ];
 
 let source = "";       // texture_functions.js text the defaults were read from (always LF)
-let defaults = {};     // texture name -> parseDefaults() list
+let defaults = {};     // texture name -> parseAllDefaults() list (each param tagged with its fn)
 let dirHandle = null;  // picked texture-actions folder (File System Access), remembered in IndexedDB
 let linked = false;    // `source` was read from that folder, not from the served copy
 let store = loadStore();
@@ -55,7 +55,16 @@ let editor = null;     // initEditor() result
 function loadStore() {
   try {
     const s = JSON.parse(localStorage.getItem(STORE_KEY));
-    if (s && s.cards && s.settings) return s;
+    if (s && s.cards && s.settings) {
+      // stampOrder was renamed brushOrder: keep a value saved under the old name
+      for (const c of Object.values(s.cards)) {
+        if (c?.values && "stampOrder" in c.values) {
+          c.values.brushOrder ??= c.values.stampOrder;
+          delete c.values.stampOrder;
+        }
+      }
+      return s;
+    }
   } catch { /* private window / blocked storage */ }
   return { cards: {}, settings: {} };
 }
@@ -93,7 +102,7 @@ function codeFor(t) {
 }
 
 function readDefaults(only = TEXTURES) {
-  for (const t of only) defaults[t.name] = parseDefaults(codeFor(t), t.sig);
+  for (const t of only) defaults[t.name] = parseAllDefaults(codeFor(t), t.sigs);
   // drop stored overrides that now equal the default
   for (const t of only) {
     const values = cardStore(t.name).values;
@@ -206,11 +215,9 @@ function placementFields(t) {
   const cs = cardStore(t.name);
   if (!cs.placement) {
     const [x, y] = startXY();
-    cs.placement = t.kind === "brush"
-      ? { x0: x - 15, y0: y, x1: x + 15, y1: y }
-      : { x, y };
+    cs.placement = { x0: x - 15, y0: y, x1: x + 15, y1: y };
   }
-  return t.kind === "brush" ? ["x0", "y0", "x1", "y1"] : ["x", "y"];
+  return ["x0", "y0", "x1", "y1"];
 }
 
 function renderCard(t) {
@@ -284,7 +291,7 @@ function fillParams(box, t) {
   const fromDraft = editor?.savedSource(t) != null;
   box.append(el("div", {
     class: "texture-sig",
-    textContent: `defaults: ${t.sig}()${fromDraft ? " -- from the saved draft (not pushed yet)" : ""}`,
+    textContent: `defaults: ${t.sigs.map((n) => `${n}()`).join(" + ")}${fromDraft ? " -- from the saved draft (not pushed yet)" : ""}`,
   }));
 }
 
@@ -390,7 +397,10 @@ function openSaveModal(t, card) {
   if (Object.keys(changes).length === 0) { message(`${t.name}: no changes from the source defaults`, "black"); return; }
 
   let patched;
-  try { patched = patchDefaults(source, t.sig, changes); } catch (e) { message(`${t.name}: ${e.message}`, "red"); return; }
+  try { patched = patchAllDefaults(source, t.sigs, changes); } catch (e) { message(`${t.name}: ${e.message}`, "red"); return; }
+
+  // the functions whose defaults change (a card's options live in its stroke and its brush)
+  const touched = [...new Set(Object.keys(changes).map((k) => defaults[t.name].find((p) => p.key === k).fn))];
 
   const m = ensureModal();
   m.innerHTML = "";
@@ -428,12 +438,12 @@ function openSaveModal(t, card) {
   m.append(
     close,
     el("h1", { textContent: `Save defaults: ${t.name}` }),
-    el("p", { class: "texture-sig", textContent: `rewrites the defaults of ${t.sig}() in texture-actions/${SOURCE_NAME}` }),
+    el("p", { class: "texture-sig", textContent: `rewrites the defaults of ${touched.map((n) => `${n}()`).join(" and ")} in texture-actions/${SOURCE_NAME}` }),
     list,
     el("h1", { textContent: "before" }),
-    el("pre", { class: "texture-diff", textContent: optionsText(source, t.sig) }),
+    el("pre", { class: "texture-diff", textContent: touched.map((n) => `${n}: ${optionsText(source, n)}`).join("\n\n") }),
     el("h1", { textContent: "after" }),
-    el("pre", { class: "texture-diff", textContent: optionsText(patched, t.sig) }),
+    el("pre", { class: "texture-diff", textContent: touched.map((n) => `${n}: ${optionsText(patched, n)}`).join("\n\n") }),
     buttons,
   );
   m.classList.add("active");
@@ -534,15 +544,15 @@ async function writeToDisk(t, changes) {
 
   // Patch what is on disk now (keeps any edits made since page load), but
   // only if the values being replaced are still the ones shown here.
-  const diskParams = parseDefaults(disk, t.sig);
+  const diskParams = parseAllDefaults(disk, t.sigs);
   for (const k of Object.keys(changes)) {
     const shown = defaults[t.name].find((p) => p.key === k);
     const onDisk = diskParams.find((p) => p.key === k);
     if (!onDisk || onDisk.value !== shown.value) {
-      throw new Error(`${t.sig}.${k} changed on disk since the page loaded -- reload and try again`);
+      throw new Error(`${shown.fn}.${k} changed on disk since the page loaded -- reload and try again`);
     }
   }
-  const patched = patchDefaults(disk, t.sig, changes);
+  const patched = patchAllDefaults(disk, t.sigs, changes);
   await writeDisk(patched);
 
   source = patched;

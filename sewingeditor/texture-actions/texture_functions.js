@@ -1,27 +1,24 @@
 /**
- * texture_functions-with-tool.js -- PROTOTYPE fork of texture_functions.js,
- * used only by parametric-with-tool.html. Same deposited G-code as the
- * pinned texture_functions.js for every texture (verified by
- * tests/parametric/golden-brushes.mjs, a byte-for-byte golden diff), but
- * restructured around ONE idea: a texture is what happens between two
- * points.
+ * texture_functions.js (texture-actions) -- the texture library the
+ * texture-actions page runs, edits and saves defaults back into. Every
+ * texture is a STROKE that walks a path and calls a BRUSH, one mark at a
+ * time.
  *
- *   SECTION 2  path engine  -- a formula path (samplePath) or an explicit
- *                             polyline (polylineToPts) becomes an
- *                             arc-length-tagged point list.
- *   SECTION 3  brushes      -- brush*(em, pts, options): what is deposited
- *                             along a point list.
- *   SECTION 4  patterns     -- hatchStrokes / diamondStrokes: how a region
- *                             becomes a list of strokes for a brush.
- *   SECTION 5  stamps       -- stamp*(em, cx, cy, options): what is
- *                             deposited at a single point.
+ *   SECTION 2  path engine   -- a formula path (samplePath) or an explicit
+ *                              polyline (polylineToPts) becomes an
+ *                              arc-length-tagged point list.
+ *   SECTION 3  strokes and line brushes
+ *                            -- stroke*(em, pts, options) walks the list;
+ *                              brush*() lays one bead / dash / thin+fat
+ *                              pair / wave.
+ *   SECTION 4  patterns      -- hatchStrokes / diamondStrokes: how a region
+ *                              becomes a list of paths for a stroke.
+ *   SECTION 5  dot brushes   -- brush*(em, cx, cy, options): one dot or
+ *                              hair at a point, for the dot strokes.
  *
- * The old freeform*(em, xFunc, yFunc, ...) / *Dot / fill() entry points are
- * gone from this fork; the compiler in ../parametric-catalog-with-tool.js
- * samples paths, generates pattern strokes, calls em.newPattern() per
- * top-level element and dispatches through BRUSHES / STAMPS. Comments
- * document only the FINAL current behavior -- see texture_functions.js (or
- * ../../texture_docs/) for the historical tuning log.
+ * BRUSHES at the end maps each texture name to its stroke. Comments
+ * document only the FINAL current behavior -- see ../texture_docs/ for the
+ * historical tuning log.
  *
  * ============================================================================
  * SECTION 1: CORE INFRASTRUCTURE (Emitter, shared constants, e-rate math)
@@ -217,7 +214,7 @@ export function spiralDisc(center, radius, spacing = 0.28, ptsPerTurn = 20) {
  * Any line follows x(t), y(t) -- a straight line, an angle, a sine wiggle,
  * an arc, or a hand-authored curve. samplePath() IS the "linked list of
  * points" a path resolves to: an arc-length-tagged point sequence every
- * texture function (line style or per-point stamp) walks.
+ * stroke walks.
  */
 
 /**
@@ -370,70 +367,64 @@ export function polylineToPts(points, step = 0.1) {
 
 /**
  * ============================================================================
- * SECTION 3: BRUSHES -- what happens between two points
+ * SECTION 3: STROKES AND LINE BRUSHES
  * ============================================================================
- * Every PUBLIC brush is brush*(em, pts, options): `pts` is an arc-length-
- * tagged point list from samplePath() (a formula path) or polylineToPts()
- * (an explicit polyline). A brush never calls em.newPattern() -- the
- * caller does, once per top-level printed element (each line, each hatch
- * stroke, each dot, one whole diamond fill), exactly as the pre-refactor
- * functions did.
+ * Every texture is a STROKE walking a path and calling a BRUSH:
  *
- * Internally, the continuous-ridge brushes (solid, dashed, segmented,
- * variableThickness) are each split into two layers, matching the
- * Shape -> Stroke -> Brush model: the exported function is the STROKE --
- * it owns `pts`, any layer/pass looping, and retract/unretract sequencing
- * -- which calls a private, non-exported BRUSH primitive per adjacent
- * point pair. A Brush primitive is purely local: given two points and
- * explicit options, it decides what is deposited between them, with no
- * knowledge of layers, retraction, or the rest of the path. The `*Dotted`
- * family below (and Section 5's stamps) already have this shape --
- * walkArcLengthStops() is their Stroke, emit*Dot() their Brush -- and
- * needed no change.
+ *   brush*(em, ..., options)   ONE mark -- a bead between two points, one
+ *                              dash, one thin+fat pair, one wave (here), or
+ *                              one dot / hair (SECTION 5). It holds that
+ *                              mark's own options and their defaults.
+ *   stroke*(em, pts, { walk options, ...brush })
+ *                              walks an arc-length-tagged point list (from
+ *                              samplePath() or polylineToPts()) and calls
+ *                              its brush along it. It holds only how it
+ *                              walks (gap, spacing, layers, order, priming);
+ *                              every other option passes straight through
+ *                              to the brush as `brush`.
+ *
+ * BRUSHES (end of file) maps each texture name to its stroke; a card reads
+ * its defaults from both functions (spec.js `sigs`). A line brush takes the
+ * path from where it starts (restOfPath()) and returns how many mm it used,
+ * so the stroke can call it again from there. Neither ever calls
+ * em.newPattern() -- the caller does, once per printed element.
  */
 
-/** BRUSH: one straight swept segment from p0 to p1, at a constant given
- * width/height. Shared by brushSolid, brushDashed and brushSegmented --
- * the three continuous-ridge brushes whose height is either constant for
- * a whole pass or one of a small number of author-chosen discrete values,
- * so no per-call speed safety check is needed (contrast
- * brushVariableThickness below, whose height sweeps continuously and
- * whose speed follows it). `z`, like printMove()'s own z argument, is optional
- * -- omit it when the caller has already set height via goto() for a
- * whole pass (solid, dashed); pass it when height changes every segment
- * (segmented). */
-function emitSweptSegment(em, p0, p1, { width, height, speed, flowMult = 1.0, z = null }) {
-  const [x0, y0] = p0, [x1, y1] = p1;
-  const seg = Math.hypot(x1 - x0, y1 - y0);
-  if (seg < 1e-9) return;
-  em.printMove(x1, y1, seg * eRate(width, height, flowMult), speed, z);
+/** The path from arc length `a` on, re-based so it starts at s = 0. */
+function restOfPath(pts, a) {
+  if (a <= 0) return pts;
+  const [x0, y0] = pointAtArcLength(pts, a);
+  const out = [[x0, y0, 0]];
+  for (const [x, y, s] of pts) if (s > a) out.push([x, y, s - a]);
+  return out;
 }
 
-/** STROKE: continuous solid ridge. */
-export function brushSolid(em, pts, {
-  width = 0.5, nLayers = 2, speed = 400,
-} = {}) {
+/** BRUSH: one straight bead from p0 to p1, one layer high, at the nozzle's
+ * current height -- the stroke has already travelled, primed and set Z. */
+function brushSolid(em, p0, p1, { width = 0.5, speed = 400 } = {}) {
+  const seg = Math.hypot(p1[0] - p0[0], p1[1] - p0[1]);
+  if (seg < 1e-9) return;
+  em.printMove(p1[0], p1[1], seg * eRate(width, LAYER_HEIGHT), speed);
+}
+
+/** STROKE: a continuous solid ridge, `nLayers` high. Per layer: travel to
+ * the start at that layer's height, prime, one brushSolid() bead per pair
+ * of points, retract. */
+export function strokeSolid(em, pts, { nLayers = 2, ...brush } = {}) {
   for (let layer = 1; layer <= nLayers; layer++) {
-    const z = LAYER_HEIGHT * layer;
-    em.goto(pts[0][0], pts[0][1], z);
+    em.goto(pts[0][0], pts[0][1], LAYER_HEIGHT * layer);
     em.unretract();
-    for (let i = 1; i < pts.length; i++) {
-      emitSweptSegment(em, pts[i - 1], pts[i], { width, height: LAYER_HEIGHT, speed });
-    }
+    for (let i = 1; i < pts.length; i++) brushSolid(em, pts[i - 1], pts[i], brush);
     em.retract();
   }
   return pts;
 }
 
-/** STROKE: dashes -- segLen/gapLen measured along actual arc length. A
- * gap is not a Brush call at all, just travel: each "on" sub-range is
- * walked with the exact same per-layer goto/unretract/walk/retract
- * bracket as brushSolid's Stroke (reusing its Brush verbatim), and the
- * gap between one dash and the next is entirely the next dash's own
- * leading goto(). Because this loop only ever draws a dash (whatever
- * length remains, even a shortened final one) and never renders a gap as
- * its own step, it structurally cannot end on a gap. */
-export function brushDashed(em, pts, {
+/** BRUSH: one dash -- `segLen` mm of solid ridge from the start of `pts`
+ * (shorter if the path ends first), `nLayers` high, each layer with its own
+ * travel / prime / walk / retract -- followed by `gapLen` mm left blank.
+ * Returns segLen + gapLen, where the next dash starts. */
+function brushDashed(em, pts, {
   segLen, gapLen, width = 0.5, nLayers = 2, speed = 400,
 } = {}) {
   if (typeof segLen !== "number" || typeof gapLen !== "number") {
@@ -441,44 +432,48 @@ export function brushDashed(em, pts, {
       "dashed brush requires numeric segLen and gapLen in its options object, e.g. {segLen: 8, gapLen: 4}."
     );
   }
-  const length = totalLength(pts);
-  let s = 0.0;
-  while (s < length - 1e-6) {
-    const s2 = Math.min(s + segLen, length);
-    const subStart = pointAtArcLength(pts, s);
-    let subPts = pts.filter((p) => p[2] >= s && p[2] <= s2);
-    if (subPts.length === 0 || subPts[0][2] > s + 1e-6) {
-      subPts = [[subStart[0], subStart[1], s], ...subPts];
+  const dash = pts.filter((p) => p[2] <= segLen);
+  for (let layer = 1; layer <= nLayers; layer++) {
+    em.goto(dash[0][0], dash[0][1], LAYER_HEIGHT * layer);
+    em.unretract();
+    for (let i = 1; i < dash.length; i++) {
+      const seg = Math.hypot(dash[i][0] - dash[i - 1][0], dash[i][1] - dash[i - 1][1]);
+      if (seg < 1e-9) continue;
+      em.printMove(dash[i][0], dash[i][1], seg * eRate(width, LAYER_HEIGHT), speed);
     }
-    for (let layer = 1; layer <= nLayers; layer++) {
-      const z = LAYER_HEIGHT * layer;
-      em.goto(subPts[0][0], subPts[0][1], z);
-      em.unretract();
-      for (let i = 1; i < subPts.length; i++) {
-        emitSweptSegment(em, subPts[i - 1], subPts[i], { width, height: LAYER_HEIGHT, speed });
-      }
-      em.retract();
-    }
-    s = s2 + gapLen;
+    em.retract();
+  }
+  return segLen + gapLen;
+}
+
+/** STROKE: dashes along the line -- brushDashed() again and again from
+ * where the last one said to go on, until the path runs out. It only ever
+ * calls a dash, so it cannot end on a gap. */
+export function strokeDashed(em, pts, { ...brush } = {}) {
+  const total = totalLength(pts);
+  let s = 0;
+  while (total - s > 1e-6) {
+    const used = brushDashed(em, restOfPath(pts, s), brush);
+    if (!(used > 0)) break;
+    s += used;
   }
   return pts;
 }
 
 /**
- * Shared driver for the four per-point "*Dotted" brushes below: compute
- * arc-length stops every `gap` from 0 to the path length (inclusive),
- * optionally decide whether to walk them in reverse, optionally compute
- * each stop's local path heading, then call `stampFn(cx, cy, {headingDeg})`
- * at each stop.
+ * Shared walker for the dot strokes below: compute arc-length stops every
+ * `gap` from 0 to the path length (inclusive), optionally decide whether
+ * to walk them in reverse, optionally compute each stop's local path
+ * heading, then call `dotFn(cx, cy, {headingDeg})` at each stop.
  *
  * `reverseCheck`, if given, receives `{pts, length, gap, stops, step}` and
- * returns true/false -- each caller supplies its OWN reversal criterion
- * (they differ: directional lean vs. hair-pull direction), this driver
- * does not impose one. `withTangent` additionally hands the stamp a local
- * heading in degrees (only the directional-lean style needs this). `step`
- * is only the tangent half-width floor here (the caller already sampled).
+ * returns true/false -- each stroke supplies its OWN reversal criterion
+ * (they differ: directional lean vs. hair-pull direction), this walker
+ * does not impose one. `withTangent` additionally hands the dot a local
+ * heading in degrees (only the directional lean needs this). `step` is
+ * only the tangent half-width floor here (the caller already sampled).
  */
-function walkArcLengthStops(pts, gap, step, { reverseCheck = null, withTangent = false } = {}, stampFn) {
+function walkArcLengthStops(pts, gap, step, { reverseCheck = null, withTangent = false } = {}, dotFn) {
   const length = totalLength(pts);
   const stops = [];
   for (let s = 0; s <= length + 1e-6; s += gap) stops.push(s);
@@ -492,80 +487,44 @@ function walkArcLengthStops(pts, gap, step, { reverseCheck = null, withTangent =
       const a = pointAtArcLength(pts, Math.max(0, s - tanH));
       const b = pointAtArcLength(pts, Math.min(length, s + tanH));
       const headingDeg = (Math.atan2(b[1] - a[1], b[0] - a[0]) * 180) / Math.PI;
-      stampFn(cx, cy, { headingDeg });
+      dotFn(cx, cy, { headingDeg });
     } else {
-      stampFn(cx, cy, {});
+      dotFn(cx, cy, {});
     }
   }
   return pts;
 }
 
-/** Flat spiral-filled discs at regular arc-length intervals. */
-export function brushDotted(em, pts, {
-  gap = 10.0, dotRadius = 0.8, nLayers = 2, speed = 250, step = 0.1,
-} = {}) {
-  return walkArcLengthStops(pts, gap, step, {}, (cx, cy) => {
-    const dotPts = spiralDisc([cx, cy], dotRadius);
-    for (let layer = 1; layer <= nLayers; layer++) {
-      const z = LAYER_HEIGHT * layer;
-      em.goto(dotPts[0][0], dotPts[0][1], z);
-      em.unretract();
-      for (let i = 1; i < dotPts.length; i++) {
-        const seg = dist(dotPts[i - 1], dotPts[i]);
-        if (seg < 1e-9) continue;
-        em.printMove(dotPts[i][0], dotPts[i][1], seg * eRate(0.42, LAYER_HEIGHT), speed);
-      }
-      em.retract();
-    }
-  });
+/** STROKE: flat spiral-filled dots (brushSpiralDot) every `gap` mm. */
+export function strokeDotted(em, pts, { gap = 10.0, step = 0.1, ...brush } = {}) {
+  return walkArcLengthStops(pts, gap, step, {}, (cx, cy) => brushSpiralDot(em, cx, cy, brush));
 }
 
-/** Blob domes (the stampBlob() mechanism, SECTION 5) at regular arc-length
- * intervals -- the DEFAULT dotted brush, preferred over brushDotted()
- * unless a flat, spiral-filled disc is specifically needed. */
-export function brushBlobDotted(em, pts, {
-  gap = 10.0, diameter = 1.6, baseZ = 0.2, buildSteps = 6, taperFactor = 0.7,
-  extrudeSpeed = 120, dwellMs = 2000, extrusionMultiplier = 1.3,
-  retractMm = 4.0, postRetractDwellMs = 2000, baseExtraMm = 0.3,
-  baseDwellMs = 1000, orbitRadius = null, orbitPts = 16, orbitSpeed = 600,
-  orbitLoops = 3, orbitDwellMs = 2000, blobClearanceMm = 0.3,
-  liftZ = 5.0, liftSpeed = 600, liftDwellMs = 1000, topOrbitLoops = 3,
-  step = 0.1,
-} = {}) {
-  return walkArcLengthStops(pts, gap, step, {}, (cx, cy) => {
-    emitBlobDot(em, cx, cy, {
-      diameter, baseZ, buildSteps, taperFactor, extrudeSpeed, dwellMs,
-      extrusionMultiplier, retractMm, postRetractDwellMs, baseExtraMm,
-      baseDwellMs, orbitRadius, orbitPts, orbitSpeed, orbitLoops,
-      orbitDwellMs, blobClearanceMm, liftZ, liftSpeed, liftDwellMs,
-      topOrbitLoops,
-    });
-  });
+/** STROKE: blob domes (brushBlobDot) every `gap` mm -- the DEFAULT dotted
+ * texture, preferred over strokeDotted() unless a flat, spiral-filled dot
+ * is specifically needed. */
+export function strokeBlobDotted(em, pts, { gap = 10.0, step = 0.1, ...brush } = {}) {
+  return walkArcLengthStops(pts, gap, step, {}, (cx, cy) => brushBlobDot(em, cx, cy, brush));
 }
 
-/** `stampDirectionalBlob()`-mechanism dots at regular arc-length intervals
- * -- like `brushBlobDotted` but each dot LEANS along the path tangent at
- * that point (a curved line produces blobs that each rake "downstream").
- * `azimuthDeg` is an OFFSET added to that local tangent, in degrees CCW --
- * 0 (default) leans exactly along the direction of travel. `gap` defaults
- * to one `diameter` so adjacent dots' base circles just touch and the
- * drags chain into a continuous raked ridge. `stampOrder` (default
- * "auto"): if the (offset) lean at the path start points forward along the
- * path, the line is stamped in reverse so each apex leans back over
+/** STROKE: leaning blobs (brushDirectionalBlobDot) along the line, each
+ * leaning along the path tangent at its stop, so a curved line produces
+ * blobs that each rake "downstream". `azimuthDeg` is an OFFSET added to
+ * that tangent, in degrees CCW -- 0 leans exactly along the direction of
+ * travel. An empty `gap` is one dot diameter, so neighbouring base circles
+ * just touch and the drags chain into a continuous raked ridge.
+ * `brushOrder` "auto": if the lean at the path start points forward along
+ * the path, the dots are laid in reverse, so each apex leans back over
  * already-placed (cooled) dots rather than toward the fresh next one. */
-export function brushDirectionalBlobDotted(em, pts, {
-  gap = null, diameter = 2.0, azimuthDeg = 0, baseZ = 0.2, buildSteps = 6,
-  taperFactor = 0.7, extrudeSpeed = 120, dwellMs = 2000,
-  extrusionMultiplier = 1.3, retractMm = 4.0, postRetractDwellMs = 2000,
-  baseExtraMm = 0.3, baseDwellMs = 1000, dragSpeed = 600,
-  stampOrder = "auto", step = 0.1,
+export function strokeDirectionalBlobDotted(em, pts, {
+  gap = null, azimuthDeg = 0, brushOrder = "auto", step = 0.1, ...brush
 } = {}) {
-  const g = gap ?? diameter;
+  const g = gap ?? brush.diameter ?? 2.0; // 2.0: brushDirectionalBlobDot's default diameter
   return walkArcLengthStops(pts, g, step, {
     withTangent: true,
     reverseCheck: ({ pts, length, gap, stops, step }) => {
-      if (stampOrder === "reverse") return true;
-      if (stampOrder !== "auto") return false;
+      if (brushOrder === "reverse") return true;
+      if (brushOrder !== "auto") return false;
       if (stops.length <= 1) return false;
       const tanH = Math.max(step, Math.min(gap * 0.5, 1.0));
       const a = pointAtArcLength(pts, Math.max(0, 0 - tanH));
@@ -578,23 +537,27 @@ export function brushDirectionalBlobDotted(em, pts, {
       return ax * (p1[0] - p0[0]) + ay * (p1[1] - p0[1]) > 0;
     },
   }, (cx, cy, { headingDeg }) => {
-    emitDirectionalBlobDot(em, cx, cy, {
-      diameter, azimuthDeg: headingDeg + azimuthDeg, baseZ, buildSteps, taperFactor,
-      extrudeSpeed, dwellMs, extrusionMultiplier, retractMm,
-      postRetractDwellMs, baseExtraMm, baseDwellMs, dragSpeed,
-    });
+    brushDirectionalBlobDot(em, cx, cy, { ...brush, azimuthDeg: headingDeg + azimuthDeg });
   });
 }
 
-/** BRUSH: one vertical-lift strand at the nozzle's CURRENT XY position --
- * a point-op, like the *Dotted family's emit*Dot() functions, not a
- * between-two-points segment. No travel here: the Stroke below has
- * already positioned the nozzle and stays un-retracted at `baseZ` between
- * calls, trading the *Dotted family's full retract-travel-unretract cycle
- * per stop for a bare G0 move -- cheaper over a dense line of strands, at
- * the cost of the Emitter's own retract bookkeeping (deliberately left to
- * the Stroke, not this function, since it spans multiple strands). */
-function emitHairyStrand(em, { esegmentMm, retractMm, dwellMs, smallLift, bigLift, baseZ }) {
+/** BRUSH: one vertical-lift hair strand at (x, y). At the start of a line
+ * (nozzle retracted) it travels there at `baseZ` and primes; otherwise the
+ * stroke has already moved it there, still lifted from the last strand,
+ * and it drops back to `baseZ`. Leaves the nozzle lifted with `retractMm`
+ * pulled back -- not recorded as a retract, since the next strand's
+ * `esegmentMm` pushes it out again. */
+function brushHairyStrand(em, x, y, {
+  esegmentMm = 1.2, retractMm = 1.3, dwellMs = 400,
+  smallLift = 0.2, bigLift = 4.0, baseZ = 0.3,
+} = {}) {
+  if (em.retracted) {
+    em.goto(x, y, baseZ);
+    em.unretract();
+  } else {
+    em.a(`G0 Z${baseZ.toFixed(3)} F600`);
+    em.z = baseZ;
+  }
   em.a(`G1 E${esegmentMm.toFixed(4)} F500`);
   em.eTotal += esegmentMm;
   const z1 = baseZ + smallLift;
@@ -608,136 +571,102 @@ function emitHairyStrand(em, { esegmentMm, retractMm, dwellMs, smallLift, bigLif
   em.eTotal -= retractMm;
 }
 
-/** STROKE: vertical-lift hair strands at regular arc-length intervals --
- * one emitHairyStrand() call per root, with a plain G0 travel (not
- * walkArcLengthStops(), which doesn't handle travel and whose callers
- * each do a full goto() cycle per stop; this Stroke's cheaper single
- * un-retract for the whole line is the point). CAUTION: each strand is
- * still a retract/un-retract cycle -- mind the retraction-cycle cap
- * before using a dense spacing over a long path. */
-export function brushHairy(em, pts, {
-  spacing = 2.0, esegmentMm = 1.2, retractMm = 1.3, dwellMs = 400,
-  smallLift = 0.2, bigLift = 4.0, baseZ = 0.3, speed = 200,
-} = {}) {
-  const length = totalLength(pts);
-  const nRoots = Math.floor(length / spacing) + 1;
-  const first = pointAtArcLength(pts, 0);
-  em.goto(first[0], first[1], baseZ);
-  em.unretract();
+/** STROKE: hair strands (brushHairyStrand) every `spacing` mm. Between
+ * strands it travels while still lifted, at `speed`, so the nozzle clears
+ * the strand just placed instead of dragging through it -- one prime for
+ * the whole line, not a full retract/travel/prime per strand. CAUTION:
+ * each strand is still a retract/un-retract cycle -- mind the
+ * retraction-cycle cap before a dense spacing over a long path. */
+export function strokeHairy(em, pts, { spacing = 2.0, speed = 200, ...brush } = {}) {
+  const nRoots = Math.floor(totalLength(pts) / spacing) + 1;
   for (let i = 0; i < nRoots; i++) {
-    const s = i * spacing;
-    emitHairyStrand(em, { esegmentMm, retractMm, dwellMs, smallLift, bigLift, baseZ });
-    // Travel while still lifted (at bigLift height), THEN descend to
-    // baseZ at the new position -- keeps the nozzle clear of the strand
-    // just placed instead of dragging through it at print height.
-    if (i < nRoots - 1) {
-      const [nx, ny] = pointAtArcLength(pts, s + spacing);
-      em.a(`G0 X${nx.toFixed(3)} Y${ny.toFixed(3)} F${speed}`);
-      em.x = nx; em.y = ny;
+    const [x, y] = pointAtArcLength(pts, i * spacing);
+    if (i > 0) {
+      em.a(`G0 X${x.toFixed(3)} Y${y.toFixed(3)} F${speed}`);
+      em.x = x; em.y = y;
     }
-    em.a(`G0 Z${baseZ.toFixed(3)} F600`);
-    em.z = baseZ;
+    brushHairyStrand(em, x, y, brush);
   }
   em.retracted = true;
   return pts;
 }
 
-/** Discrete "hairy dots" (see emitHairyDot() in SECTION 5) at regular
- * arc-length intervals -- each stamp is an anchor blob plus ONE pulled hair
- * strand, not `brushHairy`'s simpler point-stamp. Shares `brushHairy`'s
- * retraction-cycle-count caution (one retract/unretract PER strand).
- * `stampOrder` (default "auto"): if the hair's XY projection leans FORWARD
- * along the path (toward the next dot), the line is stamped in REVERSE so
- * every strand trails behind its own dot, away from where the nozzle heads
- * next. */
-export function brushHairyDotted(em, pts, {
-  gap = 10.0, rootDiameter = 2.0, baseZ = 0.2, buildSteps = 6,
-  taperFactor = 0.7, extrudeSpeed = 120, baseExtraMm = 0.3,
-  baseDwellMs = 1000, dwellMs = 2000, extrusionMultiplier = 1.3,
-  hairThickness = null, hairLength = 10.0, pullExtrudeSpeed = 150,
-  beadFlowMult = 3.5, dryRiseFeedDrop = 10, retractMm = 4.0,
-  postRetractDwellMs = 500, hairDirection = "top",
-  hairAzimuthDeg = null, hairElevationDeg = null, stringMm = 2.0,
-  hairSpeed = 8000, clearanceZ = 0.5, clearanceSpeed = 600,
-  overtravelMm = 2.0, overtravelSpeed = 600,
-  stampOrder = "auto", step = 0.1,
+/** STROKE: hairy dots (brushHairyDot: a root dome plus one pulled hair)
+ * every `gap` mm. Same retraction-cycle caution as strokeHairy (one
+ * retract/unretract PER strand). `brushOrder` "auto": if the hair's XY
+ * projection leans FORWARD along the path (toward the next dot), the dots
+ * are laid in REVERSE, so every strand trails behind its own dot, away
+ * from where the nozzle heads next. */
+export function strokeHairyDotted(em, pts, {
+  gap = 10.0, brushOrder = "auto", step = 0.1, ...brush
 } = {}) {
   return walkArcLengthStops(pts, gap, step, {
     reverseCheck: ({ pts, length, gap, stops }) => {
-      if (stampOrder === "reverse") return true;
-      if (stampOrder !== "auto") return false;
+      if (brushOrder === "reverse") return true;
+      if (brushOrder !== "auto") return false;
       if (stops.length <= 1) return false;
-      const { dx: hx, dy: hy } = resolveHairDir(hairDirection, hairAzimuthDeg, hairElevationDeg);
+      const { dx: hx, dy: hy } = resolveHairDir(brush.hairDirection, brush.hairAzimuthDeg, brush.hairElevationDeg);
       if (Math.hypot(hx, hy) <= 1e-6) return false;
       const p0 = pointAtArcLength(pts, 0);
       const p1 = pointAtArcLength(pts, Math.min(length, gap));
       return (hx * (p1[0] - p0[0]) + hy * (p1[1] - p0[1])) > 0;
     },
-  }, (cx, cy) => {
-    emitHairyDot(em, cx, cy, {
-      rootDiameter, baseZ, buildSteps, taperFactor, extrudeSpeed,
-      baseExtraMm, baseDwellMs, dwellMs, extrusionMultiplier,
-      hairThickness, hairLength, pullExtrudeSpeed, beadFlowMult,
-      dryRiseFeedDrop, retractMm, postRetractDwellMs, hairDirection,
-      hairAzimuthDeg, hairElevationDeg, stringMm, hairSpeed,
-      clearanceZ, clearanceSpeed, overtravelMm, overtravelSpeed,
-    });
-  });
+  }, (cx, cy) => brushHairyDot(em, cx, cy, brush));
 }
 
-/** STROKE: alternating thin/fat segments -- a continuous, single-layer
- * line that switches bead WIDTH between two segment types, each with its
- * own LENGTH: `thinWidth` x `thinLen`, then `fatWidth` x `fatLen`,
- * repeating to the end of the path. Each segment type also has its own
- * bead HEIGHT -- the fat segment sitting a little higher is what lets its
- * extra volume spread into a genuinely wider bead instead of doming at a
- * fixed low Z. No retract between segments (the line is continuous); one
- * prime at the start, one retract at the very end.
- *
- * Absolute (G90) throughout, like every other brush in this file --
- * height changes are embedded in each emitSweptSegment call's own `z`
- * argument (one combined G1 X/Y/Z/E line per segment) instead of the
- * separate relative-mode G91 XY move + standalone Z-delta line this used
- * to hand-write. That removes three things the old G91 approach had:
- * accumulated rounding drift from many small relative deltas, the
- * Emitter's own em.x/em.y/em.z going stale mid-function (this used to
- * track curX/curY itself and only re-sync at the very end), and the
- * silent-failure risk of an exception leaving the machine stuck in
- * relative mode. It also lets this share emitSweptSegment with
- * brushSolid/brushDashed instead of needing its own deposition mechanics. */
-export function brushSegmented(em, pts, {
+/** BRUSH: one thin + fat pair from the start of `pts` -- `thinLen` mm at
+ * thinWidth / thinHeight / thinSpeed, then `fatLen` mm at the fat values,
+ * each one straight bead to its end point on the path, with Z set to its
+ * own height (the fat section sitting a little higher is what lets its
+ * extra volume spread into a genuinely wider bead instead of doming).
+ * Dwells `segDwellMs` before each section. Cut short where the path ends.
+ * Continuous: no travel, prime or retract -- the stroke does those.
+ * Returns the mm it used. */
+function brushSegmented(em, pts, {
   thinLen = 8.0, thinWidth = 0.8, thinHeight = 0.2, thinSpeed = 130,
   fatLen = 4.0, fatWidth = 1.6, fatHeight = 0.3, fatSpeed = 60,
   flowMult = 1.4, segDwellMs = 250,
-  // eprime: one-time prime after goto() leaves the nozzle retracted --
-  // just over the RETRACT_MM (1.3mm) the goto pulled.
-  eprime = 1.6, primedwellS = 1.0, retractMm = 4.0, retractSpeed = 1000,
 } = {}) {
   const length = totalLength(pts);
+  const sections = [
+    [thinLen, thinWidth, thinHeight, thinSpeed],
+    [fatLen, fatWidth, fatHeight, fatSpeed],
+  ];
+  let s = 0, cur = pts[0];
+  for (const [len, width, height, speed] of sections) {
+    if (s >= length - 1e-6) break;
+    const s1 = Math.min(s + len, length);
+    const next = pointAtArcLength(pts, s1);
+    if (segDwellMs > 0) em.dwell(segDwellMs);
+    const seg = Math.hypot(next[0] - cur[0], next[1] - cur[1]);
+    if (seg >= 1e-9) em.printMove(next[0], next[1], seg * eRate(width, height, flowMult), speed, height);
+    cur = next;
+    s = s1;
+  }
+  return s;
+}
 
-  const first = pointAtArcLength(pts, 0);
-  em.goto(first[0], first[1], thinHeight);   // first segment is thin (i=0)
+/** STROKE: a continuous single-layer line of thin + fat pairs
+ * (brushSegmented) to the end of the path. One prime at the start
+ * (`eprime` mm, just over the RETRACT_MM the goto() pulled, then
+ * `primedwellS`), one retract at the very end. Absolute (G90) throughout;
+ * each section's height rides in its own G1 line. */
+export function strokeSegmented(em, pts, {
+  eprime = 1.6, primedwellS = 1.0, retractMm = 4.0, retractSpeed = 1000, ...brush
+} = {}) {
+  // start at the first (thin) section's height -- 0.2 is brushSegmented's default thinHeight
+  em.goto(pts[0][0], pts[0][1], brush.thinHeight ?? 0.2);
   em.a(`G1 E${eprime.toFixed(4)} F150`);
   em.eTotal += eprime;
   em.dwell(primedwellS * 1000);
   em.retracted = false;
 
-  let curPt = first;
-  let s = 0, i = 0;
-  while (s < length - 1e-6) {
-    const fat = i % 2 === 1;
-    const segLen = fat ? fatLen : thinLen;
-    const width  = fat ? fatWidth  : thinWidth;
-    const height = fat ? fatHeight : thinHeight;
-    const spd    = fat ? fatSpeed  : thinSpeed;
-    const s1 = Math.min(s + segLen, length);
-    const nextPt = pointAtArcLength(pts, s1);
-
-    if (segDwellMs > 0) em.dwell(segDwellMs);
-    emitSweptSegment(em, curPt, nextPt, { width, height, speed: spd, flowMult, z: height });
-
-    curPt = nextPt;
-    s = s1; i++;
+  const total = totalLength(pts);
+  let s = 0;
+  while (total - s > 1e-6) {
+    const used = brushSegmented(em, restOfPath(pts, s), brush);
+    if (!(used > 0)) break;
+    s += used;
   }
   em.a(`G1 E${(-retractMm).toFixed(4)} F${retractSpeed}`);
   em.eTotal -= retractMm;
@@ -799,17 +728,11 @@ function brushVariableThickness(em, pts, {
  * wave until the path runs out (the last wave is cut short where the path
  * ends), then one retract. Knows nothing about waves: each brush call says
  * how far it got, and the options pass straight through. */
-export function strokeVariableThickness(em, pts, options = {}) {
-  const total = pts[pts.length - 1][2];
-  // the path from arc length `a` on, re-based to start at 0
-  const rest = (a) => {
-    const out = [[...pointAtArcLength(pts, a), 0]];
-    for (const [x, y, s] of pts) if (s > a) out.push([x, y, s - a]);
-    return out;
-  };
+export function strokeVariableThickness(em, pts, { ...brush } = {}) {
+  const total = totalLength(pts);
   let s = 0;
-  while (total - s > 1e-9) {
-    const used = brushVariableThickness(em, s === 0 ? pts : rest(s), options);
+  while (total - s > 1e-6) {
+    const used = brushVariableThickness(em, restOfPath(pts, s), brush);
     if (!(used > 0)) break;
     s += used;
   }
@@ -822,8 +745,8 @@ export function strokeVariableThickness(em, pts, options = {}) {
  * SECTION 4: PATTERNS -- stroke generators for filling a region
  * ============================================================================
  * A pattern turns a region (an axis-aligned rectangle {x0, y0, w, h} or a
- * polygon [[x,y], ...]) into a list of STROKES (point lists) that a brush
- * from SECTION 3 is then walked along. Patterns never emit G-code
+ * polygon [[x,y], ...]) into a list of paths (point lists) that a stroke
+ * from SECTION 3 then walks. Patterns never emit G-code
  * themselves. Diamond/checkerboard is NOT a generic "lines at a gap"
  * pattern -- which cells get filled solid is a discrete checkerboard
  * parity selection -- so it is its own generator, never emulated with two
@@ -1034,17 +957,32 @@ export function verifyCheckerboard(diamonds, diag) {
 
 /**
  * ============================================================================
- * SECTION 5: STAMPS -- what happens at one point
+ * SECTION 5: DOT BRUSHES -- one mark at one point
  * ============================================================================
- * stamp*(em, cx, cy, options). Like brushes, a stamp never calls
- * em.newPattern(); the caller does once per standalone dot (the *Dotted
- * brushes above call the same emit* mechanisms per stop under a single
- * newPattern() for the whole line).
+ * brush*(em, cx, cy, options): one dot or hair at (cx, cy), called by the
+ * dot strokes in SECTION 3 once per stop. Each does its own travel,
+ * priming and retract, so a stroke only has to say where.
  */
 
+/** BRUSH: one flat, spiral-filled dot of radius `dotRadius`, `nLayers`
+ * high -- per layer: travel to the spiral's start at that layer's height,
+ * prime, walk the spiral, retract. */
+function brushSpiralDot(em, cx, cy, { dotRadius = 0.8, nLayers = 2, speed = 250 } = {}) {
+  const dotPts = spiralDisc([cx, cy], dotRadius);
+  for (let layer = 1; layer <= nLayers; layer++) {
+    em.goto(dotPts[0][0], dotPts[0][1], LAYER_HEIGHT * layer);
+    em.unretract();
+    for (let i = 1; i < dotPts.length; i++) {
+      const seg = dist(dotPts[i - 1], dotPts[i]);
+      if (seg < 1e-9) continue;
+      em.printMove(dotPts[i][0], dotPts[i][1], seg * eRate(0.42, LAYER_HEIGHT), speed);
+    }
+    em.retract();
+  }
+}
+
 /**
- * Shared point-extrusion mechanism for stampBlob() / brushBlobDotted():
- * builds a small dome by extruding WHILE rising in Z (no XY movement),
+ * BRUSH: one blob dome at (cx, cy), for strokeBlobDotted(). Builds a small dome by extruding WHILE rising in Z (no XY movement),
  * dwell, retract, orbit around the dome at its own height, then (via the
  * caller's next goto()) travel to the next spot. `diameter` is the primary
  * sizing knob; filament amount is DERIVED from it via a standoff-cylinder
@@ -1071,7 +1009,7 @@ export function verifyCheckerboard(diamonds, diag) {
  * confirmed on hardware to reduce stringing. Pass `orbitRadius: 0` to
  * disable it.
  */
-function emitBlobDot(em, cx, cy, {
+function brushBlobDot(em, cx, cy, {
   diameter = 1.6, baseZ = 0.2, buildSteps = 6, taperFactor = 0.7,
   extrudeSpeed = 120, dwellMs = 2000, extrusionMultiplier = 1.3,
   retractMm = 4.0, postRetractDwellMs = 2000, baseExtraMm = 0.3,
@@ -1137,18 +1075,10 @@ function emitBlobDot(em, cx, cy, {
   // goto(), which itself lifts to travel height before the XY move)
 }
 
-/** The DEFAULT stamp -- a single-point "blob" dome, preferred over
- * stampDisc() unless a flat, precisely spiral-filled disc is specifically
- * needed. Extrudes filament at one fixed XY position (no lateral
- * movement), dwells, retracts, orbits -- see emitBlobDot() above. */
-export function stampBlob(em, cx, cy, options = {}) {
-  emitBlobDot(em, cx, cy, options);
-}
-
 /**
- * "Directional" blob dot -- a `blobDot`-family dome that LEANS in a chosen
+ * BRUSH: one "directional" blob dot -- a brushBlobDot()-style dome that LEANS in a chosen
  * compass direction, for a raked/combed-looking tactile bump. Reuses
- * `blobDot`'s volume model, with two `azimuthDeg`-driven changes:
+ * brushBlobDot()'s volume model, with two `azimuthDeg`-driven changes:
  *  1. SHEARED BUILD -- the nozzle travels `radius` in the azimuth
  *     direction as it rises through `buildSteps` to the dome top, while
  *     extruding, so the apex ends off-center in that direction.
@@ -1157,9 +1087,10 @@ export function stampBlob(em, cx, cy, options = {}) {
  *     (squishing the leaning blob onto the bed), then drags laterally
  *     -azimuth by `diameter`, ending at the trailing edge of the base
  *     circle. This shapes the blob AND sweeps near any residual string.
- * `azimuthDeg` is CCW from +X (same convention as `hairyDot`).
+ * `azimuthDeg` is CCW from +X (same convention as brushHairyDot()). For a line
+ * of these, strokeDirectionalBlobDotted() sets it from the path tangent.
  */
-function emitDirectionalBlobDot(em, cx, cy, {
+function brushDirectionalBlobDot(em, cx, cy, {
   diameter = 2.0, azimuthDeg = 0, baseZ = 0.2, buildSteps = 6,
   taperFactor = 0.7, extrudeSpeed = 120, dwellMs = 2000,
   extrusionMultiplier = 1.3, retractMm = 4.0, postRetractDwellMs = 2000,
@@ -1215,29 +1146,6 @@ function emitDirectionalBlobDot(em, cx, cy, {
   em.x = endX; em.y = endY;
 }
 
-/** The directional (leaning) blob stamp -- see emitDirectionalBlobDot()
- * above. `azimuthDeg` (CCW from +X) sets the lean direction. For a line
- * of these use brushDirectionalBlobDotted(). */
-export function stampDirectionalBlob(em, cx, cy, options = {}) {
-  emitDirectionalBlobDot(em, cx, cy, options);
-}
-
-/** A single solid circular disc, built by spiraling a fill path outward --
- * an ALTERNATIVE to the default stampBlob() when a flat, precisely
- * diameter'd disc is needed (diameter and height are independently
- * controlled, unlike the blob's derived-from-diameter dome). height
- * should be a multiple of LAYER_HEIGHT (0.2mm). The 0.4mm/2-layer default
- * is a tactile-legibility RECOMMENDATION, not an enforced floor -- pass a
- * smaller `height` for a shorter disc if that's what's wanted; only the
- * 1-layer physical minimum (there has to be at least one layer to print
- * anything) is enforced here. No hollow-centre ("donut") shape is
- * implemented. */
-export function stampDisc(em, cx, cy, { diameter = 1.6, height = 0.4, speed = 250 } = {}) {
-  const nLayers = Math.max(1, Math.round(height / LAYER_HEIGHT));
-  const pts = spiralDisc([cx, cy], diameter / 2.0);
-  brushSolid(em, polylineToPts(pts, null), { width: 0.42, nLayers, speed });
-}
-
 // The 4 named hair directions, as (azimuth, elevation) degree pairs.
 // Elevation is measured from the bed plane (0 = flat, 90 = straight up);
 // azimuth is CCW from +X.
@@ -1254,7 +1162,7 @@ const HAIR_PRESET = {
  * non-null) win over the `hairDirection` string preset; an unset explicit
  * angle defaults (azimuth 0 = +X, elevation 90 = straight up).
  */
-function resolveHairDir(hairDirection, azimuthDeg, elevationDeg) {
+function resolveHairDir(hairDirection = "top", azimuthDeg, elevationDeg) {
   let azDeg, elDeg;
   if (azimuthDeg != null || elevationDeg != null) {
     azDeg = azimuthDeg ?? 0;
@@ -1262,7 +1170,7 @@ function resolveHairDir(hairDirection, azimuthDeg, elevationDeg) {
   } else {
     if (!(hairDirection in HAIR_PRESET)) {
       throw new Error(
-        `hairyDot: hairDirection must be "top", "left", "right", or ` +
+        `hairy dot: hairDirection must be "top", "left", "right", or ` +
         `"bottom" (got "${hairDirection}"), or pass hairAzimuthDeg / ` +
         `hairElevationDeg for an arbitrary polar direction`
       );
@@ -1281,8 +1189,9 @@ function resolveHairDir(hairDirection, azimuthDeg, elevationDeg) {
 }
 
 /**
- * A single dot with ONE hair strand pulled from its center. Builds a real
- * root dome first (reusing emitBlobDot's own tapered-rise build mechanism
+ * BRUSH: one dot with ONE hair strand pulled from its center, for
+ * strokeHairyDotted(). Builds a real
+ * root dome first (reusing brushBlobDot's own tapered-rise build mechanism
  * and volume model), then pulls a hair out of that dome's own melt:
  *  1. EXTRUDE segment -- move `hairLength` mm along the pull vector while
  *     extruding a real bead (cross-section via the shared `eRate()`
@@ -1302,7 +1211,7 @@ function resolveHairDir(hairDirection, azimuthDeg, elevationDeg) {
  * CAUTION: one retract/unretract cycle PER dot -- see
  * PARAMETER_CONSTRAINTS.md before a dense `gap` over a long path.
  */
-function emitHairyDot(em, cx, cy, {
+function brushHairyDot(em, cx, cy, {
   rootDiameter = 2.0, baseZ = 0.2, buildSteps = 6, taperFactor = 0.7,
   extrudeSpeed = 120, baseExtraMm = 0.3, baseDwellMs = 1000,
   dwellMs = 2000, extrusionMultiplier = 1.3, hairThickness = null,
@@ -1316,7 +1225,7 @@ function emitHairyDot(em, cx, cy, {
   const { elDeg, dx, dy, dz } = resolveHairDir(
     hairDirection, hairAzimuthDeg, hairElevationDeg);
 
-  // root dome build -- identical formulas/loop to emitBlobDot's own build.
+  // root dome build -- identical formulas/loop to brushBlobDot's own build.
   const radius = rootDiameter / 2.0;
   const domeHeight = radius;
   const standoffVolume = Math.PI * radius * radius * baseZ;
@@ -1391,22 +1300,12 @@ function emitHairyDot(em, cx, cy, {
   pull(overtravelMm, null, overtravelSpeed, true);
 }
 
-/** The stamp form of the hairy texture -- see emitHairyDot() above. Do NOT
- * improvise a single hairy dot by calling `brushHairy` on a zero-length
- * path -- that brush's strand-placement logic assumes real extent. */
-export function stampHairy(em, cx, cy, options = {}) {
-  emitHairyDot(em, cx, cy, options);
-}
-
-/** Name → function maps the compiler dispatches on. Keys are the brush /
- * stamp names the scene model, the option table and the prompt docs use. */
+/** Texture name -> its stroke, which the cards and the compiler call as
+ * stroke(em, pts, options). Keys are the texture names the scene model,
+ * the option table and the prompt docs use. */
 export const BRUSHES = {
-  solid: brushSolid, dashed: brushDashed, dotted: brushDotted,
-  blobDotted: brushBlobDotted, directionalBlobDotted: brushDirectionalBlobDotted,
-  hairy: brushHairy, hairyDotted: brushHairyDotted, segmented: brushSegmented,
+  solid: strokeSolid, dashed: strokeDashed, dotted: strokeDotted,
+  blobDotted: strokeBlobDotted, directionalBlobDotted: strokeDirectionalBlobDotted,
+  hairy: strokeHairy, hairyDotted: strokeHairyDotted, segmented: strokeSegmented,
   variableThickness: strokeVariableThickness,
 };
-export const STAMPS = {
-  blob: stampBlob, disc: stampDisc, directionalBlob: stampDirectionalBlob, hairyDot: stampHairy,
-};
-

@@ -8,18 +8,17 @@
  * "textureEdits"; unsaved editor text is memory only (the page warns
  * before closing with unsaved edits).
  *
- * The editor holds a texture's group of functions as one block: its `sig`
- * (spec.js -- the one holding its defaults; for stamps that's the private
- * emit*Dot() the exported stamp*() forwards to), the function its
- * BRUSHES / STAMPS entry names, and every helper they call (emit*() and
- * the rest), found by signature.js relatedFunctions(). Save / run / push
+ * The editor holds a texture's group of functions as one block, shown one
+ * box per function: its stroke and brush (spec.js `sigs`, which hold its
+ * defaults; the stroke is also its BRUSHES entry), and every helper they
+ * call, found by signature.js relatedFunctions(). Save / run / push
  * replace all of them at once; helpers shared with other textures change
  * those too.
  */
 import {
-  functionText, functionRange, functionStartLine, parseDefaults,
+  functionText, functionRange, functionStartLine, parseAllDefaults,
   tableFunction, relatedFunctions, groupText, replaceGroup, splitFunctions,
-} from "./signature.js?v=2";
+} from "./signature.js?v=3";
 import { STEPS, editStatus } from "./edit-state.js";
 import { runInWorker } from "./runner.js";
 
@@ -85,10 +84,10 @@ export function initEditor(ctx) {
     try { localStorage.setItem(STORE_KEY, JSON.stringify(drafts)); } catch { /* private window */ }
   }
 
-  /** Names of t's functions in `src`: sig, its table entry, then helpers. */
+  /** Names of t's functions in `src`: its stroke and brush, then helpers. */
   function groupOf(t, src = ctx.getSource()) {
-    const entry = tableFunction(src, t.kind === "brush" ? "BRUSHES" : "STAMPS", t.fn);
-    return relatedFunctions(src, [...new Set([t.sig, entry ?? t.sig])]);
+    const entry = tableFunction(src, "BRUSHES", t.fn);
+    return relatedFunctions(src, [...new Set([...(entry ? [entry] : []), ...t.sigs])]);
   }
   const fileText = (t) => groupText(ctx.getSource(), groupOf(t));
 
@@ -146,7 +145,7 @@ export function initEditor(ctx) {
   function build() {
     root.innerHTML = "";
     const picker = el("select", { class: "te-picker" },
-      ctx.textures.map((t) => el("option", { value: t.name, textContent: `${t.name}  (${t.sig})` })));
+      ctx.textures.map((t) => el("option", { value: t.name, textContent: `${t.name}  (${t.sigs.join(" + ")})` })));
     picker.addEventListener("change", () => show(ctx.textures.find((t) => t.name === picker.value)));
 
     // one box per function (setCode); the draft is still one text, the boxes joined
@@ -189,12 +188,12 @@ export function initEditor(ctx) {
 
   /** What a function is to the current texture, for its box's heading. */
   function roleOf(t, name) {
-    const kind = (/^(stroke|brush|stamp)/.exec(name) || [])[1];
+    const kind = (/^(stroke|brush)/.exec(name) || [])[1];
     let entry = null;
-    try { entry = tableFunction(ctx.getSource(), t.kind === "brush" ? "BRUSHES" : "STAMPS", t.fn); } catch { /* not in the table */ }
+    try { entry = tableFunction(ctx.getSource(), "BRUSHES", t.fn); } catch { /* not in the table */ }
     const roles = [];
     if (name === entry) roles.push("what the card calls");
-    if (name === t.sig) roles.push("holds the card's defaults");
+    if (t.sigs.includes(name)) roles.push("card options and defaults");
     if (!roles.length) roles.push("helper");
     return { kind: kind ? kind.toUpperCase() : "", what: roles.join(" · ") };
   }
@@ -234,7 +233,7 @@ export function initEditor(ctx) {
     for (const t of ctx.textures) updateBadge(t);
     if (!current || !isOpen()) return;
     const t = current, s = status(t);
-    if (!s) { refs.warn.textContent = `${t.sig} or one of its helpers could not be found in texture_functions.js`; return; }
+    if (!s) { refs.warn.textContent = `${t.sigs.join(" / ")} or one of its helpers could not be found in texture_functions.js`; return; }
     const d = s.draft;
 
     refs.steps.querySelectorAll("li").forEach((li, i) => {
@@ -282,10 +281,10 @@ export function initEditor(ctx) {
     refs.picker.value = t.name;
     setCode(buffers[t.name]);
     if (viewer) { viewer.fitted = false; viewer.setGcode(previewByTexture[t.name] ?? ""); }
-    let names = [t.sig];
+    let names = [...t.sigs];
     try { names = groupOf(t); } catch { /* refresh() shows the warning */ }
-    const helpers = names.slice(1);
-    refs.where.textContent = `${t.sig}()` +
+    const helpers = names.filter((n) => !t.sigs.includes(n));
+    refs.where.textContent = t.sigs.map((n) => `${n}()`).join(" + ") +
       (helpers.length ? ` + ${helpers.length} helper${helpers.length > 1 ? "s" : ""}: ${helpers.join(", ")}` : "") +
       " -- texture_functions.js";
     const shared = names.map((n) => {
@@ -365,7 +364,7 @@ export function initEditor(ctx) {
     let patched = null;
     try {
       patched = replaceGroup(ctx.getSource(), groupOf(t), text);
-      parseDefaults(patched, t.sig); // the card needs to read the options object
+      parseAllDefaults(patched, t.sigs); // the card needs to read the options object
       const job = { source: patched, texture: t, ...ctx.inputs(t, paramsBox(t)) };
       const { lines, filamentMm } = await runInWorker(job);
       if (drafts[t.name] !== draft) return; // superseded by a newer save / revert
@@ -440,10 +439,10 @@ export function initEditor(ctx) {
       const disk = await ctx.readDisk();
       const names = groupOf(t, disk);
       if (groupText(disk, names) !== draft.base.replace(/\r\n/g, "\n")) {
-        throw new Error(`${t.sig} or one of its helpers in texture_functions.js on disk changed since this draft started -- not pushed`);
+        throw new Error(`${t.sigs.join(" / ")} or one of their helpers in texture_functions.js on disk changed since this draft started -- not pushed`);
       }
       const patched = replaceGroup(disk, names, draft.saved);
-      parseDefaults(patched, t.sig);
+      parseAllDefaults(patched, t.sigs);
       await ctx.writeDisk(patched);
 
       const pushedText = groupText(patched, groupOf(t, patched));
@@ -453,7 +452,7 @@ export function initEditor(ctx) {
       ctx.setSource(patched);
       if (current === t) setCode(pushedText);
       setResult(t, `pushed ${time(drafts[t.name].pushedAt)}: ${names.join(", ")} written to texture_functions.js`, true);
-      ctx.message(`${t.name}: pushed ${t.sig} and its helpers to texture_functions.js`, "green");
+      ctx.message(`${t.name}: pushed ${names.join(", ")} to texture_functions.js`, "green");
     } catch (e) {
       if (e.name === "AbortError") return;
       setResult(t, `push failed: ${e.message}`, false);
@@ -521,7 +520,7 @@ export function initEditor(ctx) {
         const names = groupOf(t, src);
         if (saved === groupText(src, names)) return null;
         const patched = replaceGroup(src, names, saved);
-        parseDefaults(patched, t.sig);
+        parseAllDefaults(patched, t.sigs);
         return patched;
       } catch {
         return null;

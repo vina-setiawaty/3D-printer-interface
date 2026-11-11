@@ -4,15 +4,17 @@
  * texture_functions.js (see signature.js), so "save as default" only ever
  * has one place to write.
  *
- *   fn      key in BRUSHES / STAMPS (what gets called)
- *   sig     function whose options object holds the defaults -- the
- *           stamp*() wrappers take a bare `options = {}`, so their
- *           defaults live in the emit*Dot() they forward to
+ *   fn      key in BRUSHES -- the texture's stroke, what gets called
+ *   sigs    [stroke, brush]: the functions whose options objects hold the
+ *           defaults. The stroke has the walk options (gap, spacing,
+ *           layers, order, priming), the brush the mark's own; a card
+ *           shows both, and "save as default" writes each back where it
+ *           came from
  *   basic   options shown on the card; every other option goes under
  *           "advanced"
  *   initial values for options that have no default in the signature
  *
- * Every option of every `sig` must have an entry in PARAMS
+ * Every option of every `sigs` function must have an entry in PARAMS
  * (tests/run.mjs checks this).
  */
 
@@ -31,7 +33,6 @@ export const PARAMS = {
   dotRadius: { step: 0.1, min: 0.1, unit: "mm" },
   diameter: { step: 0.1, min: 0.1, unit: "mm" },
   rootDiameter: { step: 0.1, min: 0.1, unit: "mm" },
-  height: { step: 0.2, min: 0.2, unit: "mm" },
   baseZ: { step: 0.05, min: 0, unit: "mm" },
   buildSteps: { step: 1, min: 1, unit: "steps" },
   taperFactor: { step: 0.05, min: 0, max: 1, unit: "x" },
@@ -39,7 +40,7 @@ export const PARAMS = {
   baseExtraMm: { step: 0.05, min: 0, unit: "mm E" },
   azimuthDeg: { step: 5, unit: "deg" },
   step: { step: 0.05, min: 0.01, unit: "mm" },
-  stampOrder: { options: ["auto", "forward", "reverse"] },
+  brushOrder: { options: ["auto", "forward", "reverse"] },
 
   // speeds (F, mm/min)
   speed: { step: 10, min: 1, unit: "F" },
@@ -110,76 +111,52 @@ export const PARAMS = {
 };
 
 export const TEXTURES = [
-  // ------------------------------------------------------------ brushes --
   {
-    name: "solid", kind: "brush", fn: "solid", sig: "brushSolid",
-    description: "Continuous solid ridge along the line.",
+    name: "solid", fn: "solid", sigs: ["strokeSolid", "brushSolid"],
+    description: "Continuous solid ridge along the line, nLayers high.",
     basic: ["width", "nLayers", "speed"],
   },
   {
-    name: "dashed", kind: "brush", fn: "dashed", sig: "brushDashed",
+    name: "dashed", fn: "dashed", sigs: ["strokeDashed", "brushDashed"],
     description: "Dashes of segLen separated by gapLen of travel, measured along the line.",
     basic: ["segLen", "gapLen", "width", "nLayers", "speed"],
     initial: { segLen: 8, gapLen: 4 },
   },
   {
-    name: "dotted", kind: "brush", fn: "dotted", sig: "brushDotted",
-    description: "Flat spiral-filled discs every gap mm along the line.",
+    name: "dotted", fn: "dotted", sigs: ["strokeDotted", "brushSpiralDot"],
+    description: "Flat spiral-filled dots every gap mm along the line.",
     basic: ["gap", "dotRadius", "nLayers", "speed"],
   },
   {
-    name: "blobDotted", kind: "brush", fn: "blobDotted", sig: "brushBlobDotted",
-    description: "Blob domes every gap mm along the line (the default dotted brush).",
+    name: "blobDotted", fn: "blobDotted", sigs: ["strokeBlobDotted", "brushBlobDot"],
+    description: "Blob domes every gap mm along the line (the default dotted texture).",
     basic: ["gap", "diameter", "baseZ", "extrusionMultiplier", "dwellMs"],
   },
   {
-    name: "directionalBlobDotted", kind: "brush", fn: "directionalBlobDotted",
-    sig: "brushDirectionalBlobDotted",
+    name: "directionalBlobDotted", fn: "directionalBlobDotted",
+    sigs: ["strokeDirectionalBlobDotted", "brushDirectionalBlobDot"],
     description: "Leaning blobs along the line; azimuthDeg offsets the lean from the line direction. Empty gap = one diameter.",
-    basic: ["gap", "diameter", "azimuthDeg", "stampOrder", "extrusionMultiplier"],
+    basic: ["gap", "diameter", "azimuthDeg", "brushOrder", "extrusionMultiplier"],
   },
   {
-    name: "hairy", kind: "brush", fn: "hairy", sig: "brushHairy",
-    description: "Vertical-lift strands every spacing mm, without retracting between strands.",
+    name: "hairy", fn: "hairy", sigs: ["strokeHairy", "brushHairyStrand"],
+    description: "Vertical-lift strands every spacing mm, travelling lifted between strands instead of retracting.",
     basic: ["spacing", "esegmentMm", "bigLift", "baseZ", "speed"],
   },
   {
-    name: "hairyDotted", kind: "brush", fn: "hairyDotted", sig: "brushHairyDotted",
+    name: "hairyDotted", fn: "hairyDotted", sigs: ["strokeHairyDotted", "brushHairyDot"],
     description: "A root dome with one pulled hair every gap mm. Empty hairThickness = derived from hairLength.",
-    basic: ["gap", "rootDiameter", "hairLength", "hairThickness", "hairDirection", "stampOrder"],
+    basic: ["gap", "rootDiameter", "hairLength", "hairThickness", "hairDirection", "brushOrder"],
   },
   {
-    name: "segmented", kind: "brush", fn: "segmented", sig: "brushSegmented",
-    description: "Continuous single-layer line alternating thin and fat segments.",
+    name: "segmented", fn: "segmented", sigs: ["strokeSegmented", "brushSegmented"],
+    description: "Continuous single-layer line alternating thin and fat sections.",
     basic: ["thinLen", "thinWidth", "fatLen", "fatWidth", "flowMult"],
   },
   {
-    name: "variableThickness", kind: "brush", fn: "variableThickness",
-    sig: "brushVariableThickness",
+    name: "variableThickness", fn: "variableThickness",
+    sigs: ["strokeVariableThickness", "brushVariableThickness"],
     description: "Bead height sweeps between hMin and hMax, one wave every wavelength mm, at constant volumetric flow (speed follows thickness).",
     basic: ["hMin", "hMax", "wavelength", "beadWidth", "volRate"],
-  },
-
-  // ------------------------------------------------------------- stamps --
-  {
-    name: "blob", kind: "stamp", fn: "blob", sig: "emitBlobDot",
-    description: "A single blob dome extruded at one point (the default stamp).",
-    basic: ["diameter", "baseZ", "extrusionMultiplier", "dwellMs"],
-  },
-  {
-    name: "disc", kind: "stamp", fn: "disc", sig: "stampDisc",
-    description: "A flat spiral-filled disc; height should be a multiple of 0.2 mm.",
-    basic: ["diameter", "height", "speed"],
-  },
-  {
-    name: "directionalBlob", kind: "stamp", fn: "directionalBlob",
-    sig: "emitDirectionalBlobDot",
-    description: "A blob that leans toward azimuthDeg (CCW from +X), squished and dragged back.",
-    basic: ["diameter", "azimuthDeg", "extrusionMultiplier", "dwellMs"],
-  },
-  {
-    name: "hairyDot", kind: "stamp", fn: "hairyDot", sig: "emitHairyDot",
-    description: "A root dome with one hair pulled from its center. Empty hairThickness = derived from hairLength.",
-    basic: ["rootDiameter", "hairLength", "hairThickness", "hairDirection"],
   },
 ];
