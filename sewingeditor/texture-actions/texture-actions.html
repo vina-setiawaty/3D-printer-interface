@@ -345,6 +345,13 @@
     margin-bottom: 0.25em;
   }
 
+  .texture-group-title {
+    margin: 0.6em 0 0.2em;
+    font-size: 0.8em;
+    font-weight: bold;
+    color: #666;
+  }
+
   .texture-sig {
     margin-top: 0.5em;
     font-family: monospace;
@@ -831,6 +838,7 @@
           <!-- the texture's card inputs (texture-actions.js renderParams), synced with the card -->
           <h2 class="te-params-title">Parameters</h2>
           <div id="te-params"></div>
+          <div class="btn" id="te-run-once" title="prints the saved draft (or the file) with these parameters -- at any step">run once</div>
         </div>
       </div>
     </div>
@@ -838,6 +846,8 @@
     <div class="ui-frame" id="textures-container">
       <h1>Textures</h1>
       <div class="ui-group" id="texture-link">
+      </div>
+      <div class="ui-group" id="texture-new">
       </div>
       <div class="ui-group" id="texture-settings">
       </div>
@@ -848,7 +858,7 @@
 
   <script type="text/javascript" src="../script.js?v=4"></script>
   <script type="text/javascript" src="texture-actions-compat.js"></script>
-  <script type="module" src="texture-actions.js?v=9"></script>
+  <script type="module" src="texture-actions.js?v=11"></script>
   <script type="text/javascript" src="gcode-viewer.js?v=2"></script>
   <script type="text/javascript" src="../nav.js?v=1"></script>
 </body>

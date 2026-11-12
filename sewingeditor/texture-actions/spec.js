@@ -1,21 +1,11 @@
 /**
- * spec.js -- which texture functions get a card, and how each option is
- * shown. Holds NO default values: those are read from the signatures in
- * texture_functions.js (see signature.js), so "save as default" only ever
- * has one place to write.
- *
- *   fn      key in BRUSHES -- the texture's stroke, what gets called
- *   sigs    [stroke, brush]: the functions whose options objects hold the
- *           defaults. The stroke has the walk options (gap, spacing,
- *           layers, order, priming), the brush the mark's own; a card
- *           shows both, and "save as default" writes each back where it
- *           came from
- *   basic   options shown on the card; every other option goes under
- *           "advanced"
- *   initial values for options that have no default in the signature
- *
- * Every option of every `sigs` function must have an entry in PARAMS
- * (tests/run.mjs checks this).
+ * spec.js -- how each option is shown on a card (step, min/max, unit, or a
+ * list of choices). Holds NO textures and NO default values: the textures
+ * are the BRUSHES entries of texture_functions.js and their options and
+ * defaults are read from each one's stroke and brush signatures (see
+ * signature.js listTextures / parseAllDefaults), so a texture added by the
+ * function editor gets a card with nothing to add here. An option missing
+ * from PARAMS still works, as a plain number input.
  */
 
 /** How each option name is displayed. Names mean the same thing across
@@ -109,54 +99,3 @@ export const PARAMS = {
   stepsPerWave: { step: 1, min: 1, unit: "steps" },
   phase: { step: 0.25, unit: "waves" },
 };
-
-export const TEXTURES = [
-  {
-    name: "solid", fn: "solid", sigs: ["strokeSolid", "brushSolid"],
-    description: "Continuous solid ridge along the line, nLayers high.",
-    basic: ["width", "nLayers", "speed"],
-  },
-  {
-    name: "dashed", fn: "dashed", sigs: ["strokeDashed", "brushDashed"],
-    description: "Dashes of segLen separated by gapLen of travel, measured along the line.",
-    basic: ["segLen", "gapLen", "width", "nLayers", "speed"],
-    initial: { segLen: 8, gapLen: 4 },
-  },
-  {
-    name: "dotted", fn: "dotted", sigs: ["strokeDotted", "brushSpiralDot"],
-    description: "Flat spiral-filled dots every gap mm along the line.",
-    basic: ["gap", "dotRadius", "nLayers", "speed"],
-  },
-  {
-    name: "blobDotted", fn: "blobDotted", sigs: ["strokeBlobDotted", "brushBlobDot"],
-    description: "Blob domes every gap mm along the line (the default dotted texture).",
-    basic: ["gap", "diameter", "baseZ", "extrusionMultiplier", "dwellMs"],
-  },
-  {
-    name: "directionalBlobDotted", fn: "directionalBlobDotted",
-    sigs: ["strokeDirectionalBlobDotted", "brushDirectionalBlobDot"],
-    description: "Leaning blobs along the line; azimuthDeg offsets the lean from the line direction. Empty gap = one diameter.",
-    basic: ["gap", "diameter", "azimuthDeg", "brushOrder", "extrusionMultiplier"],
-  },
-  {
-    name: "hairy", fn: "hairy", sigs: ["strokeHairy", "brushHairyStrand"],
-    description: "Vertical-lift strands every spacing mm, travelling lifted between strands instead of retracting.",
-    basic: ["spacing", "esegmentMm", "bigLift", "baseZ", "speed"],
-  },
-  {
-    name: "hairyDotted", fn: "hairyDotted", sigs: ["strokeHairyDotted", "brushHairyDot"],
-    description: "A root dome with one pulled hair every gap mm. Empty hairThickness = derived from hairLength.",
-    basic: ["gap", "rootDiameter", "hairLength", "hairThickness", "hairDirection", "brushOrder"],
-  },
-  {
-    name: "segmented", fn: "segmented", sigs: ["strokeSegmented", "brushSegmented"],
-    description: "Continuous single-layer line alternating thin and fat sections.",
-    basic: ["thinLen", "thinWidth", "fatLen", "fatWidth", "flowMult"],
-  },
-  {
-    name: "variableThickness", fn: "variableThickness",
-    sigs: ["strokeVariableThickness", "brushVariableThickness"],
-    description: "Bead height sweeps between hMin and hMax, one wave every wavelength mm, at constant volumetric flow (speed follows thickness).",
-    basic: ["hMin", "hMax", "wavelength", "beadWidth", "volRate"],
-  },
-];

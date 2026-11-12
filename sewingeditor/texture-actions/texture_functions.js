@@ -425,12 +425,10 @@ export function strokeSolid(em, pts, { nLayers = 2, ...brush } = {}) {
  * travel / prime / walk / retract -- followed by `gapLen` mm left blank.
  * Returns segLen + gapLen, where the next dash starts. */
 function brushDashed(em, pts, {
-  segLen, gapLen, width = 0.5, nLayers = 2, speed = 400,
+  segLen = 8, gapLen = 4, width = 0.5, nLayers = 2, speed = 400,
 } = {}) {
-  if (typeof segLen !== "number" || typeof gapLen !== "number") {
-    throw new TypeError(
-      "dashed brush requires numeric segLen and gapLen in its options object, e.g. {segLen: 8, gapLen: 4}."
-    );
+  if (!(segLen > 0) || !(gapLen >= 0)) {
+    throw new RangeError(`dashed brush: segLen must be > 0 and gapLen >= 0 (got ${segLen}, ${gapLen})`);
   }
   const dash = pts.filter((p) => p[2] <= segLen);
   for (let layer = 1; layer <= nLayers; layer++) {
@@ -446,9 +444,10 @@ function brushDashed(em, pts, {
   return segLen + gapLen;
 }
 
-/** STROKE: dashes along the line -- brushDashed() again and again from
- * where the last one said to go on, until the path runs out. It only ever
- * calls a dash, so it cannot end on a gap. */
+/** STROKE: dashes of segLen mm with gapLen mm of travel between, measured
+ * along the line. Calls brushDashed() again and again from where the last
+ * one said to go on, until the path runs out; it only ever calls a dash,
+ * so it cannot end on a gap. */
 export function strokeDashed(em, pts, { ...brush } = {}) {
   const total = totalLength(pts);
   let s = 0;
@@ -500,7 +499,7 @@ export function strokeDotted(em, pts, { gap = 10.0, step = 0.1, ...brush } = {})
   return walkArcLengthStops(pts, gap, step, {}, (cx, cy) => brushSpiralDot(em, cx, cy, brush));
 }
 
-/** STROKE: blob domes (brushBlobDot) every `gap` mm -- the DEFAULT dotted
+/** STROKE: blob domes (brushBlobDot) every `gap` mm. The DEFAULT dotted
  * texture, preferred over strokeDotted() unless a flat, spiral-filled dot
  * is specifically needed. */
 export function strokeBlobDotted(em, pts, { gap = 10.0, step = 0.1, ...brush } = {}) {
@@ -508,8 +507,8 @@ export function strokeBlobDotted(em, pts, { gap = 10.0, step = 0.1, ...brush } =
 }
 
 /** STROKE: leaning blobs (brushDirectionalBlobDot) along the line, each
- * leaning along the path tangent at its stop, so a curved line produces
- * blobs that each rake "downstream". `azimuthDeg` is an OFFSET added to
+ * leaning along the line's direction plus azimuthDeg. On a curve each blob
+ * rakes "downstream" along the path tangent at its stop. `azimuthDeg` is an OFFSET added to
  * that tangent, in degrees CCW -- 0 leans exactly along the direction of
  * travel. An empty `gap` is one dot diameter, so neighbouring base circles
  * just touch and the drags chain into a continuous raked ridge.
@@ -724,9 +723,10 @@ function brushVariableThickness(em, pts, {
   return len;
 }
 
-/** STROKE: a variable-thickness line -- brushVariableThickness() wave after
- * wave until the path runs out (the last wave is cut short where the path
- * ends), then one retract. Knows nothing about waves: each brush call says
+/** STROKE: a line whose bead height rises and falls in waves, at constant
+ * volumetric flow. Calls brushVariableThickness() wave after wave until
+ * the path runs out (the last wave is cut short where the path ends), then
+ * one retract. Knows nothing about waves: each brush call says
  * how far it got, and the options pass straight through. */
 export function strokeVariableThickness(em, pts, { ...brush } = {}) {
   const total = totalLength(pts);

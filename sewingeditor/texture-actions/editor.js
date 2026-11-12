@@ -18,7 +18,8 @@
 import {
   functionText, functionRange, functionStartLine, parseAllDefaults,
   tableFunction, relatedFunctions, groupText, replaceGroup, splitFunctions,
-} from "./signature.js?v=3";
+  listTextures, addTexture, newTextureText,
+} from "./signature.js?v=4";
 import { STEPS, editStatus } from "./edit-state.js";
 import { runInWorker } from "./runner.js";
 
@@ -26,7 +27,9 @@ const STORE_KEY = "textureEdits";
 
 /**
  * @param ctx {
- *   textures,                    spec.js TEXTURES
+ *   textures,                    the page's texture list (same objects across refreshes)
+ *   refreshTextures(),           rebuild that list + the cards (a texture was created / pushed / dropped)
+ *   runOnce(t, box, btn),        the card's "run once", with the inputs in `box`
  *   getSource(),                 current texture_functions.js text
  *   setSource(text),             adopt new file text (re-reads defaults, re-renders cards)
  *   inputs(t, box?),             {values, placement, settings} from t's card (or the param box `box`); throws on bad input
@@ -89,7 +92,49 @@ export function initEditor(ctx) {
     const entry = tableFunction(src, "BRUSHES", t.fn);
     return relatedFunctions(src, [...new Set([...(entry ? [entry] : []), ...t.sigs])]);
   }
-  const fileText = (t) => groupText(ctx.getSource(), groupOf(t));
+  /** Is t in `src`'s BRUSHES table? (A new texture isn't until pushed.) */
+  const inFile = (t, src = ctx.getSource()) => !!tableFunction(src, "BRUSHES", t.fn);
+  /** t's code in the file -- "" for a new texture. */
+  const fileText = (t) => (inFile(t) ? groupText(ctx.getSource(), groupOf(t)) : "");
+  /** `src` with `text` as t's code: t's functions replaced, or -- for a
+   * new texture -- added, with its BRUSHES entry. */
+  const applyDraft = (src, t, text) => (inFile(t, src) ? replaceGroup(src, groupOf(t, src), text) : addTexture(src, t.name, text));
+  /** A new texture's sigs / description follow its code. */
+  function refreshNew(t, patched) {
+    if (!t.isNew) return;
+    const found = listTextures(patched).find((x) => x.name === t.name);
+    if (found) Object.assign(t, found, { isNew: true, description: "new -- not pushed yet" });
+  }
+
+  // new textures not pushed yet: drafts with isNew, and their texture objects
+  const pending = {};
+  function pendingTextures() {
+    for (const [name, d] of Object.entries(drafts)) {
+      if (!d?.isNew || inFile({ fn: name })) continue;
+      if (!pending[name]) {
+        pending[name] = { name, fn: name, sigs: d.sigs ?? [], isNew: true, description: "new -- not pushed yet" };
+        try { refreshNew(pending[name], applyDraft(ctx.getSource(), pending[name], d.saved ?? d.start)); } catch { /* broken draft: keep the stored sigs */ }
+      }
+    }
+    for (const name of Object.keys(pending)) if (!drafts[name]?.isNew || inFile({ fn: name })) delete pending[name];
+    return Object.values(pending);
+  }
+
+  /** Start a new texture `name` (blank, or a copy of texture `from`) and
+   * open it. Throws on a bad or taken name. */
+  function createTexture(name, from) {
+    if (!/^[a-z][A-Za-z0-9]*$/.test(name)) throw new Error("give it a name of letters and digits, starting with a lowercase letter (e.g. zigzag)");
+    if (ctx.textures.some((t) => t.name === name)) throw new Error(`there is already a texture named "${name}"`);
+    const start = newTextureText(ctx.getSource(), name, from);
+    const t = { name, fn: name, sigs: [], isNew: true, description: "new -- not pushed yet" };
+    refreshNew(t, addTexture(ctx.getSource(), name, start)); // also checks the names are free
+    drafts[name] = { isNew: true, sigs: t.sigs, start, base: "" };
+    pending[name] = t;
+    persist();
+    ctx.refreshTextures();
+    open(ctx.textures.find((x) => x.name === name) ?? t);
+    ctx.message(`new texture ${name}: ${t.sigs.join(" + ")} -- edit, save, run, then push`, "blue");
+  }
 
   /** Drafts saved before the editor showed helpers hold only the sig
    * function: append the file's helpers so they match the new block. */
@@ -144,8 +189,7 @@ export function initEditor(ctx) {
 
   function build() {
     root.innerHTML = "";
-    const picker = el("select", { class: "te-picker" },
-      ctx.textures.map((t) => el("option", { value: t.name, textContent: `${t.name}  (${t.sigs.join(" + ")})` })));
+    const picker = el("select", { class: "te-picker" });
     picker.addEventListener("change", () => show(ctx.textures.find((t) => t.name === picker.value)));
 
     // one box per function (setCode); the draft is still one text, the boxes joined
@@ -173,6 +217,13 @@ export function initEditor(ctx) {
     refs.discard = btn("discard unsaved", discard);
     refs.revert = btn("revert to file", revert);
     refs.result = el("pre", { class: "te-result" });
+    // the card's "run once", under the parameters: prints the saved draft (or
+    // the file) with those parameters, at any step -- it doesn't mark the
+    // draft as printed
+    refs.runOnce = $("#te-run-once");
+    refs.runOnce?.addEventListener("click", () => {
+      if (current) ctx.runOnce(current, paramsBox(current) ?? paramsHost, refs.runOnce);
+    });
     refs.note = el("p", { class: "te-note" });
 
     root.append(
@@ -186,11 +237,17 @@ export function initEditor(ctx) {
     );
   }
 
+  function fillPicker() {
+    refs.picker.replaceChildren(...ctx.textures.map((t) =>
+      el("option", { value: t.name, textContent: `${t.name}${t.isNew ? " (new)" : ""}  (${t.sigs.join(" + ")})` })));
+  }
+
   /** What a function is to the current texture, for its box's heading. */
   function roleOf(t, name) {
     const kind = (/^(stroke|brush)/.exec(name) || [])[1];
     let entry = null;
     try { entry = tableFunction(ctx.getSource(), "BRUSHES", t.fn); } catch { /* not in the table */ }
+    if (!entry && t.isNew) entry = t.sigs[0];
     const roles = [];
     if (name === entry) roles.push("what the card calls");
     if (t.sigs.includes(name)) roles.push("card options and defaults");
@@ -276,8 +333,9 @@ export function initEditor(ctx) {
   function show(t) {
     current = t;
     if (buffers[t.name] == null) {
-      try { buffers[t.name] = drafts[t.name]?.saved ?? fileText(t); } catch (e) { buffers[t.name] = `// ${e.message}`; }
+      try { buffers[t.name] = drafts[t.name]?.saved ?? (t.isNew ? drafts[t.name]?.start : fileText(t)) ?? ""; } catch (e) { buffers[t.name] = `// ${e.message}`; }
     }
+    fillPicker();
     refs.picker.value = t.name;
     setCode(buffers[t.name]);
     if (viewer) { viewer.fitted = false; viewer.setGcode(previewByTexture[t.name] ?? ""); }
@@ -286,7 +344,7 @@ export function initEditor(ctx) {
     const helpers = names.filter((n) => !t.sigs.includes(n));
     refs.where.textContent = t.sigs.map((n) => `${n}()`).join(" + ") +
       (helpers.length ? ` + ${helpers.length} helper${helpers.length > 1 ? "s" : ""}: ${helpers.join(", ")}` : "") +
-      " -- texture_functions.js";
+      (t.isNew ? " -- new, not in texture_functions.js until you push it" : " -- texture_functions.js");
     const shared = names.map((n) => {
       const others = ctx.textures.filter((o) => {
         if (o === t) return false;
@@ -297,7 +355,10 @@ export function initEditor(ctx) {
     paramsHost.replaceChildren(ctx.renderParams(t));
     refs.note.textContent = `Save and run use the parameters on the right (the same ones as the ${t.name} card), ` +
       `plus the flow / Z offset / lift settings. Saving re-reads the parameters from the saved code, on the card too. ` +
-      `Push writes only the functions in the editor; the rest of the file is untouched.` +
+      (t.isNew
+        ? `Push adds these functions and a BRUSHES entry for ${t.name} to texture_functions.js; its card appears then. `
+        : `Push writes only the functions in the editor; the rest of the file is untouched. `) +
+      `"run once" prints the saved draft (or the file) with these parameters, at any step. ` +
       (shared.length ? ` Shared functions -- editing them changes these textures too: ${shared.join("; ")}.` : "");
     refresh();
   }
@@ -331,7 +392,7 @@ export function initEditor(ctx) {
   async function save(t) {
     const text = buffers[t.name];
     const file = fileText(t);
-    if (text.trim() === file.trim()) {
+    if (!t.isNew && text.trim() === file.trim()) {
       // back to the file's text: nothing to keep
       const pushed = drafts[t.name]?.pushedText === file ? drafts[t.name] : null;
       drafts[t.name] = pushed ? { pushedText: pushed.pushedText, pushedAt: pushed.pushedAt } : undefined;
@@ -346,6 +407,7 @@ export function initEditor(ctx) {
 
     const prev = drafts[t.name];
     const startsNew = !prev || prev.saved == null;
+    if (t.isNew && text.trim() === "") { setResult(t, "the editor is empty", false); return; }
     const draft = {
       ...(prev ?? {}),
       base: startsNew ? file : prev.base,
@@ -363,7 +425,8 @@ export function initEditor(ctx) {
 
     let patched = null;
     try {
-      patched = replaceGroup(ctx.getSource(), groupOf(t), text);
+      patched = applyDraft(ctx.getSource(), t, text);
+      refreshNew(t, patched);
       parseAllDefaults(patched, t.sigs); // the card needs to read the options object
       const job = { source: patched, texture: t, ...ctx.inputs(t, paramsBox(t)) };
       const { lines, filamentMm } = await runInWorker(job);
@@ -385,7 +448,7 @@ export function initEditor(ctx) {
     const runText = draft.saved;
     let lines;
     try {
-      const patched = replaceGroup(ctx.getSource(), groupOf(t), runText);
+      const patched = applyDraft(ctx.getSource(), t, runText);
       ({ lines } = await runInWorker({ source: patched, texture: t, ...ctx.inputs(t, paramsBox(t)) }));
     } catch (e) {
       setResult(t, `could not generate the gcode: ${e.message}`, false);
@@ -429,7 +492,7 @@ export function initEditor(ctx) {
   async function push(t) {
     const draft = drafts[t.name];
     if (!("showDirectoryPicker" in window)) {
-      ctx.download(replaceGroup(ctx.getSource(), groupOf(t), draft.saved), "texture_functions.js");
+      ctx.download(applyDraft(ctx.getSource(), t, draft.saved), "texture_functions.js");
       setResult(t, "this browser can't write files: replace texture-actions/texture_functions.js with the downloaded file, then reload", false);
       return;
     }
@@ -437,11 +500,13 @@ export function initEditor(ctx) {
       // LF on both sides: a Windows checkout is CRLF, a served copy (e.g.
       // Vercel, built from git) is LF -- the same code must compare equal.
       const disk = await ctx.readDisk();
-      const names = groupOf(t, disk);
-      if (groupText(disk, names) !== draft.base.replace(/\r\n/g, "\n")) {
+      if (t.isNew) {
+        if (inFile(t, disk)) throw new Error(`a texture named "${t.name}" was added to texture_functions.js on disk meanwhile -- not pushed`);
+      } else if (groupText(disk, groupOf(t, disk)) !== draft.base.replace(/\r\n/g, "\n")) {
         throw new Error(`${t.sigs.join(" / ")} or one of their helpers in texture_functions.js on disk changed since this draft started -- not pushed`);
       }
-      const patched = replaceGroup(disk, names, draft.saved);
+      const patched = applyDraft(disk, t, draft.saved);
+      const names = groupOf(t, patched);
       parseAllDefaults(patched, t.sigs);
       await ctx.writeDisk(patched);
 
@@ -449,6 +514,8 @@ export function initEditor(ctx) {
       drafts[t.name] = { pushedText, pushedAt: Date.now() };
       buffers[t.name] = pushedText;
       persist();
+      delete t.isNew; // a texture of the file now: setSource() lists it and gives it a card
+      delete pending[t.name];
       ctx.setSource(patched);
       if (current === t) setCode(pushedText);
       setResult(t, `pushed ${time(drafts[t.name].pushedAt)}: ${names.join(", ")} written to texture_functions.js`, true);
@@ -460,12 +527,24 @@ export function initEditor(ctx) {
   }
 
   function discard(t) {
-    buffers[t.name] = drafts[t.name]?.saved ?? fileText(t);
+    buffers[t.name] = drafts[t.name]?.saved ?? (t.isNew ? drafts[t.name]?.start : fileText(t)) ?? "";
     setCode(buffers[t.name]);
     setResult(t, "unsaved edits discarded", true);
   }
 
   function revert(t) {
+    if (t.isNew) {
+      if (!window.confirm(`Throw away the new texture ${t.name}? Its code is not in texture_functions.js, so it will be gone.`)) return;
+      delete drafts[t.name];
+      delete pending[t.name];
+      delete buffers[t.name];
+      persist();
+      ctx.refreshTextures();
+      const next = ctx.textures[0];
+      if (next) show(next); else close();
+      ctx.message(`new texture ${t.name} thrown away`, "black");
+      return;
+    }
     if (!window.confirm(`Throw away the ${t.name} draft and any unsaved edits, and go back to the code in texture_functions.js?`)) return;
     delete drafts[t.name];
     persist();
@@ -494,13 +573,18 @@ export function initEditor(ctx) {
 
   build();
 
+  function open(t) {
+    frame.classList.add("active");
+    show(t);
+    refs.code.querySelector("textarea")?.focus();
+  }
+
   return {
     /** Open the panel on texture `t`. */
-    open(t) {
-      frame.classList.add("active");
-      show(t);
-      refs.code.querySelector("textarea")?.focus();
-    },
+    open,
+    createTexture,
+    /** New textures that aren't in the file yet (the page lists them, without a card). */
+    pendingTextures,
     /** A status badge for t's card (kept up to date by refresh()). */
     badge(t) {
       const b = el("span", { class: "te-badge" });
@@ -513,13 +597,12 @@ export function initEditor(ctx) {
      * no saved draft (or it can't be swapped in / its options can't be
      * read). The card reads its options from and runs this text. */
     savedSource(t) {
-      const saved = drafts[t.name]?.saved;
+      const saved = drafts[t.name]?.saved ?? (t.isNew ? drafts[t.name]?.start : null);
       if (saved == null) return null;
       try {
         const src = ctx.getSource();
-        const names = groupOf(t, src);
-        if (saved === groupText(src, names)) return null;
-        const patched = replaceGroup(src, names, saved);
+        if (inFile(t, src) && saved === groupText(src, groupOf(t, src))) return null;
+        const patched = applyDraft(src, t, saved);
         parseAllDefaults(patched, t.sigs);
         return patched;
       } catch {

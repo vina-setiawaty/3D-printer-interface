@@ -387,3 +387,128 @@ export function replaceGroup(src, names, text) {
   for (const e of edits) out = out.slice(0, e.start) + e.text + out.slice(e.end);
   return out;
 }
+
+// ------------------------------------------------------------- textures --
+// The page's list of textures comes from the file itself: one per BRUSHES
+// entry, so a texture added by push gets a card with no other file to edit.
+
+/** First sentence of the doc comment right above `fnName` ("" if none),
+ * without a leading "STROKE:" tag or backticks -- a card's description. */
+export function docSummary(src, fnName) {
+  const r = functionRange(src, fnName);
+  const before = src.slice(0, r.start);
+  const end = before.lastIndexOf("*/");
+  if (end < 0 || before.slice(end + 2).trim() !== "") return "";
+  const start = before.lastIndexOf("/**", end);
+  if (start < 0) return "";
+  const text = before.slice(start + 3, end).split("\n")
+    .map((l) => l.replace(/^\s*\*\s?/, "")).join(" ")
+    .replace(/`/g, "").replace(/\s+/g, " ").trim().replace(/^STROKE:\s*/i, "");
+  const m = /^(.*?[.!?])(\s|$)/.exec(text);
+  return m ? m[1] : text;
+}
+
+/** [stroke, the first brush*() the stroke calls] -- the two functions a
+ * card reads its options from. Just [stroke] if it calls no brush*(). */
+export function textureSigs(src, stroke) {
+  const masked = maskComments(src);
+  const r = functionRange(src, stroke);
+  const body = masked.slice(r.start, r.end);
+  let brush = null, at = Infinity;
+  for (const n of topLevelFunctions(src)) {
+    if (!/^brush/.test(n)) continue;
+    const m = new RegExp(`(?<![\\w$.])${n.replace(/\$/g, "\\$")}\\s*\\(`).exec(body);
+    if (m && m.index < at) { at = m.index; brush = n; }
+  }
+  return brush ? [stroke, brush] : [stroke];
+}
+
+/** Every texture in `src`, in BRUSHES order: {name, fn, sigs, description}. */
+export function listTextures(src) {
+  const masked = maskComments(src);
+  const m = /\bconst\s+BRUSHES\s*=\s*\{/.exec(masked);
+  if (!m) return [];
+  const open = m.index + m[0].length - 1;
+  const body = masked.slice(open + 1, matchBracket(masked, open));
+  const out = [];
+  for (const [, name, stroke] of body.matchAll(new RegExp(`(${IDENT})\\s*:\\s*(${IDENT})`, "g"))) {
+    out.push({ name, fn: name, sigs: textureSigs(src, stroke), description: docSummary(src, stroke) });
+  }
+  return out;
+}
+
+/**
+ * `src` with a new texture `name` added: the functions in `text` inserted
+ * just above the BRUSHES table, and `name: <its stroke>` added to the
+ * table. `text` must hold whole functions only, none already in the file,
+ * with exactly one exported stroke*() -- that is what the card calls.
+ */
+export function addTexture(src, name, text) {
+  if (!new RegExp(`^${IDENT}$`).test(name)) throw new Error(`"${name}" can't be a texture name -- use letters and digits, starting with a letter`);
+  if (tableFunction(src, "BRUSHES", name)) throw new Error(`a texture named "${name}" is already in texture_functions.js`);
+  const parts = splitFunctions(text);
+  if (!parts.length) throw new Error("the editor has no functions");
+  const existing = new Set(topLevelFunctions(src));
+  const seen = new Set();
+  for (const p of parts) {
+    if (existing.has(p.name)) throw new Error(`function ${p.name} is already in texture_functions.js -- give it a new name`);
+    if (seen.has(p.name)) throw new Error(`function ${p.name} is in the editor twice`);
+    seen.add(p.name);
+  }
+  const strokes = parts.filter((p) => p.exported && /^stroke/.test(p.name));
+  if (strokes.length !== 1) throw new Error(`a texture needs exactly one exported stroke*() function -- found ${strokes.length}`);
+
+  const masked = maskComments(src);
+  const m = /\bexport\s+const\s+BRUSHES\s*=\s*\{/.exec(masked);
+  if (!m) throw new Error("texture_functions.js has no BRUSHES table");
+  // the functions go above the table and its doc comment
+  let at = m.index;
+  const c = src.lastIndexOf("/**", at);
+  if (c >= 0 && src.slice(src.indexOf("*/", c) + 2, at).trim() === "") at = c;
+  // the entry goes on its own line before the table's closing brace
+  const open = m.index + m[0].length - 1;
+  const close = matchBracket(masked, open);
+  const lineStart = src.lastIndexOf("\n", close) + 1;
+  const last = masked.slice(open + 1, lineStart).trimEnd();
+  const comma = last.endsWith(",") || last === "" ? "" : ",";
+  return src.slice(0, at) + parts.map((p) => p.text).join("\n\n") + "\n\n" +
+    src.slice(at, lineStart).replace(/\s*$/, `${comma}\n`) +
+    `  ${name}: ${strokes[0].name},\n` + src.slice(lineStart);
+}
+
+const capital = (s) => s[0].toUpperCase() + s.slice(1);
+
+/** Starting code for a new texture `name`: a blank stroke + brush pair, or
+ * (with `from`, a listTextures() entry) a copy of that texture's stroke and
+ * brush renamed stroke<Name> / brush<Name>. Helpers stay shared. */
+export function newTextureText(src, name, from = null) {
+  const S = `stroke${capital(name)}`, B = `brush${capital(name)}`;
+  if (!from) {
+    return `/** STROKE: ${name} -- a ridge along the line, nLayers high. Per layer:
+ * travel to the start, prime, one ${B}() per pair of points, retract. */
+export function ${S}(em, pts, { nLayers = 1, ...brush } = {}) {
+  for (let layer = 1; layer <= nLayers; layer++) {
+    em.goto(pts[0][0], pts[0][1], LAYER_HEIGHT * layer);
+    em.unretract();
+    for (let i = 1; i < pts.length; i++) ${B}(em, pts[i - 1], pts[i], brush);
+    em.retract();
+  }
+  return pts;
+}
+
+/** BRUSH: one straight bead from p0 to p1 at the nozzle's current height. */
+function ${B}(em, p0, p1, { width = 0.5, speed = 400 } = {}) {
+  const seg = Math.hypot(p1[0] - p0[0], p1[1] - p0[1]);
+  if (seg < 1e-9) return;
+  em.printMove(p1[0], p1[1], seg * eRate(width, LAYER_HEIGHT), speed);
+}`;
+  }
+  const [s0, b0] = from.sigs;
+  const rename = (t) => {
+    let out = t.replace(new RegExp(`(?<![\\w$.])${s0}(?![\\w$])`, "g"), S);
+    if (b0) out = out.replace(new RegExp(`(?<![\\w$.])${b0}(?![\\w$])`, "g"), B);
+    return out;
+  };
+  const stroke = `/** STROKE: ${name} -- a copy of ${from.name}. */\n` + rename(functionText(src, s0));
+  return b0 ? `${stroke}\n\n${rename(functionText(src, b0))}` : stroke;
+}

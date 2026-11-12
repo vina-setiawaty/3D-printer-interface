@@ -2,10 +2,11 @@
  * Offline checks for the texture-actions panel. Run from sewingeditor/:
  *   node texture-actions/tests/run.mjs
  *
- *  1. spec coverage   -- every texture's fn exists, its stroke + brush parse,
- *                        every option has display metadata in PARAMS,
- *                        every `basic` / `initial` key is a real option,
- *                        and every required option has an `initial`
+ *  1. texture list    -- the textures are read from BRUSHES: each one's
+ *                        stroke + brush parse, every option has a default,
+ *                        PARAMS choices are valid; adding a new texture
+ *                        (blank or a copy) gives a file that imports, runs
+ *                        and lists it, and bad additions are refused
  *  2. patch roundtrip -- changing a default rewrites only that literal,
  *                        and changing it back restores the file byte for
  *                        byte
@@ -22,21 +23,24 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import * as TF from "../texture_functions.js";
-import { TEXTURES, PARAMS } from "../spec.js";
+import { PARAMS } from "../spec.js";
 import {
   parseDefaults, parseAllDefaults, patchAllDefaults, defaultsObject, patchDefaults,
   functionText, functionRange, replaceFunction, functionStartLine,
   tableFunction, relatedFunctions, groupText, replaceGroup,
+  listTextures, addTexture, newTextureText,
 } from "../signature.js";
 import { editStatus } from "../edit-state.js";
 import { buildGcode, findOutOfBounds } from "../generate.js";
 
 const here = (p) => fileURLToPath(new URL(p, import.meta.url));
-const src = readFileSync(here("../texture_functions.js"), "utf8");
+const src = readFileSync(here("../texture_functions.js"), "utf8").replace(/\r\n/g, "\n");
+const TEXTURES = listTextures(src);
 const scriptJs = readFileSync(here("../../script.js"), "utf8");
 const gcodeCheck = JSON.parse(/let gcodeCheck = (\[[\s\S]*?\]);/.exec(scriptJs)[1]);
 
 let failures = 0;
+const throws = (fn) => { try { fn(); return false; } catch { return true; } };
 const check = (cond, msg) => {
   if (!cond) { failures++; console.log(`  FAIL ${msg}`); }
 };
@@ -47,10 +51,11 @@ const SETTINGS = { flowPercent: 100, zOffset: 0, liftMm: 2, startZ: 10 };
 function fullValues(t) {
   const out = {};
   for (const p of parseAllDefaults(src, t.sigs)) if (!p.required) out[p.key] = p.value;
-  return { ...out, ...(t.initial ?? {}) };
+  return out;
 }
 
-console.log("1. spec coverage");
+console.log("1. texture list");
+check(TEXTURES.length >= 9, `only ${TEXTURES.length} textures listed from BRUSHES`);
 for (const t of TEXTURES) {
   check(typeof TF.BRUSHES[t.fn] === "function", `${t.name}: BRUSHES "${t.fn}" not exported`);
   check(TF.BRUSHES[t.fn]?.name === t.sigs[0], `${t.name}: BRUSHES.${t.fn} is not its stroke ${t.sigs[0]}`);
@@ -60,14 +65,41 @@ for (const t of TEXTURES) {
   check(params.length > 0, `${t.name}: no options parsed from ${t.sigs.join(" / ")}`);
   const keys = params.map((p) => p.key);
   for (const p of params) {
-    check(PARAMS[p.key], `${t.name}: option "${p.key}" missing from PARAMS`);
     check(p.literal, `${t.name}: default of "${p.key}" is not a plain literal`);
-    if (p.required) check(t.initial && p.key in t.initial, `${t.name}: required "${p.key}" needs an initial value`);
+    check(!p.required, `${t.name}: "${p.key}" has no default -- every option needs one`);
     const meta = PARAMS[p.key];
     if (meta?.options && !p.required) check(meta.options.includes(p.value), `${t.name}: default "${p.value}" not in ${p.key} options`);
   }
-  for (const k of t.basic) check(keys.includes(k), `${t.name}: basic "${k}" is not an option of ${t.sigs.join(" / ")}`);
-  for (const k of Object.keys(t.initial ?? {})) check(keys.includes(k), `${t.name}: initial "${k}" is not an option`);
+  check(keys.length === new Set(keys).size, `${t.name}: an option listed twice`);
+  check(t.description, `${t.name}: no doc comment above ${t.sigs[0]} for the card's description`);
+}
+// a new texture: blank, or a copy of every existing one
+for (const from of [null, ...TEXTURES]) {
+  const label = from ? `copy of ${from.name}` : "blank";
+  let out;
+  try { out = addTexture(src, "zzNew", newTextureText(src, "zzNew", from)); } catch (e) { check(false, `new texture (${label}): ${e.message}`); continue; }
+  const t = listTextures(out).find((x) => x.name === "zzNew");
+  check(t && t.sigs[0] === "strokeZzNew" && (t.sigs.length === 1 || t.sigs[1] === "brushZzNew"), `new texture (${label}): listed as ${JSON.stringify(t?.sigs)}`);
+  check(out.startsWith(src.slice(0, src.indexOf("/** Texture name -> its stroke"))), `new texture (${label}): bytes before the insert changed`);
+  const mod = await import(`data:text/javascript;base64,${Buffer.from(out).toString("base64")}`);
+  const values = {};
+  for (const p of parseAllDefaults(out, t.sigs)) values[p.key] = p.value;
+  try {
+    const { bodyLines } = buildGcode(mod, t, values, PLACEMENT, SETTINGS);
+    check(bodyLines.length > 0, `new texture (${label}): no gcode`);
+    if (from) {
+      const orig = buildGcode(TF, from, fullValues(from), PLACEMENT, SETTINGS).bodyLines;
+      check(bodyLines.join("\n") === orig.join("\n"), `new texture (${label}): copy prints differently from the original`);
+    }
+  } catch (e) { check(false, `new texture (${label}): ${e.message}`); }
+}
+{
+  const blank = newTextureText(src, "zzNew");
+  check(throws(() => addTexture(src, "solid", newTextureText(src, "solid"))), "a taken texture name accepted");
+  check(throws(() => addTexture(src, "zzNew", blank + "\n\n" + functionText(src, "brushSolid"))), "a function already in the file accepted");
+  check(throws(() => addTexture(src, "zzNew", blank.replace("export function", "function"))), "a texture without an exported stroke accepted");
+  check(throws(() => addTexture(src, "zzNew", blank + "\n\nconst x = 1;")), "code outside functions accepted");
+  check(throws(() => addTexture(src, "9bad", blank)), "a bad texture name accepted");
 }
 
 console.log("2. patch roundtrip");
@@ -106,7 +138,7 @@ for (const t of TEXTURES) {
 
   const em = new TF.Emitter();
   em.z = SETTINGS.startZ; em.retracted = true; em.newPattern();
-  const direct = t.initial ?? {};
+  const direct = {};
   const { x0, y0, x1, y1 } = PLACEMENT;
   TF.BRUSHES[t.fn](em, TF.polylineToPts([[x0, y0], [x1, y1]], 0.1), direct);
   em.retract();
@@ -137,7 +169,6 @@ for (const t of TEXTURES) for (const sig of t.sigs) {
   check(functionText(out, sig) === edited, `${t.name}: edited text did not round-trip`);
   check(src.split("\n")[functionStartLine(src, sig) - 1].includes(`function ${sig}`), `${t.name}: start line wrong`);
 }
-const throws = (fn) => { try { fn(); return false; } catch { return true; } };
 const dotted = functionText(src, "strokeDotted");
 check(throws(() => replaceFunction(src, "strokeDotted", dotted.replace("strokeDotted", "strokeDotted2"))), "renamed function accepted");
 check(throws(() => replaceFunction(src, "strokeDotted", dotted + "\nconst x = 1;")), "extra code after the function accepted");

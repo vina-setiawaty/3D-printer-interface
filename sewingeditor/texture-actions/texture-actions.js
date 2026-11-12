@@ -30,10 +30,10 @@
  * values that differ from the source default).
  */
 import * as TF from "./texture_functions.js";
-import { TEXTURES, PARAMS } from "./spec.js";
-import { parseAllDefaults, patchAllDefaults, optionsText } from "./signature.js?v=3";
+import { PARAMS } from "./spec.js?v=2";
+import { parseAllDefaults, patchAllDefaults, optionsText, listTextures } from "./signature.js?v=4";
 import { runInWorker } from "./runner.js";
-import { initEditor } from "./editor.js?v=7";
+import { initEditor } from "./editor.js?v=8";
 
 const SOURCE_URL = new URL("./texture_functions.js", import.meta.url);
 const SOURCE_NAME = "texture_functions.js";
@@ -45,6 +45,10 @@ const SETTINGS = [
 ];
 
 let source = "";       // texture_functions.js text the defaults were read from (always LF)
+// The textures: one per BRUSHES entry in `source` (listTextures), plus the
+// function editor's new textures that aren't pushed yet. The objects stay
+// the same across refreshes (syncTextures), since the editor holds on to them.
+const TEXTURES = [];
 let defaults = {};     // texture name -> parseAllDefaults() list (each param tagged with its fn)
 let dirHandle = null;  // picked texture-actions folder (File System Access), remembered in IndexedDB
 let linked = false;    // `source` was read from that folder, not from the served copy
@@ -95,6 +99,30 @@ function el(tag, props = {}, children = []) {
   return e;
 }
 
+/** Rebuild TEXTURES from the file and the editor's unpushed new textures,
+ * keeping each texture's object. */
+function syncTextures() {
+  let found = [];
+  try { found = listTextures(source); } catch (e) { message(`textures: ${e.message}`, "red"); }
+  const names = new Set(found.map((t) => t.name));
+  for (const t of editor?.pendingTextures() ?? []) if (!names.has(t.name)) found.push(t);
+  const old = new Map(TEXTURES.map((t) => [t.name, t]));
+  TEXTURES.length = 0;
+  for (const f of found) {
+    const t = old.get(f.name) ?? f;
+    if (t !== f) { for (const k of Object.keys(t)) delete t[k]; Object.assign(t, f); }
+    TEXTURES.push(t);
+  }
+}
+
+/** The textures changed (one created, pushed or thrown away): rebuild the
+ * list, the defaults and the cards. */
+function refreshTextures() {
+  syncTextures();
+  readDefaults();
+  renderCards();
+}
+
 /** The code t's card reads its options from and runs: the file, with t's
  * saved draft from the function editor swapped in when there is one. */
 function codeFor(t) {
@@ -102,7 +130,9 @@ function codeFor(t) {
 }
 
 function readDefaults(only = TEXTURES) {
-  for (const t of only) defaults[t.name] = parseAllDefaults(codeFor(t), t.sigs);
+  for (const t of only) {
+    try { defaults[t.name] = parseAllDefaults(codeFor(t), t.sigs); } catch { defaults[t.name] ??= []; }
+  }
   // drop stored overrides that now equal the default
   for (const t of only) {
     const values = cardStore(t.name).values;
@@ -120,11 +150,11 @@ function startXY() {
 }
 
 /** The value a param's input should show: stored override, else the
- * source default, else the spec's `initial` for required options. */
+ * source default (none for an option without one). */
 function shownValue(t, p) {
   const values = cardStore(t.name).values;
   if (p.key in values) return values[p.key];
-  return p.required ? t.initial?.[p.key] : p.value;
+  return p.required ? undefined : p.value;
 }
 
 // ------------------------------------------------------------------ input --
@@ -270,29 +300,24 @@ function fillParams(box, t) {
     });
     place.append(el("span", { class: "label", textContent: `${k} mm` }), input);
   }
+  box.append(el("div", { class: "texture-group-title", textContent: "line (where it prints)" }));
   box.append(el("div", { class: "ui-group texture-placement" }, place));
 
-  // options
-  const params = defaults[t.name];
-  const basic = el("div", { class: "texture-grid" });
-  const advanced = el("div", { class: "texture-grid" });
-  for (const key of t.basic) {
-    const p = params.find((q) => q.key === key);
-    if (p) basic.append(...paramInput(t, p, box));
+  // options, grouped by the function they belong to: the stroke's (how the
+  // path is walked), then the brush's (the mark it lays)
+  const params = defaults[t.name] ?? [];
+  for (const fn of t.sigs) {
+    const own = params.filter((p) => p.fn === fn);
+    if (!own.length) continue;
+    const role = /^stroke/.test(fn) ? "stroke" : /^brush/.test(fn) ? "brush" : "options";
+    const grid = el("div", { class: "texture-grid" });
+    for (const p of own) grid.append(...paramInput(t, p, box));
+    box.append(el("div", { class: "texture-group-title", textContent: `${role} -- ${fn}()` }));
+    box.append(el("div", { class: "ui-group" }, grid));
   }
-  const rest = params.filter((p) => !t.basic.includes(p.key));
-  for (const p of rest) advanced.append(...paramInput(t, p, box));
-  box.append(el("div", { class: "ui-group" }, basic));
-  if (rest.length) {
-    box.append(el("details", { class: "texture-advanced" }, [
-      el("summary", { textContent: `advanced (${rest.length})` }), advanced,
-    ]));
+  if (editor?.savedSource(t) != null) {
+    box.append(el("div", { class: "texture-sig", textContent: "defaults from the saved draft (not pushed yet)" }));
   }
-  const fromDraft = editor?.savedSource(t) != null;
-  box.append(el("div", {
-    class: "texture-sig",
-    textContent: `defaults: ${t.sigs.map((n) => `${n}()`).join(" + ")}${fromDraft ? " -- from the saved draft (not pushed yet)" : ""}`,
-  }));
 }
 
 /** Current option values of a card, or throws with every input error. */
@@ -523,6 +548,32 @@ async function linkSource() {
   renderLinkBar();
 }
 
+/** "new texture": a name and where its code starts from (blank, or a copy
+ * of an existing texture); opens it in the function editor. */
+function renderNewBar() {
+  const bar = document.querySelector("#texture-new");
+  if (!bar) return;
+  const name = el("input", { type: "text", placeholder: "name, e.g. zigzag", size: 16 });
+  const from = el("select", {}, [
+    el("option", { value: "", textContent: "blank stroke + brush" }),
+    ...TEXTURES.filter((t) => !t.isNew).map((t) => el("option", { value: t.name, textContent: `copy of ${t.name}` })),
+  ]);
+  const btn = el("button", { textContent: "new texture" });
+  btn.addEventListener("click", () => {
+    const n = name.value.trim();
+    try {
+      editor.createTexture(n, TEXTURES.find((t) => t.name === from.value) ?? null);
+      name.value = "";
+    } catch (e) {
+      message(`new texture: ${e.message}`, "red");
+    }
+  });
+  bar.replaceChildren(
+    el("div", { class: "ui-item" }, btn), el("div", { class: "ui-item" }, name), el("div", { class: "ui-item" }, from),
+    el("span", { class: "label", textContent: "opens in the function editor; save, run, then push to add it to the file" }),
+  );
+}
+
 function renderLinkBar() {
   const bar = document.querySelector("#texture-link");
   if (!bar) return;
@@ -588,16 +639,16 @@ function renderSettings() {
 }
 
 function renderCards() {
+  renderNewBar();
   const box = document.querySelector("#textures");
   box.innerHTML = "";
-  for (const t of TEXTURES) box.append(renderCard(t));
+  for (const t of TEXTURES) if (!t.isNew) box.append(renderCard(t)); // a new texture gets its card when pushed
   for (const t of TEXTURES) syncViews(t); // the editor's param box too
 }
 
 function setSource(text) {
   source = toLF(text);
-  readDefaults();
-  renderCards();
+  refreshTextures();
 }
 
 async function init() {
@@ -605,6 +656,7 @@ async function init() {
     const res = await fetch(SOURCE_URL, { cache: "no-store" });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     source = toLF(await res.text());
+    syncTextures();
     readDefaults();
   } catch (e) {
     message(`textures: could not read ${SOURCE_NAME} (${e.message})`, "red");
@@ -619,6 +671,7 @@ async function init() {
       if (dirHandle && (await dirHandle.queryPermission({ mode: "readwrite" })) === "granted") {
         source = await readDisk();
         linked = true;
+        syncTextures();
         readDefaults();
       }
     } catch { /* folder moved or gone: stay on the served copy */ }
@@ -635,7 +688,10 @@ async function init() {
     readDisk,
     writeDisk,
     download,
+    refreshTextures,
+    runOnce: (t, box, btn) => run(t, box, btn),
   });
+  syncTextures(); // again, now with the editor's unpushed new textures
   readDefaults(); // again, now with any saved drafts swapped in
   renderLinkBar();
   renderSettings();
