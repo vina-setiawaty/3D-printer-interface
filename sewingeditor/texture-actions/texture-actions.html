@@ -345,6 +345,10 @@
     margin-bottom: 0.25em;
   }
 
+  /* the line section has text fields (corners, formulas): give its inputs the room */
+  .texture-placement .texture-grid { grid-template-columns: auto 1fr; }
+  .texture-placement .texture-grid input, .texture-placement .texture-grid select { width: 100%; box-sizing: border-box; }
+
   .texture-group-title {
     margin: 0.6em 0 0.2em;
     font-size: 0.8em;
@@ -858,7 +862,7 @@
 
   <script type="text/javascript" src="../script.js?v=4"></script>
   <script type="text/javascript" src="texture-actions-compat.js"></script>
-  <script type="module" src="texture-actions.js?v=11"></script>
+  <script type="module" src="texture-actions.js?v=12"></script>
   <script type="text/javascript" src="gcode-viewer.js?v=2"></script>
   <script type="text/javascript" src="../nav.js?v=1"></script>
 </body>

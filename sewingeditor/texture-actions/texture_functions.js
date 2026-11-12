@@ -218,84 +218,14 @@ export function spiralDisc(center, radius, spacing = 0.28, ptsPerTurn = 20) {
  */
 
 /**
- * The path has a direction change too sharp to print smoothly, even after
- * refining sampling -- the SHAPE is the problem (e.g. amplitude exceeding
- * wavelength), not the resolution. Reduce amplitude or increase
- * wavelength/radius.
- */
-export class PathTooSteepError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "PathTooSteepError";
-  }
-}
-
-function turnAngleDeg(p0, p1, p2) {
-  const v1 = [p1[0] - p0[0], p1[1] - p0[1]];
-  const v2 = [p2[0] - p1[0], p2[1] - p1[1]];
-  const a1 = Math.atan2(v1[1], v1[0]);
-  const a2 = Math.atan2(v2[1], v2[0]);
-  let turn = Math.abs(((a2 - a1) * 180) / Math.PI);
-  return turn > 180 ? 360 - turn : turn;
-}
-
-/**
- * Samples (xFunc(t), yFunc(t)) at a fixed, fine step (deliberately NOT
- * adaptive). Verifies no consecutive-segment turn exceeds maxTurnDeg;
- * refines (halves step) up to maxRefineAttempts times; throws
- * PathTooSteepError if the violation persists.
+ * Samples (xFunc(t), yFunc(t)) from tStart to tEnd at a fixed step in t
+ * (deliberately NOT adaptive), always including tEnd.
  * Returns array of [x, y, s], s = cumulative arc length from tStart.
  */
-export function samplePath(xFunc, yFunc, tStart, tEnd, {
-  step = 0.1, maxTurnDeg = 15.0, maxRefineAttempts = 3,
-} = {}) {
-  const doSample = (step) => {
-    const pts = [];
-    let t = tStart;
-    while (t < tEnd - 1e-9) {
-      pts.push([xFunc(t), yFunc(t)]);
-      t += step;
-    }
-    pts.push([xFunc(tEnd), yFunc(tEnd)]);
-    return pts;
-  };
-
-  const maxTurn = (pts) => {
-    let worst = 0.0;
-    for (let i = 1; i < pts.length - 1; i++) {
-      worst = Math.max(worst, turnAngleDeg(pts[i - 1], pts[i], pts[i + 1]));
-    }
-    return worst;
-  };
-
-  let pts = doSample(step);
-  let attempts = 0;
-  let prevWorst = null;
-  let curStep = step;
-  while (true) {
-    const worst = maxTurn(pts);
-    if (worst <= maxTurnDeg) break;
-    if (attempts >= maxRefineAttempts) {
-      throw new PathTooSteepError(
-        `Path has a ${worst.toFixed(1)} degree direction change that ` +
-        `persists after ${attempts} sampling refinements ` +
-        `(step=${curStep.toFixed(4)}mm). Reduce amplitude or increase ` +
-        `wavelength/radius rather than resampling further.`
-      );
-    }
-    if (prevWorst !== null && worst >= prevWorst * 0.98) {
-      throw new PathTooSteepError(
-        `Path has a ${worst.toFixed(1)} degree direction change NOT ` +
-        `improving with finer sampling (was ${prevWorst.toFixed(1)} ` +
-        `degrees before refinement) -- the shape itself is too steep, ` +
-        `not a resolution problem.`
-      );
-    }
-    prevWorst = worst;
-    curStep /= 2.0;
-    pts = doSample(curStep);
-    attempts += 1;
-  }
+export function samplePath(xFunc, yFunc, tStart, tEnd, { step = 0.1 } = {}) {
+  const pts = [];
+  for (let t = tStart; t < tEnd - 1e-9; t += step) pts.push([xFunc(t), yFunc(t)]);
+  pts.push([xFunc(tEnd), yFunc(tEnd)]);
 
   const out = [[pts[0][0], pts[0][1], 0.0]];
   let s = 0.0;

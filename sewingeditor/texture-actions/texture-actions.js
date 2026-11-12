@@ -241,13 +241,47 @@ function onDraftChange(t) {
 }
 
 // ------------------------------------------------------------------- card --
+// The card's line: a shape, and the fields that shape needs (buildPath in
+// generate.js turns them into the point list the stroke walks).
+const PLACEMENT_DEFAULTS = {
+  shape: "straight", corners: "", curveMode: "preset",
+  bend: 8, waveHeight: 0, waveLength: 10,
+  fx: "x0 + t", fy: "y0 + 5*sin(t/4)", t0: 0, t1: 40,
+};
+const SHAPES = [["straight", "straight line"], ["polyline", "polyline with corners"], ["curve", "smooth curve"]];
+const CURVE_MODES = [["preset", "arc + wave"], ["formula", "formula x(t), y(t)"]];
+
+/** [key, label, kind ("number" | "text" | "select"), options] for each
+ * line field the card's current shape uses. */
 function placementFields(t) {
   const cs = cardStore(t.name);
   if (!cs.placement) {
     const [x, y] = startXY();
     cs.placement = { x0: x - 15, y0: y, x1: x + 15, y1: y };
   }
-  return ["x0", "y0", "x1", "y1"];
+  for (const [k, v] of Object.entries(PLACEMENT_DEFAULTS)) if (!(k in cs.placement)) cs.placement[k] = v;
+  const p = cs.placement;
+  const formula = p.shape === "curve" && p.curveMode === "formula";
+  const fields = [["shape", "shape", "select", SHAPES]];
+  if (p.shape === "curve") fields.push(["curveMode", "curve", "select", CURVE_MODES]);
+  fields.push(["x0", "x0 mm", "number"], ["y0", "y0 mm", "number"]);
+  if (!formula) fields.push(["x1", "x1 mm", "number"], ["y1", "y1 mm", "number"]);
+  if (p.shape === "polyline") fields.push(["corners", "corners x,y; x,y", "text"]);
+  if (p.shape === "curve" && !formula) {
+    fields.push(["bend", "bend mm", "number"], ["waveHeight", "wave height mm", "number"], ["waveLength", "wave length mm", "number"]);
+  }
+  if (formula) fields.push(["fx", "x(t) =", "text"], ["fy", "y(t) =", "text"], ["t0", "t from", "number"], ["t1", "t to", "number"]);
+  return fields;
+}
+
+/** Three corners zigzagging 5 mm either side of the straight line -- a
+ * starting point when a card switches to "polyline". */
+function defaultCorners({ x0, y0, x1, y1 }) {
+  const dx = x1 - x0, dy = y1 - y0, L = Math.hypot(dx, dy) || 1;
+  const nx = (-dy / L) * 5, ny = (dx / L) * 5;
+  return [[0.25, 1], [0.5, -1], [0.75, 1]]
+    .map(([f, side]) => `${+(x0 + dx * f + nx * side).toFixed(1)},${+(y0 + dy * f + ny * side).toFixed(1)}`)
+    .join("; ");
 }
 
 function renderCard(t) {
@@ -291,14 +325,34 @@ function fillParams(box, t) {
 
   // placement
   const place = el("div", { class: "texture-grid" });
-  for (const k of placementFields(t)) {
-    const input = el("input", { type: "number", step: 0.5, value: cs.placement[k] });
+  for (const [k, label, kind, options] of placementFields(t)) {
+    let input;
+    if (kind === "select") {
+      input = el("select", {}, options.map(([v, text]) => el("option", { value: v, textContent: text })));
+      input.value = cs.placement[k];
+    } else if (kind === "text") {
+      input = el("input", { type: "text", value: cs.placement[k] ?? "", spellcheck: false });
+    } else {
+      input = el("input", { type: "number", step: 0.5, value: cs.placement[k] });
+    }
     input.dataset.place = k;
+    input.dataset.kind = kind;
     input.addEventListener("change", () => {
-      const n = Number(input.value);
-      if (Number.isFinite(n)) { cs.placement[k] = n; saveStore(); syncViews(t, box); }
+      if (kind === "number") {
+        const n = Number(input.value);
+        if (!Number.isFinite(n)) return;
+        cs.placement[k] = n;
+      } else {
+        cs.placement[k] = input.value;
+      }
+      if (k === "shape" && input.value === "polyline" && !String(cs.placement.corners ?? "").trim()) {
+        cs.placement.corners = defaultCorners(cs.placement);
+      }
+      saveStore();
+      // a shape / curve choice changes which fields there are: redraw this box too
+      syncViews(t, kind === "select" ? null : box);
     });
-    place.append(el("span", { class: "label", textContent: `${k} mm` }), input);
+    place.append(el("span", { class: "label", textContent: label }), input);
   }
   box.append(el("div", { class: "texture-group-title", textContent: "line (where it prints)" }));
   box.append(el("div", { class: "ui-group texture-placement" }, place));
@@ -335,9 +389,11 @@ function cardValues(t, card) {
 function cardPlacement(t, card) {
   const placement = {};
   for (const input of card.querySelectorAll("[data-place]")) {
+    const k = input.dataset.place;
+    if (input.dataset.kind !== "number") { placement[k] = input.value; continue; }
     const n = Number(input.value);
-    if (input.value.trim() === "" || !Number.isFinite(n)) throw new Error(`${input.dataset.place} is not a number`);
-    placement[input.dataset.place] = n;
+    if (input.value.trim() === "" || !Number.isFinite(n)) throw new Error(`${k} is not a number`);
+    placement[k] = n;
   }
   return placement;
 }

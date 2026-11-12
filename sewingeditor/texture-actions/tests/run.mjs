@@ -7,6 +7,9 @@
  *                        PARAMS choices are valid; adding a new texture
  *                        (blank or a copy) gives a file that imports, runs
  *                        and lists it, and bad additions are refused
+ *  1b. line shapes   -- straight / polyline / curve (preset + formula)
+ *                        paths start and end where they should, every
+ *                        texture prints along them, bad input is refused
  *  2. patch roundtrip -- changing a default rewrites only that literal,
  *                        and changing it back restores the file byte for
  *                        byte
@@ -31,7 +34,7 @@ import {
   listTextures, addTexture, newTextureText,
 } from "../signature.js";
 import { editStatus } from "../edit-state.js";
-import { buildGcode, findOutOfBounds } from "../generate.js";
+import { buildGcode, findOutOfBounds, buildPath, compileFormula, parseCorners } from "../generate.js";
 
 const here = (p) => fileURLToPath(new URL(p, import.meta.url));
 const src = readFileSync(here("../texture_functions.js"), "utf8").replace(/\r\n/g, "\n");
@@ -100,6 +103,44 @@ for (const from of [null, ...TEXTURES]) {
   check(throws(() => addTexture(src, "zzNew", blank.replace("export function", "function"))), "a texture without an exported stroke accepted");
   check(throws(() => addTexture(src, "zzNew", blank + "\n\nconst x = 1;")), "code outside functions accepted");
   check(throws(() => addTexture(src, "9bad", blank)), "a bad texture name accepted");
+}
+
+console.log("1b. line shapes");
+{
+  const base = { x0: 80, y0: 100, x1: 120, y1: 100 };
+  const near = (a, b, tol = 1e-6) => Math.hypot(a[0] - b[0], a[1] - b[1]) < tol;
+  const shapes = {
+    straight: { ...base },
+    polyline: { ...base, shape: "polyline", corners: "90,105; 100,95; 110,105" },
+    arc: { ...base, shape: "curve", curveMode: "preset", bend: 8, waveHeight: 0, waveLength: 10 },
+    wave: { ...base, shape: "curve", curveMode: "preset", bend: 0, waveHeight: 3, waveLength: 10 },
+    formula: { ...base, shape: "curve", curveMode: "formula", fx: "x0 + 15*cos(t)", fy: "y0 + 15*sin(t)", t0: 0, t1: 3 },
+  };
+  for (const [name, p] of Object.entries(shapes)) {
+    let pts;
+    try { pts = buildPath(TF, p); } catch (e) { check(false, `${name}: ${e.message}`); continue; }
+    check(pts.length > 2 && pts.every((q) => q.length === 3 && q.every(Number.isFinite)), `${name}: bad point list`);
+    check(pts.every((q, i) => i === 0 || q[2] >= pts[i - 1][2]), `${name}: distance along the path goes backwards`);
+    if (name !== "formula") check(near(pts[0], [80, 100]), `${name}: does not start at x0, y0`);
+    if (name === "straight" || name === "polyline" || name === "arc") check(near(pts.at(-1), [120, 100], 1e-3), `${name}: does not end at x1, y1`);
+    for (const t of TEXTURES) {
+      try { buildGcode(TF, t, fullValues(t), p, SETTINGS); } catch (e) { check(false, `${name} + ${t.name}: ${e.message}`); }
+    }
+  }
+  check(near(buildPath(TF, shapes.formula)[0], [95, 100]), "formula: x0 / y0 not used");
+  const polyCorners = buildPath(TF, shapes.polyline);
+  check(polyCorners.some((q) => near(q, [100, 95], 1e-6)), "polyline: misses a corner");
+  const arcMid = buildPath(TF, shapes.arc).reduce((a, q) => (q[1] > a[1] ? q : a));
+  check(Math.abs(arcMid[1] - 108) < 0.05, `arc: bows ${(arcMid[1] - 100).toFixed(2)} mm, expected 8`);
+  check(throws(() => compileFormula("t; alert(1)", "x(t)", { x0: 0, y0: 0 })), "formula with ; accepted");
+  check(throws(() => compileFormula("window.x + t", "x(t)", { x0: 0, y0: 0 })), "formula with an unknown name accepted");
+  check(throws(() => compileFormula("sin(", "x(t)", { x0: 0, y0: 0 })), "broken formula accepted");
+  check(compileFormula("2^3 + PI*0 + x0", "x(t)", { x0: 1, y0: 0 })(0) === 9, "^ is not a power");
+  check(throws(() => buildPath(TF, { ...shapes.formula, fx: "1/0" })), "a formula giving Infinity accepted");
+  check(throws(() => parseCorners("90,105; 100")), "a corner without y accepted");
+  check(throws(() => buildPath(TF, { ...shapes.formula, t0: 5, t1: 5 })), "empty t range accepted");
+  check(throws(() => buildPath(TF, { ...shapes.wave, waveLength: 0 })), "wave length 0 accepted");
+  check(throws(() => buildPath(TF, { ...base, x1: 80 })), "zero-length straight line accepted");
 }
 
 console.log("2. patch roundtrip");
