@@ -36,7 +36,6 @@ export const PARAMS = {
   speed: { step: 10, min: 1, unit: "F" },
   extrudeSpeed: { step: 10, min: 1, unit: "F" },
   orbitSpeed: { step: 50, min: 1, unit: "F" },
-  liftSpeed: { step: 50, min: 1, unit: "F" },
   dragSpeed: { step: 50, min: 1, unit: "F" },
   pullExtrudeSpeed: { step: 10, min: 1, unit: "F" },
   hairSpeed: { step: 100, min: 1, unit: "F" },
@@ -51,7 +50,6 @@ export const PARAMS = {
   postRetractDwellMs: { step: 100, min: 0, unit: "ms" },
   baseDwellMs: { step: 100, min: 0, unit: "ms" },
   orbitDwellMs: { step: 100, min: 0, unit: "ms" },
-  liftDwellMs: { step: 100, min: 0, unit: "ms" },
   segDwellMs: { step: 50, min: 0, unit: "ms" },
   peakDwellMs: { step: 50, min: 0, unit: "ms" },
   primedwellS: { step: 0.1, min: 0, unit: "s" },
@@ -63,7 +61,6 @@ export const PARAMS = {
   orbitLoops: { step: 1, min: 0, unit: "loops" },
   topOrbitLoops: { step: 1, min: 0, unit: "loops" },
   blobClearanceMm: { step: 0.05, min: 0, unit: "mm" },
-  liftZ: { step: 0.5, min: 0, unit: "mm" },
 
   // hairy
   esegmentMm: { step: 0.1, min: 0, unit: "mm E" },
@@ -98,4 +95,5 @@ export const PARAMS = {
   volRate: { step: 0.5, min: 0.1, unit: "mm³/s" },
   stepsPerWave: { step: 1, min: 1, unit: "steps" },
   phase: { step: 0.25, unit: "waves" },
+  peak: { step: 0.05, min: 0, max: 1, unit: "of wave" },
 };

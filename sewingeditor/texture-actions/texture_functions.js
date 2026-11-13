@@ -609,7 +609,10 @@ export function strokeSegmented(em, pts, {
  * of `pts` (less if the path is shorter) and returns how many mm it used,
  * so a Stroke can call it again from there. Height follows a cosine bump,
  * hMin -> hMax -> hMin, starting `phase` of the way into it (0.5 starts on
- * a peak -- use it on alternate rows). The nozzle rides on the bead top
+ * a peak -- use it on alternate rows). `peak` (0..1) sets where along the
+ * wave the top falls: 0.5 is the symmetric bump, smaller leans it forward
+ * (steep rise, long tail), larger leans it back; 0 and 1 give a sawtooth
+ * whose vertical edge sits at the wave boundary. The nozzle rides on the bead top
  * (Z = H). Each micromovement extrudes E = W x H x L / filament area
  * (Eq. 1) at F = volRate / (H x W) x 60 (Eq. 2), so volumetric flow stays
  * constant and only nozzle speed changes with thickness. If the nozzle is
@@ -621,21 +624,46 @@ function brushVariableThickness(em, pts, {
   volRate = 4.0,        // mm³/s, held constant (measured limit: 16.8)
   stepsPerWave = 25,    // micromovements per wave
   phase = 0,            // in waves; 0.5 on alternate rows
+  peak = 0.5,           // where the top falls, 0..1 of the wave (0.5 = symmetric)
+  gapLen = 0,         // set by the stroke: > 0 means the waves are apart
 } = {}) {
   if (!(hMin >= 0)) throw new RangeError(`brushVariableThickness: hMin must be >= 0 mm (got ${hMin})`);
   if (!(hMax >= hMin)) throw new RangeError(`brushVariableThickness: hMax must be >= hMin (got ${hMax} < ${hMin})`);
   if (!(hMax > 0)) throw new RangeError(`brushVariableThickness: hMax must be > 0 mm (got ${hMax})`);
   if (!(wavelength > 0)) throw new RangeError(`brushVariableThickness: wavelength must be > 0 mm (got ${wavelength})`);
+  if (!(gapLen >= 0)) throw new RangeError(`brushVariableThickness: gapLen must be >= 0 mm (got ${gapLen})`);
+  if (!(peak >= 0 && peak <= 1)) throw new RangeError(`brushVariableThickness: peak must be 0..1 (got ${peak})`);
 
   const len = Math.min(wavelength, pts[pts.length - 1][2]);
   if (!(len > 0)) return 0;
-  const hAt = (s) => hMin + (hMax - hMin) * 0.5 * (1 - Math.cos(2 * Math.PI * (s / wavelength + phase)));
+  // u = position inside the wave, 0..1. A half-cosine rises over [0, peak]
+  // and another falls over [peak, 1]; peak = 0.5 gives the plain cosine.
+  // The end of a wave counts as u = 1 (not 0), so peak = 0 ends low.
+  const hAt = (s) => {
+    const w = s / wavelength + phase;
+    let u = w - Math.floor(w);
+    if (u < 1e-9 && w > 1e-9) u = 1;
+    const f = u < peak
+      ? 0.5 * (1 - Math.cos((Math.PI * u) / peak))
+      : peak < 1 ? 0.5 * (1 + Math.cos((Math.PI * (u - peak)) / (1 - peak))) : 1;
+    return hMin + (hMax - hMin) * f;
+  };
   const n = Math.max(1, Math.round((stepsPerWave * len) / wavelength));
 
   let j = 1;
   let px = pts[0][0], py = pts[0][1], ph = hAt(0);
   if (em.retracted) {
-    em.goto(px, py, ph);
+    const liftZ = 1.5 * hMax;
+    if (gapLen > 0 && em.z < liftZ) {
+      // arriving across a gap (the stroke retracted after the last wave):
+      // up to 1.5 x hMax, across to this wave's start, down to its height
+      em.a(`G1 Z${liftZ.toFixed(3)} F3000`);
+      em.a(`G0 X${px.toFixed(3)} Y${py.toFixed(3)} F${TRAVEL_SPEED}`);
+      em.a(`G1 Z${ph.toFixed(3)} F1500`);
+      em.x = px; em.y = py; em.z = ph;
+    } else {
+      em.goto(px, py, ph); // start of the line: the usual hop, travel, down
+    }
     em.unretract();
   }
   for (let k = 1; k <= n; k++) {
@@ -658,13 +686,16 @@ function brushVariableThickness(em, pts, {
  * the path runs out (the last wave is cut short where the path ends), then
  * one retract. Knows nothing about waves: each brush call says
  * how far it got, and the options pass straight through. */
-export function strokeVariableThickness(em, pts, { ...brush } = {}) {
+export function strokeVariableThickness(em, pts, { gapLen = 0, ...brush } = {}) {
   const total = totalLength(pts);
   let s = 0;
   while (total - s > 1e-6) {
-    const used = brushVariableThickness(em, restOfPath(pts, s), brush);
+    const used = brushVariableThickness(em, restOfPath(pts, s), { ...brush, gapLen });
     if (!(used > 0)) break;
-    s += used;
+    s += used + gapLen;
+    // skip the gap: retract, so the next wave travels there and primes
+    // instead of extruding across the gap
+    if (gapLen > 0 && total - s > 1e-6) em.retract();
   }
   em.retract();
   return pts;
@@ -937,7 +968,9 @@ function brushSpiralDot(em, cx, cy, { dotRadius = 0.8, nLayers = 2, speed = 250 
  * (`orbitRadius`, default the dot's own radius) around (cx, cy) at the
  * dome's own top height, repeated `orbitLoops` times, no extrusion --
  * confirmed on hardware to reduce stringing. Pass `orbitRadius: 0` to
- * disable it.
+ * disable it. Then rise `blobClearanceMm` above the dome, recenter, dwell
+ * `orbitDwellMs`, and trace the same circle `topOrbitLoops` times at that
+ * hover height (0 skips this second orbit).
  */
 function brushBlobDot(em, cx, cy, {
   diameter = 1.6, baseZ = 0.2, buildSteps = 6, taperFactor = 0.7,
@@ -945,7 +978,7 @@ function brushBlobDot(em, cx, cy, {
   retractMm = 4.0, postRetractDwellMs = 2000, baseExtraMm = 0.3,
   baseDwellMs = 1000, orbitRadius = null, orbitPts = 16, orbitSpeed = 600,
   orbitLoops = 3, orbitDwellMs = 2000, blobClearanceMm = 0.3,
-  liftZ = 5.0, liftSpeed = 600, liftDwellMs = 1000, topOrbitLoops = 3,
+  topOrbitLoops = 3,
 } = {}) {
   const radius = diameter / 2.0;
   const domeHeight = radius;
@@ -1000,9 +1033,30 @@ function brushBlobDot(em, cx, cy, {
       }
     }
   }
-  // (recenter / lift / second orbit intentionally disabled -- the nozzle
-  // goes straight from the dome-height orbit above to the next dot's
-  // goto(), which itself lifts to travel height before the XY move)
+
+  // SECOND orbit: rise blobClearanceMm above the dome top (so the move
+  // back to center can't drag the fresh blob), recenter, dwell, then trace
+  // the same circle topOrbitLoops times at that hover height. No lift --
+  // the next dot's goto() raises to travel height before its XY move.
+  // topOrbitLoops: 0 skips this whole step.
+  const nTopLoops = Math.max(0, Math.round(topOrbitLoops));
+  if (actualOrbitRadius > 0 && nTopLoops > 0) {
+    const zHover = z + blobClearanceMm;
+    em.a(`G1 Z${zHover.toFixed(3)} F${orbitSpeed}`);
+    em.z = zHover;
+    em.a(`G0 X${cx.toFixed(3)} Y${cy.toFixed(3)} F${orbitSpeed}`);
+    em.x = cx; em.y = cy;
+    em.dwell(orbitDwellMs);
+    for (let loop = 0; loop < nTopLoops; loop++) {
+      for (let i = 0; i <= nOrbit; i++) {
+        const theta = (i / nOrbit) * 2 * Math.PI;
+        const ox = cx + actualOrbitRadius * Math.cos(theta);
+        const oy = cy + actualOrbitRadius * Math.sin(theta);
+        em.a(`G0 X${ox.toFixed(3)} Y${oy.toFixed(3)} F${orbitSpeed}`);
+        em.x = ox; em.y = oy;
+      }
+    }
+  }
 }
 
 /**
@@ -1230,6 +1284,26 @@ function brushHairyDot(em, cx, cy, {
   pull(overtravelMm, null, overtravelSpeed, true);
 }
 
+export function strokePetalDotted(em, pts, { gap = 6.0, azimuthDeg = 180, ...brush } = {}) {
+  return walkArcLengthStops(pts, gap, 0.1, { withTangent: true }, (cx, cy, { headingDeg }) =>
+    brushPetalDot(em, cx, cy, { ...brush, azimuthDeg: headingDeg + azimuthDeg }));
+}
+
+function brushPetalDot(em, cx, cy, {
+  diameter = 3.0, height = 1.0, extrudeSpeed = 150,
+  dragMm = 5.0, azimuthDeg = 270, dragSpeed = 600,
+} = {}) {
+  const r = diameter / 2;
+  em.goto(cx, cy, height);
+  em.unretract();
+  em.printMove(cx, cy, (Math.PI * r * r * height * 0.75) / FIL_AREA, extrudeSpeed);
+  em.retract();
+  const a = (azimuthDeg * Math.PI) / 180;
+  const ex = cx + Math.cos(a) * dragMm, ey = cy + Math.sin(a) * dragMm;
+  em.a(`G0 X${ex.toFixed(3)} Y${ey.toFixed(3)} Z0.000 F${dragSpeed}`);
+  em.x = ex; em.y = ey; em.z = 0;
+}
+
 /** Texture name -> its stroke, which the cards and the compiler call as
  * stroke(em, pts, options). Keys are the texture names the scene model,
  * the option table and the prompt docs use. */
@@ -1238,4 +1312,5 @@ export const BRUSHES = {
   blobDotted: strokeBlobDotted, directionalBlobDotted: strokeDirectionalBlobDotted,
   hairy: strokeHairy, hairyDotted: strokeHairyDotted, segmented: strokeSegmented,
   variableThickness: strokeVariableThickness,
+  petalDot: strokePetalDotted,
 };
