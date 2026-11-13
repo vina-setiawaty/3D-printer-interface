@@ -124,7 +124,14 @@ export function initEditor(ctx) {
    * open it. Throws on a bad or taken name. */
   function createTexture(name, from) {
     if (!/^[a-z][A-Za-z0-9]*$/.test(name)) throw new Error("give it a name of letters and digits, starting with a lowercase letter (e.g. zigzag)");
-    if (ctx.textures.some((t) => t.name === name)) throw new Error(`there is already a texture named "${name}"`);
+    const taken = ctx.textures.find((t) => t.name === name);
+    if (taken?.isNew) {
+      // an unpushed new texture of that name: reopen its draft
+      open(taken);
+      ctx.message(`${name} is a new texture not pushed yet -- reopened its draft`, "blue");
+      return;
+    }
+    if (taken) throw new Error(`there is already a texture named "${name}"`);
     const start = newTextureText(ctx.getSource(), name, from);
     const t = { name, fn: name, sigs: [], isNew: true, description: "new -- not pushed yet" };
     refreshNew(t, addTexture(ctx.getSource(), name, start)); // also checks the names are free
@@ -418,6 +425,9 @@ export function initEditor(ctx) {
     };
     drafts[t.name] = draft;
     persist();
+    // a new texture's stroke / brush names follow its code: update them
+    // before the card reads its options
+    try { refreshNew(t, applyDraft(ctx.getSource(), t, text)); } catch { /* reported by the test-run below */ }
     // the card and the param box re-read their options from the new draft
     // first, so the test-run below uses them
     ctx.onDraftChange(t);
@@ -583,8 +593,12 @@ export function initEditor(ctx) {
     /** Open the panel on texture `t`. */
     open,
     createTexture,
-    /** New textures that aren't in the file yet (the page lists them, without a card). */
+    /** New textures that aren't in the file yet (the page lists them; a card once saved). */
     pendingTextures,
+    /** Does t have a saved draft? (A new texture gets its card then.) */
+    hasSavedDraft(t) {
+      return drafts[t.name]?.saved != null;
+    },
     /** A status badge for t's card (kept up to date by refresh()). */
     badge(t) {
       const b = el("span", { class: "te-badge" });

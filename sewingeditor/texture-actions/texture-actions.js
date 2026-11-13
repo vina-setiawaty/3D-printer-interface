@@ -33,7 +33,7 @@ import * as TF from "./texture_functions.js";
 import { PARAMS } from "./spec.js?v=2";
 import { parseAllDefaults, patchAllDefaults, optionsText, listTextures } from "./signature.js?v=4";
 import { runInWorker } from "./runner.js";
-import { initEditor } from "./editor.js?v=8";
+import { initEditor } from "./editor.js?v=9";
 
 const SOURCE_URL = new URL("./texture_functions.js", import.meta.url);
 const SOURCE_NAME = "texture_functions.js";
@@ -234,9 +234,17 @@ function syncViews(t, except = null) {
 
 /** t's saved draft changed (saved, reverted, cleared): re-read its options
  * and redraw its card and the editor's param box. */
+/** A texture of the file, or a new one once its draft is saved. */
+function hasCard(t) {
+  return !t.isNew || !!editor?.hasSavedDraft(t);
+}
+
 function onDraftChange(t) {
   readDefaults([t]);
-  document.querySelector(`#texture-${t.name}`)?.replaceWith(renderCard(t));
+  const card = document.querySelector(`#texture-${t.name}`);
+  if (!card && hasCard(t)) { renderCards(); return; } // a new texture's first save: its card appears
+  if (card && !hasCard(t)) { renderCards(); return; }
+  card?.replaceWith(renderCard(t));
   syncViews(t);
 }
 
@@ -698,7 +706,7 @@ function renderCards() {
   renderNewBar();
   const box = document.querySelector("#textures");
   box.innerHTML = "";
-  for (const t of TEXTURES) if (!t.isNew) box.append(renderCard(t)); // a new texture gets its card when pushed
+  for (const t of TEXTURES) if (hasCard(t)) box.append(renderCard(t));
   for (const t of TEXTURES) syncViews(t); // the editor's param box too
 }
 
