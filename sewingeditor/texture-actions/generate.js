@@ -6,10 +6,11 @@
  * the printer is already homed and heated by the main controller. In
  * their place:
  *   prelude  G90 / M83 (texture functions are absolute XY, relative E)
- *            and M221 at the chosen flow %
+ *            and M221 at the filament profile's flowPercent
  *   body     the texture function's own output, with zOffset added to
  *            every Z word (the library assumes Z0 is the print surface)
- *   ending   retract if still primed, lift by liftMm, M221 back to 100
+ *   ending   em.finish() (retracted by exactly the profile's retractMm),
+ *            lift by liftMm, M221 back to 100
  *
  * Pure: no DOM, `TF` is the imported texture_functions.js module.
  */
@@ -127,13 +128,15 @@ export function buildPath(TF, placement) {
  * @param texture   a TEXTURES entry from spec.js
  * @param values    {option: value} -- the full option set to pass
  * @param placement {shape, x0, y0, x1, y1, ...} -- the path the stroke walks (buildPath)
- * @param settings  {flowPercent, zOffset, liftMm, startZ}
+ * @param settings  {filament, zOffset, liftMm, startZ} -- `filament` is a
+ *                  profile (TF.FILAMENT's keys; missing ones use its values)
  * @returns {lines, bodyLines, filamentMm}
  */
 export function buildGcode(TF, texture, values, placement, settings) {
-  const { flowPercent = 100, zOffset = 0, liftMm = 2, startZ = 10 } = settings;
+  const { filament = {}, zOffset = 0, liftMm = 2, startZ = 10 } = settings;
 
-  const em = new TF.Emitter();
+  const em = new TF.Emitter(filament);
+  const flowPercent = em.fil.flowPercent;
   // Hop/travel heights are computed from em.z, so seed it with a
   // conservative "nozzle is at least this high" value -- the first goto()
   // then travels at startZ + Z_HOP before descending.
@@ -142,7 +145,7 @@ export function buildGcode(TF, texture, values, placement, settings) {
   em.newPattern();
 
   TF.BRUSHES[texture.fn](em, buildPath(TF, placement), values);
-  em.retract();
+  em.finish();
 
   const bodyLines = em.lines.map((l) => offsetZ(l, zOffset));
   const lines = [

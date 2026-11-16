@@ -28,18 +28,22 @@
  * loadLocalData() persist every input WITH an id, and would fight this
  * module's own storage (localStorage "textureActions", which keeps only
  * values that differ from the source default).
+ *
+ * The filament (retract, flow, max flow rate, ...) is a profile picked and
+ * edited in its own panel, stored like a slicer's filament presets
+ * (materials.js); every print is built with the profile on screen.
  */
 import * as TF from "./texture_functions.js";
 import { PARAMS } from "./spec.js?v=2";
 import { parseAllDefaults, patchAllDefaults, optionsText, listTextures } from "./signature.js?v=4";
 import { runInWorker } from "./runner.js";
-import { initEditor } from "./editor.js?v=9";
+import { initEditor } from "./editor.js?v=10";
+import * as MAT from "./materials.js";
 
 const SOURCE_URL = new URL("./texture_functions.js", import.meta.url);
 const SOURCE_NAME = "texture_functions.js";
 const STORE_KEY = "textureActions";
 const SETTINGS = [
-  { key: "flowPercent", label: "flow", unit: "%", value: 100, step: 5, min: 1 },
   { key: "zOffset", label: "Z offset", unit: "mm", value: 0, step: 0.1 },
   { key: "liftMm", label: "lift after", unit: "mm", value: 2, step: 0.5, min: 0 },
 ];
@@ -54,6 +58,9 @@ let dirHandle = null;  // picked texture-actions folder (File System Access), re
 let linked = false;    // `source` was read from that folder, not from the served copy
 let store = loadStore();
 let editor = null;     // initEditor() result
+// localStorage, or a stand-in where the browser blocks it
+const storage = (() => { try { return localStorage; } catch { return { getItem: () => null, setItem() {} }; } })();
+let materials = MAT.loadState(storage); // filament profiles (materials.js)
 
 // ---------------------------------------------------------------- storage --
 function loadStore() {
@@ -415,6 +422,7 @@ function readSettings() {
   }
   const startZ = Number(document.querySelector("#start-z")?.value ?? 10);
   s.startZ = Number.isFinite(startZ) ? startZ : 10;
+  s.filament = filamentValues();
   return s;
 }
 
@@ -684,6 +692,152 @@ function download(text, filename) {
   URL.revokeObjectURL(link.href);
 }
 
+// --------------------------------------------------------------- filament --
+// The filament profile panel (materials.js): pick a profile, edit its
+// values (an unsaved draft until "save"), save as a new one, delete,
+// export / import a .json file. Prints use the values on screen.
+const FIELD_LABELS = {
+  diameter: "diameter", nozzleTemp: "nozzle temp", bedTemp: "bed temp", flowPercent: "flow",
+  retractMm: "retract", longRetractMm: "dot retract", retractSpeed: "retract speed",
+  linePrimeMm: "extra prime", maxVolRate: "max flow rate",
+};
+const FIELD_HINTS = {
+  nozzleTemp: "recorded with the profile; heat the printer with the main controls",
+  bedTemp: "recorded with the profile; heat the printer with the main controls",
+  flowPercent: "M221 sent with every print",
+  retractMm: "pulled back after each mark, pushed back by the next prime",
+  longRetractMm: "the blob / directional / hairy dots' retract, against stringing",
+  retractSpeed: "E speed of every retract and prime (F)",
+  linePrimeMm: "added to the first prime of each card",
+  maxVolRate: "the extruder's limit -- recorded, not enforced yet",
+};
+
+function saveMaterials() {
+  MAT.saveState(storage, materials);
+}
+
+function downloadFile(text, filename, type) {
+  const link = el("a", { href: URL.createObjectURL(new Blob([text], { type })), download: filename });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(link.href);
+}
+
+function renderFilament() {
+  const box = document.querySelector("#texture-filament");
+  if (!box) return;
+  const profile = MAT.selectedProfile(TF, materials);
+  const values = MAT.activeValues(TF, materials);
+  const modified = MAT.modifiedKeys(TF, materials);
+
+  const pick = el("select", {}, MAT.allProfiles(TF, materials).map((p) =>
+    el("option", { value: p.id, textContent: p.name, selected: p.id === profile.id })));
+  pick.addEventListener("change", () => {
+    if (modified.length && !confirm(`Discard the unsaved changes to "${profile.name}"?`)) {
+      pick.value = profile.id;
+      return;
+    }
+    materials.selected = pick.value;
+    materials.draft = null;
+    saveMaterials();
+    renderFilament();
+  });
+
+  const button = (text, title, onClick, disabled = false) => {
+    const b = el("button", { textContent: text, title, disabled });
+    b.addEventListener("click", () => {
+      try { onClick(); } catch (e) { message(`filament: ${e.message}`, "red"); }
+    });
+    return b;
+  };
+
+  const save = button("save", profile.builtin ? "the built-in profile can't be changed -- use save as" : "write the changes into this profile", () => {
+    const p = materials.profiles.find((q) => q.id === profile.id);
+    p.values = MAT.checkValues(values, TF.FILAMENT_FIELDS);
+    materials.draft = null;
+    saveMaterials();
+    renderFilament();
+    message(`filament: saved "${p.name}"`, "green");
+  }, profile.builtin || !modified.length);
+
+  const saveAs = button("save as…", "a new profile with the values on screen", () => {
+    const name = prompt("Name for the new filament profile:", profile.builtin ? TF.FILAMENT.name : profile.name);
+    if (name == null) return;
+    const p = MAT.addProfile(TF, materials, name, values);
+    materials.selected = p.id;
+    materials.draft = null;
+    saveMaterials();
+    renderFilament();
+    message(`filament: added "${p.name}"`, "green");
+  });
+
+  const del = button("delete", "remove this profile from this browser", () => {
+    if (!confirm(`Delete the filament profile "${profile.name}"?`)) return;
+    materials.profiles = materials.profiles.filter((q) => q.id !== profile.id);
+    materials.selected = MAT.BUILTIN_ID;
+    materials.draft = null;
+    saveMaterials();
+    renderFilament();
+  }, profile.builtin);
+
+  const exp = button("export", "save the values on screen as a .json profile file", () => {
+    const name = profile.name.replace(/ \(built-in\)$/, "");
+    const text = MAT.toFile({ name, values: MAT.checkValues(values, TF.FILAMENT_FIELDS) }, TF.FILAMENT_FIELDS);
+    downloadFile(text, `${name.replace(/[^\w.-]+/g, "_")}.filament.json`, "application/json");
+  });
+
+  const file = el("input", { type: "file", accept: ".json,application/json", hidden: true });
+  file.addEventListener("change", async () => {
+    const f = file.files?.[0];
+    if (!f) return;
+    try {
+      const { name, values: v } = MAT.fromFile(await f.text(), TF.FILAMENT_FIELDS);
+      const p = MAT.addProfile(TF, materials, name, v);
+      materials.selected = p.id;
+      materials.draft = null;
+      saveMaterials();
+      renderFilament();
+      message(`filament: imported "${p.name}"`, "green");
+    } catch (e) {
+      message(`filament: ${f.name}: ${e.message}`, "red");
+    }
+  });
+  const imp = button("import", "add a profile from a .json file", () => file.click());
+
+  const fields = [];
+  for (const [key, unit] of TF.FILAMENT_FIELDS) {
+    const input = el("input", { type: "number", step: "any", value: values[key], title: FIELD_HINTS[key] ?? "" });
+    input.dataset.filament = key;
+    if (modified.includes(key)) input.classList.add("texture-modified");
+    input.addEventListener("change", () => {
+      const n = Number(input.value);
+      if (input.value.trim() === "" || !Number.isFinite(n)) {
+        message(`filament: ${FIELD_LABELS[key] ?? key} is not a number`, "red");
+        return;
+      }
+      materials.draft = { id: profile.id, values: { ...(materials.draft?.id === profile.id ? materials.draft.values : {}), [key]: n } };
+      saveMaterials();
+      renderFilament();
+    });
+    fields.push(el("div", { class: "ui-item", title: FIELD_HINTS[key] ?? "" }, [
+      el("span", { class: "label", textContent: `${FIELD_LABELS[key] ?? key} (${unit}) ` }), input,
+    ]));
+  }
+
+  box.replaceChildren(
+    el("div", { class: "ui-item" }, [el("span", { class: "label", textContent: "filament " }), pick]),
+    ...(modified.length ? [el("div", { class: "ui-item" }, el("span", { class: "label texture-modified", textContent: "modified" }))] : []),
+    el("div", { class: "ui-item" }, [save, " ", saveAs, " ", del, " ", exp, " ", imp, file]),
+    el("div", { class: "ui-group" }, fields),
+  );
+}
+
+/** The values prints use; throws if one is bad. */
+function filamentValues() {
+  return MAT.checkValues(MAT.activeValues(TF, materials), TF.FILAMENT_FIELDS);
+}
+
 // ------------------------------------------------------------------- init --
 function renderSettings() {
   const box = document.querySelector("#texture-settings");
@@ -758,6 +912,7 @@ async function init() {
   syncTextures(); // again, now with the editor's unpushed new textures
   readDefaults(); // again, now with any saved drafts swapped in
   renderLinkBar();
+  renderFilament();
   renderSettings();
   renderCards();
 }

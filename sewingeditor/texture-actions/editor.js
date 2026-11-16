@@ -361,7 +361,7 @@ export function initEditor(ctx) {
     }).filter(Boolean);
     paramsHost.replaceChildren(ctx.renderParams(t));
     refs.note.textContent = `Save and run use the parameters on the right (the same ones as the ${t.name} card), ` +
-      `plus the flow / Z offset / lift settings. Saving re-reads the parameters from the saved code, on the card too. ` +
+      `plus the filament profile and the Z offset / lift settings. Saving re-reads the parameters from the saved code, on the card too. ` +
       (t.isNew
         ? `Push adds these functions and a BRUSHES entry for ${t.name} to texture_functions.js; its card appears then. `
         : `Push writes only the functions in the editor; the rest of the file is untouched. `) +

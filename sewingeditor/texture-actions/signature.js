@@ -484,15 +484,11 @@ const capital = (s) => s[0].toUpperCase() + s.slice(1);
 export function newTextureText(src, name, from = null) {
   const S = `stroke${capital(name)}`, B = `brush${capital(name)}`;
   if (!from) {
-    return `/** STROKE: ${name} -- a ridge along the line, nLayers high. Per layer:
- * travel to the start, prime, one ${B}() per pair of points, retract. */
+    return `/** STROKE: ${name} -- a ridge along the line, nLayers high. One travel
+ * and prime, the layers back and forth (printLayers), one ${B}() per pair
+ * of points, one retract. */
 export function ${S}(em, pts, { nLayers = 1, ...brush } = {}) {
-  for (let layer = 1; layer <= nLayers; layer++) {
-    em.goto(pts[0][0], pts[0][1], LAYER_HEIGHT * layer);
-    em.unretract();
-    for (let i = 1; i < pts.length; i++) ${B}(em, pts[i - 1], pts[i], brush);
-    em.retract();
-  }
+  printLayers(em, pts, nLayers, (a, b) => ${B}(em, a, b, brush));
   return pts;
 }
 

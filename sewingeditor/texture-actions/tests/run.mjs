@@ -34,6 +34,7 @@ import {
   listTextures, addTexture, newTextureText,
 } from "../signature.js";
 import { editStatus } from "../edit-state.js";
+import * as MAT from "../materials.js";
 import { buildGcode, findOutOfBounds, buildPath, compileFormula, parseCorners } from "../generate.js";
 
 const here = (p) => fileURLToPath(new URL(p, import.meta.url));
@@ -49,7 +50,7 @@ const check = (cond, msg) => {
 };
 
 const PLACEMENT = { x0: 80, y0: 100, x1: 110, y1: 100 };
-const SETTINGS = { flowPercent: 100, zOffset: 0, liftMm: 2, startZ: 10 };
+const SETTINGS = { filament: {}, zOffset: 0, liftMm: 2, startZ: 10 };
 
 function fullValues(t) {
   const out = {};
@@ -177,19 +178,19 @@ for (const t of TEXTURES) {
   const values = fullValues(t);
   const { bodyLines } = buildGcode(TF, t, values, PLACEMENT, SETTINGS);
 
-  const em = new TF.Emitter();
+  const em = new TF.Emitter(SETTINGS.filament);
   em.z = SETTINGS.startZ; em.retracted = true; em.newPattern();
   const direct = {};
   const { x0, y0, x1, y1 } = PLACEMENT;
   TF.BRUSHES[t.fn](em, TF.polylineToPts([[x0, y0], [x1, y1]], 0.1), direct);
-  em.retract();
+  em.finish();
   check(bodyLines.join("\n") === em.lines.join("\n"), `${t.name}: panel output differs from direct call`);
 }
 
 console.log("4. valid G-code");
 for (const t of TEXTURES) {
   const { lines } = buildGcode(TF, t, fullValues(t), PLACEMENT,
-    { ...SETTINGS, flowPercent: 180, zOffset: 1.2 });
+    { ...SETTINGS, filament: { flowPercent: 180 }, zOffset: 1.2 });
   const bad = lines.find((l) => !gcodeCheck.includes(l.split(";")[0].trim().split(" ")[0]));
   check(!bad, `${t.name}: "${bad}" fails checkGcode`);
   const oob = findOutOfBounds(lines, TF.BED_X, TF.BED_Y);
@@ -281,6 +282,43 @@ console.log("6. edit states");
   check(s.step === 4 && s.label === "pushed" && can(s) === "", `pushed: ${s.label} [${can(s)}]`);
   s = st(E2, { pushedText: E, pushedAt: 1 }, E);
   check(s.dirty && s.step === 1 && s.can.save, `edit after push: ${s.label} [${can(s)}]`);
+}
+
+console.log("7. filament profiles and the Emitter");
+{
+  const mem = () => { const m = new Map(); return { getItem: (k) => m.get(k) ?? null, setItem: (k, v) => m.set(k, v) }; };
+  const store = mem();
+  const st = MAT.loadState(store);
+  check(MAT.selectedProfile(TF, st).builtin && MAT.activeValues(TF, st).retractMm === TF.FILAMENT.retractMm, "built-in profile is not the default");
+  check(MAT.activeValues(TF, st).flowPercent === 100, "default flow is not 100%");
+  const p = MAT.addProfile(TF, st, "PETG test", { ...TF.FILAMENT, retractMm: 0.8, longRetractMm: 2 });
+  st.selected = p.id; st.draft = { id: p.id, values: { maxVolRate: 6 } };
+  MAT.saveState(store, st);
+  const st2 = MAT.loadState(store);
+  check(MAT.activeValues(TF, st2).retractMm === 0.8 && MAT.activeValues(TF, st2).maxVolRate === 6, "profile / draft did not survive storage");
+  check(MAT.modifiedKeys(TF, st2).join() === "maxVolRate", "draft key not reported as modified");
+  check(MAT.addProfile(TF, st2, "PETG test", TF.FILAMENT).name === "PETG test (2)", "duplicate profile name not made unique");
+  const back = MAT.fromFile(MAT.toFile(p, TF.FILAMENT_FIELDS), TF.FILAMENT_FIELDS);
+  check(back.name === "PETG test" && back.values.retractMm === 0.8, "export / import round trip");
+  check(throws(() => MAT.fromFile("{}", TF.FILAMENT_FIELDS)) && throws(() => MAT.checkValues({ ...TF.FILAMENT, diameter: 0 }, TF.FILAMENT_FIELDS)), "bad profile accepted");
+
+  // the profile reaches the G-code: retract / prime amounts, flow, diameter
+  const t = TEXTURES.find((x) => x.name === "blobDotted");
+  const fil = { ...TF.FILAMENT, retractMm: 0.8, longRetractMm: 2.5, flowPercent: 95, diameter: 2.85 };
+  const { lines } = buildGcode(TF, t, fullValues(t), PLACEMENT, { ...SETTINGS, filament: fil });
+  check(lines.includes("M221 S95"), "profile flow not sent");
+  check(lines.some((l) => l.startsWith("G1 E-2.5000")) && !lines.some((l) => l.startsWith("G1 E-4.0000")), "dot retract not from the profile");
+  let debt = 0, starved = false;
+  for (const l of lines) {
+    const e = /^G1 E(-?[\d.]+) F/.exec(l);
+    if (e) { debt -= Number(e[1]); continue; }
+    if (/ E\d/.test(l) && debt > 1e-6) starved = true;
+  }
+  check(!starved, "extruded while retracted");
+  check(Math.abs(debt + fil.linePrimeMm) < 1e-6, `card does not end retracted by retractMm (${debt})`);
+  const thin = buildGcode(TF, t, fullValues(t), PLACEMENT, { ...SETTINGS, filament: { ...fil, diameter: 1.75 } });
+  const ratio = (thin.filamentMm) / (buildGcode(TF, t, fullValues(t), PLACEMENT, { ...SETTINGS, filament: fil }).filamentMm);
+  check(ratio > 1.5, `2.85 mm filament should need less E than 1.75 mm (ratio ${ratio.toFixed(2)})`);
 }
 
 console.log(failures ? `\n${failures} failure(s)` : "\nall checks passed");

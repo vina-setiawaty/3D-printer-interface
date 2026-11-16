@@ -41,7 +41,6 @@ export const PARAMS = {
   hairSpeed: { step: 100, min: 1, unit: "F" },
   clearanceSpeed: { step: 50, min: 1, unit: "F" },
   overtravelSpeed: { step: 50, min: 1, unit: "F" },
-  retractSpeed: { step: 50, min: 1, unit: "F" },
   thinSpeed: { step: 10, min: 1, unit: "F" },
   fatSpeed: { step: 10, min: 1, unit: "F" },
 
@@ -54,8 +53,7 @@ export const PARAMS = {
   peakDwellMs: { step: 50, min: 0, unit: "ms" },
   primedwellS: { step: 0.1, min: 0, unit: "s" },
 
-  // retraction / anti-stringing
-  retractMm: { step: 0.1, min: 0, unit: "mm E" },
+  // anti-stringing (retract amounts and speed are in the filament profile)
   orbitRadius: { step: 0.1, min: 0, unit: "mm" },
   orbitPts: { step: 1, min: 3, unit: "pts" },
   orbitLoops: { step: 1, min: 0, unit: "loops" },
@@ -85,7 +83,6 @@ export const PARAMS = {
   fatWidth: { step: 0.05, min: 0.1, unit: "mm" },
   fatHeight: { step: 0.05, min: 0.05, unit: "mm" },
   flowMult: { step: 0.05, min: 0, unit: "x" },
-  eprime: { step: 0.1, min: 0, unit: "mm E" },
 
   // variable thickness
   hMin: { step: 0.02, min: 0.05, unit: "mm" },
