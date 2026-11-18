@@ -693,8 +693,9 @@ function download(text, filename) {
 }
 
 // --------------------------------------------------------------- filament --
-// The filament profile panel (materials.js): pick a profile, edit its
-// values (an unsaved draft until "save"), save as a new one, delete,
+// The filament profile panel (materials.js): pick a profile, add a new one
+// from the built-in values, edit its values (an unsaved draft until
+// "save"), save as a new one, delete,
 // export / import a .json file. Prints use the values on screen.
 const FIELD_LABELS = {
   diameter: "diameter", nozzleTemp: "nozzle temp", bedTemp: "bed temp", flowPercent: "flow",
@@ -772,6 +773,18 @@ function renderFilament() {
     message(`filament: added "${p.name}"`, "green");
   });
 
+  const add = button("add…", "a new profile starting from the built-in values", () => {
+    if (modified.length && !confirm(`Discard the unsaved changes to "${profile.name}"?`)) return;
+    const name = prompt("Name for the new filament profile:", "new filament");
+    if (name == null) return;
+    const p = MAT.addProfile(TF, materials, name, MAT.builtinProfile(TF).values);
+    materials.selected = p.id;
+    materials.draft = null;
+    saveMaterials();
+    renderFilament();
+    message(`filament: added "${p.name}" -- edit its values, then save`, "green");
+  });
+
   const del = button("delete", "remove this profile from this browser", () => {
     if (!confirm(`Delete the filament profile "${profile.name}"?`)) return;
     materials.profiles = materials.profiles.filter((q) => q.id !== profile.id);
@@ -828,7 +841,7 @@ function renderFilament() {
   box.replaceChildren(
     el("div", { class: "ui-item" }, [el("span", { class: "label", textContent: "filament " }), pick]),
     ...(modified.length ? [el("div", { class: "ui-item" }, el("span", { class: "label texture-modified", textContent: "modified" }))] : []),
-    el("div", { class: "ui-item" }, [save, " ", saveAs, " ", del, " ", exp, " ", imp, file]),
+    el("div", { class: "ui-item" }, [add, " ", save, " ", saveAs, " ", del, " ", exp, " ", imp, file]),
     el("div", { class: "ui-group" }, fields),
   );
 }

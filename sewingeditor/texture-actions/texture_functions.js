@@ -49,12 +49,15 @@
  *                   speed; keep strokeVariableThickness's volRate under it).
  *                   Conservative
  *                   placeholder pending a confirming print, for the Ender 3
- *                   V2 / Sprite direct-drive, 0.4mm nozzle, TPU -- well under
+ *                   V2 / Sprite direct-drive, 0.4mm nozzle -- well under
  *                   Takahashi & Miyashita's ~11mm3/s (UIST'16 Adjunct), which
- *                   was measured on a different printer and not TPU.
+ *                   was measured on a different printer.
+ * The printer is loaded with PLA, so the built-in profile is named PLA. Its
+ * values are the ones first set for TPU, kept unchanged (2026-11-18) until
+ * PLA prints confirm or replace them.
  */
 export const FILAMENT = {
-  name: "TPU",
+  name: "PLA",
   diameter: 1.75,
   nozzleTemp: 220,
   bedTemp: 50,
@@ -1457,6 +1460,52 @@ function brushPetalDot(em, cx, cy, {
   em.x = ex; em.y = ey; em.z = 0;
 }
 
+/** STROKE: teardrops (brushTeardropPull) every `gap` mm, each tail pulled
+ * along the line's direction plus `azimuthDeg` (0 = tail points the way
+ * the line goes). */
+export function strokeTeardropPull(em, pts, { gap = 6.0, azimuthDeg = 0, ...brush } = {}) {
+  return walkArcLengthStops(pts, gap, 0.1, { withTangent: true }, (cx, cy, { headingDeg }) =>
+    brushTeardropPull(em, cx, cy, { ...brush, azimuthDeg: headingDeg + azimuthDeg }));
+}
+
+/** BRUSH: one teardrop at (cx, cy) -- a blob deposited in place, then
+ * shaped by the nozzle alone (read off a sketched stamp, 2026-11-18):
+ *  1. BLOB  -- travel there at `startZ`, prime, and pool `blobVolume` mm³
+ *              in place at `extrudeSpeed` (F of the filament, mm/min);
+ *  2. SHAPE -- with no new extrusion, drag `dragMm` toward `azimuthDeg`
+ *              (CCW from +X) while going to `dragZ`, low enough to push the
+ *              melt into a tail; still primed, so the blob's leftover
+ *              pressure feeds it;
+ *  3. CUT   -- retract (the profile's retractMm), then a dry lift of
+ *              `riseZ` mm at `riseElevationDeg` above the bed, drawing the
+ *              tail's end up into a point that snaps off.
+ * `dragZ` decides the shape: below the blob's height (~1.4 mm for 6 mm³)
+ * the nozzle pushes melt into the tail; above it, it only skims the top.
+ * Defaults are read off a PLA print; TPU strings further on the lift. */
+function brushTeardropPull(em, cx, cy, {
+  startZ = 0.5, blobVolume = 6.0, extrudeSpeed = 150,
+  dragMm = 2.5, dragZ = 0.3, dragSpeed = 60, azimuthDeg = 30,
+  riseZ = 7.0, riseElevationDeg = 63, riseSpeed = 180,
+} = {}) {
+  if (!(riseElevationDeg > 0 && riseElevationDeg <= 90)) {
+    throw new RangeError(`brushTeardropPull: riseElevationDeg must be in (0, 90] (got ${riseElevationDeg})`);
+  }
+  const a = (azimuthDeg * Math.PI) / 180, ux = Math.cos(a), uy = Math.sin(a);
+  em.goto(cx, cy, startZ);
+  em.unretract();
+  em.printMove(cx, cy, blobVolume / FIL_AREA, extrudeSpeed);
+
+  const tx = cx + ux * dragMm, ty = cy + uy * dragMm;
+  em.a(`G1 X${tx.toFixed(3)} Y${ty.toFixed(3)} Z${dragZ.toFixed(3)} F${Math.round(dragSpeed)}`);
+  em.x = tx; em.y = ty; em.z = dragZ;
+
+  em.retract();
+  const run = riseZ / Math.tan((riseElevationDeg * Math.PI) / 180);
+  const ex = tx + ux * run, ey = ty + uy * run, ez = dragZ + riseZ;
+  em.a(`G1 X${ex.toFixed(3)} Y${ey.toFixed(3)} Z${ez.toFixed(3)} F${Math.round(riseSpeed)}`);
+  em.x = ex; em.y = ey; em.z = ez;
+}
+
 /** Texture name -> its stroke, which the cards and the compiler call as
  * stroke(em, pts, options). Keys are the texture names the scene model,
  * the option table and the prompt docs use. */
@@ -1467,4 +1516,5 @@ export const BRUSHES = {
   variableThickness: strokeVariableThickness,
   petalDot: strokePetalDotted,
   suspendHair: strokeSuspendHair,
+  teardropPull: strokeTeardropPull,
 };

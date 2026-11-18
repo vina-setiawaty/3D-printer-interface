@@ -104,4 +104,13 @@ export const PARAMS = {
   startInset: { step: 0.1, min: 0, unit: "mm" },
   stringSpeed: { step: 500, min: 1, unit: "F" },
   cutHopMm: { step: 0.5, min: 0, unit: "mm" },
+
+  // teardrop pull
+  startZ: { step: 0.05, min: 0, unit: "mm" },
+  blobVolume: { step: 0.5, min: 0, unit: "mm³" },
+  dragMm: { step: 0.5, min: 0, unit: "mm" },
+  dragZ: { step: 0.05, min: 0, unit: "mm" },
+  riseZ: { step: 0.5, min: 0, unit: "mm" },
+  riseElevationDeg: { step: 5, min: 1, max: 90, unit: "deg" },
+  riseSpeed: { step: 10, min: 1, unit: "F" },
 };
