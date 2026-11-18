@@ -105,12 +105,15 @@ export const PARAMS = {
   stringSpeed: { step: 500, min: 1, unit: "F" },
   cutHopMm: { step: 0.5, min: 0, unit: "mm" },
 
-  // teardrop pull
-  startZ: { step: 0.05, min: 0, unit: "mm" },
-  blobVolume: { step: 0.5, min: 0, unit: "mm³" },
+  // petal up / teardrop pull
   dragMm: { step: 0.5, min: 0, unit: "mm" },
-  dragZ: { step: 0.05, min: 0, unit: "mm" },
-  riseZ: { step: 0.5, min: 0, unit: "mm" },
-  riseElevationDeg: { step: 5, min: 1, max: 90, unit: "deg" },
-  riseSpeed: { step: 10, min: 1, unit: "F" },
+  hopMm: { step: 0.1, min: 0, unit: "mm" },
+  backMm: { step: 0.5, min: 0, unit: "mm" },
+  travelSpeed: { step: 50, min: 1, unit: "F" },
+  swipeSpeed: { step: 10, min: 1, unit: "F" },
+  swipeZ: { step: 0.05, min: 0, unit: "mm" },
+  arcRun: { step: 0.5, min: 0, unit: "mm" },
+  arcRise: { step: 0.5, min: 0, unit: "mm" },
+  arcSteps: { step: 1, min: 1, unit: "steps" },
+  leanMm: { step: 0.5, unit: "mm" },
 };

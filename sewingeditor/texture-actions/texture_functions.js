@@ -1460,50 +1460,139 @@ function brushPetalDot(em, cx, cy, {
   em.x = ex; em.y = ey; em.z = 0;
 }
 
-/** STROKE: teardrops (brushTeardropPull) every `gap` mm, each tail pulled
- * along the line's direction plus `azimuthDeg` (0 = tail points the way
- * the line goes). */
+/** STROKE: petal-ups (brushPetalUp) every `gap` mm, each swiped up along
+ * the line's direction plus `azimuthDeg` (0 = the way the line goes). */
+export function strokePetalUp(em, pts, { gap = 6.0, azimuthDeg = 0, ...brush } = {}) {
+  return walkArcLengthStops(pts, gap, 0.1, { withTangent: true }, (cx, cy, { headingDeg }) =>
+    brushPetalUp(em, cx, cy, { ...brush, azimuthDeg: headingDeg + azimuthDeg }));
+}
+
+/** BRUSH: one petal-up at (cx, cy) -- a blob, then a dry swipe that comes
+ * in low from behind and arcs up out of it (read off a sketched stamp,
+ * 2026-11-18). `azimuthDeg` is CCW from +X.
+ *  1. BLOB  -- travel there at `baseZ`, prime, and extrude a hemisphere's
+ *              worth of `diameter` (x `extrusionMultiplier`) in ONE move
+ *              rising straight up to baseZ + diameter, F `extrudeSpeed`;
+ *  2. retract (the profile's retractMm);
+ *  3. BACK  -- dry: hop `hopMm` above the blob, go `backMm` behind it
+ *              (-azimuth), drop to `swipeZ`;
+ *  4. SWIPE -- along the bed to the blob's center, then an arc
+ *              (z = swipeZ + arcRise * t², `arcSteps` segments) ending
+ *              `arcRun` mm forward and `arcRise` mm up, F `swipeSpeed`. */
+function brushPetalUp(em, cx, cy, {
+  diameter = 2.8, baseZ = 0.2, extrudeSpeed = 60, extrusionMultiplier = 1.0,
+  azimuthDeg = 30,
+  hopMm = 0.5, backMm = 3.0, swipeZ = 0.4, travelSpeed = 600,
+  arcRun = 1, arcRise = 7.0, arcSteps = 12, swipeSpeed = 180,
+} = {}) {
+  const a = (azimuthDeg * Math.PI) / 180, ux = Math.cos(a), uy = Math.sin(a);
+  // s = distance along the azimuth from the blob's center (negative = behind it)
+  const go = (s, z, f) => {
+    const x = cx + ux * s, y = cy + uy * s;
+    em.a(`G1 X${x.toFixed(3)} Y${y.toFixed(3)} Z${z.toFixed(3)} F${Math.round(f)}`);
+    em.x = x; em.y = y; em.z = z;
+  };
+
+  // 1. blob: extrude while rising straight up
+  em.goto(cx, cy, baseZ);
+  em.unretract();
+  const r = diameter / 2;
+  const topZ = baseZ + diameter;
+  em.extrude(((2 / 3) * Math.PI * r ** 3 / FIL_AREA) * extrusionMultiplier, extrudeSpeed, { z: topZ });
+
+  // 2. retract
+  em.retract();
+
+  // 3. dry move to backMm behind the blob (-azimuth): hop, back, down
+  go(0, topZ + hopMm, travelSpeed);
+  go(-backMm, topZ + hopMm, travelSpeed);
+  go(-backMm, swipeZ, travelSpeed);
+
+  // 4. swipe: along the bed through the blob, then arc up
+  //    (z = swipeZ + arcRise * t², so it leaves the bed flat and ends steep)
+  go(0, swipeZ, swipeSpeed);
+  const n = Math.max(1, Math.round(arcSteps));
+  for (let i = 1; i <= n; i++) {
+    const t = i / n;
+    go(arcRun * t, swipeZ + arcRise * t * t, swipeSpeed);
+  }
+}
+
+/** STROKE: teardrops (brushTeardropPull) every `gap` mm, each swiped
+ * along the line's direction plus `azimuthDeg` (0 = the way the line goes). */
 export function strokeTeardropPull(em, pts, { gap = 6.0, azimuthDeg = 0, ...brush } = {}) {
   return walkArcLengthStops(pts, gap, 0.1, { withTangent: true }, (cx, cy, { headingDeg }) =>
     brushTeardropPull(em, cx, cy, { ...brush, azimuthDeg: headingDeg + azimuthDeg }));
 }
 
-/** BRUSH: one teardrop at (cx, cy) -- a blob deposited in place, then
- * shaped by the nozzle alone (read off a sketched stamp, 2026-11-18):
- *  1. BLOB  -- travel there at `startZ`, prime, and pool `blobVolume` mm³
- *              in place at `extrudeSpeed` (F of the filament, mm/min);
- *  2. SHAPE -- with no new extrusion, drag `dragMm` toward `azimuthDeg`
- *              (CCW from +X) while going to `dragZ`, low enough to push the
- *              melt into a tail; still primed, so the blob's leftover
- *              pressure feeds it;
- *  3. CUT   -- retract (the profile's retractMm), then a dry lift of
- *              `riseZ` mm at `riseElevationDeg` above the bed, drawing the
- *              tail's end up into a point that snaps off.
- * `dragZ` decides the shape: below the blob's height (~1.4 mm for 6 mm³)
- * the nozzle pushes melt into the tail; above it, it only skims the top.
- * Defaults are read off a PLA print; TPU strings further on the lift. */
+/** BRUSH: one teardrop at (cx, cy) -- the blob itself is laid on a
+ * diagonal, so no drag or swipe is needed (2026-11-18). `azimuthDeg` is
+ * CCW from +X.
+ *  1. BLOB  -- travel there at `baseZ`, prime, and extrude a hemisphere's
+ *              worth of `diameter` (x `extrusionMultiplier`) in ONE move
+ *              that rises to baseZ + diameter while travelling `leanMm`
+ *              sideways toward `azimuthDeg`, F `extrudeSpeed` (applied to
+ *              the diagonal's length);
+ *  2. retract (the profile's retractMm) right there; the next stamp's
+ *     goto() lifts to travel height before moving on. */
+/** BRUSH: one teardrop at (cx, cy) -- a ball of melt, then one straight dry
+ * swipe that barely brushes it. `azimuthDeg` is CCW from +X.
+ *  1. BLOB  -- travel there at `baseZ`, prime, and extrude `diameter`'s
+ *              hemisphere volume (x `extrusionMultiplier`) in ONE move
+ *              rising straight up to baseZ + diameter, F `extrudeSpeed`;
+ *  2. retract (the profile's retractMm);
+ *  3. BACK  -- dry: hop `hopMm` above the ball, go behind it (-azimuth) to
+ *              where the swipe line meets Z 0, drop to Z 0;
+ *  4. SWIPE -- one straight move at `swipeAngleDeg`, tangent to the ball's
+ *              side profile (a circle of radius r centered at baseZ + r)
+ *              pushed `brushMm` into it -- i.e. tangent to radius
+ *              r - brushMm -- from Z 0 up to Z `riseZ` (never ending before
+ *              it has passed the ball's center), F `swipeSpeed`. */
 function brushTeardropPull(em, cx, cy, {
-  startZ = 0.5, blobVolume = 6.0, extrudeSpeed = 150,
-  dragMm = 2.5, dragZ = 0.3, dragSpeed = 60, azimuthDeg = 30,
-  riseZ = 7.0, riseElevationDeg = 63, riseSpeed = 180,
+  diameter = 2.8, baseZ = 0.2, extrudeSpeed = 60, extrusionMultiplier = 1.0,
+  azimuthDeg = 30,
+  swipeAngleDeg = 30, riseZ = 5.0,
+  hopMm = 0.5, travelSpeed = 600, swipeSpeed = 180,
 } = {}) {
-  if (!(riseElevationDeg > 0 && riseElevationDeg <= 90)) {
-    throw new RangeError(`brushTeardropPull: riseElevationDeg must be in (0, 90] (got ${riseElevationDeg})`);
+  if (!(swipeAngleDeg > 0 && swipeAngleDeg < 90)) {
+    throw new RangeError(`brushTeardropPull: swipeAngleDeg must be in (0, 90) (got ${swipeAngleDeg})`);
   }
   const a = (azimuthDeg * Math.PI) / 180, ux = Math.cos(a), uy = Math.sin(a);
-  em.goto(cx, cy, startZ);
+  // s = distance along the azimuth from the blob's center (negative = behind it)
+  const go = (s, z, f) => {
+    const x = cx + ux * s, y = cy + uy * s;
+    em.a(`G1 X${x.toFixed(3)} Y${y.toFixed(3)} Z${z.toFixed(3)} F${Math.round(f)}`);
+    em.x = x; em.y = y; em.z = z;
+  };
+
+  // 1. blob: extrude while rising straight up the diameter
+  const r = diameter / 2;
+  const topZ = baseZ + r;
+  em.goto(cx, cy, baseZ);
   em.unretract();
-  em.printMove(cx, cy, blobVolume / FIL_AREA, extrudeSpeed);
+  em.extrude(((2 / 3) * Math.PI * r ** 3 / FIL_AREA) * extrusionMultiplier, extrudeSpeed, { z: topZ });
 
-  const tx = cx + ux * dragMm, ty = cy + uy * dragMm;
-  em.a(`G1 X${tx.toFixed(3)} Y${ty.toFixed(3)} Z${dragZ.toFixed(3)} F${Math.round(dragSpeed)}`);
-  em.x = tx; em.y = ty; em.z = dragZ;
-
+  // 2. retract
   em.retract();
-  const run = riseZ / Math.tan((riseElevationDeg * Math.PI) / 180);
-  const ex = tx + ux * run, ey = ty + uy * run, ez = dragZ + riseZ;
-  em.a(`G1 X${ex.toFixed(3)} Y${ey.toFixed(3)} Z${ez.toFixed(3)} F${Math.round(riseSpeed)}`);
-  em.x = ex; em.y = ey; em.z = ez;
+
+  // the swipe line: tangent (on the back-upper side) to a circle of radius
+  // rr = r - brushMm centered on the ball at zc = baseZ + r:
+  //   z = z0 + tan(th) * s
+  const th = (swipeAngleDeg * Math.PI) / 180, k = Math.tan(th);
+  const zc = baseZ + r;
+  const rr = Math.max(0, r / 2);
+  const z0 = zc + rr / Math.cos(th);           // the line's height over the center
+  const zAt = (s) => z0 + k * s;
+  const s0 = -z0 / k;                          // where it meets Z 0 (behind)
+  const s1 = Math.max(0, (riseZ - z0) / k);    // where it reaches Z riseZ
+
+  // 3. dry move behind the blob: hop, back, down to Z 0
+  go(0, topZ + hopMm, travelSpeed);
+  go(s0, topZ + hopMm, travelSpeed);
+  go(s0, 0, travelSpeed);
+
+  // 4. swipe along the tangent
+  go(s1, zAt(s1), swipeSpeed);
 }
 
 /** Texture name -> its stroke, which the cards and the compiler call as
@@ -1516,5 +1605,6 @@ export const BRUSHES = {
   variableThickness: strokeVariableThickness,
   petalDot: strokePetalDotted,
   suspendHair: strokeSuspendHair,
+  petalUp: strokePetalUp,
   teardropPull: strokeTeardropPull,
 };
