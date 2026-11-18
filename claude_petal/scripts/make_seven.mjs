@@ -5,10 +5,12 @@
 // Usage: node make_seven.mjs <path to texture_functions.js> <out.gcode>
 import { pathToFileURL } from "node:url";
 import { writeFileSync } from "node:fs";
+import { labelled } from "./label.mjs";
 
 const [, , libPath, outPath] = process.argv;
 const TF = await import(pathToFileURL(libPath).href);
-const { Emitter, samplePath, polylineToPts, strokePetalDotted } = TF;
+const { Emitter, samplePath, polylineToPts } = TF;
+const strokePetalDotted = labelled("strokePetalDotted", TF.strokePetalDotted);
 
 // Already on the sheet: petal-flower (+5 mm) and the five flowers' extents (+2 mm)
 const TAKEN = [

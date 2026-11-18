@@ -3,10 +3,12 @@
 // Usage: node make_flower2.mjs <path to texture_functions.js> <out.gcode>
 import { pathToFileURL } from "node:url";
 import { writeFileSync } from "node:fs";
+import { labelled } from "./label.mjs";
 
 const [, , libPath, outPath] = process.argv;
 const TF = await import(pathToFileURL(libPath).href);
-const { Emitter, samplePath, polylineToPts, strokePetalDotted } = TF;
+const { Emitter, samplePath, polylineToPts } = TF;
+const strokePetalDotted = labelled("strokePetalDotted", TF.strokePetalDotted);
 
 const CX = 110, CY = 110;
 const DOT = { diameter: 2.0, height: 1.0, extrudeSpeed: 150, dragSpeed: 600 };

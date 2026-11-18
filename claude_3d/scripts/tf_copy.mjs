@@ -25,35 +25,78 @@
  * ============================================================================
  */
 
-// ---------------------------------------------------------------- globals --
-export const FILAMENT_DIA = 1.75;
-export const FIL_AREA = Math.PI * (FILAMENT_DIA / 2) ** 2;
+// --------------------------------------------------------------- filament --
+/**
+ * The DEFAULT filament profile: everything that depends on the material,
+ * in one place. A print uses whichever profile its Emitter was given --
+ * `new Emitter(profile)`, missing keys filled from here -- and brushes read
+ * it as `em.fil`, never holding their own copy, so switching material (the
+ * page's stored filament profiles, see materials.js) changes every texture.
+ *   diameter        filament diameter, mm. Brushes compute E for 1.75 mm
+ *                   (FIL_AREA); the Emitter rescales extrusion (not retract
+ *                   / prime, which are filament lengths) to the profile's.
+ *   nozzleTemp, bedTemp   used by header(); the live page only records them
+ *   flowPercent     M221 sent with every print
+ *   retractMm       standard retract after a mark, pushed back by the next prime
+ *   longRetractMm   the dot brushes' retract (blob / directional / hairy dots):
+ *                   longer, against stringing; the next prime pushes back the
+ *                   same amount (the Emitter remembers how far it pulled)
+ *   retractSpeed    E speed for retract and prime, mm/min -- fast retraction
+ *                   risks flat-spotting TPU at the drive gear
+ *   linePrimeMm     extra prime once per printed element (newPattern())
+ *   maxVolRate      the extruder's maximum volumetric flow, mm3/s -- recorded
+ *                   here, not enforced by any brush yet (each sets its own
+ *                   speed; keep strokeVariableThickness's volRate under it).
+ *                   Conservative
+ *                   placeholder pending a confirming print, for the Ender 3
+ *                   V2 / Sprite direct-drive, 0.4mm nozzle, TPU -- well under
+ *                   Takahashi & Miyashita's ~11mm3/s (UIST'16 Adjunct), which
+ *                   was measured on a different printer and not TPU.
+ */
+export const FILAMENT = {
+  name: "TPU",
+  diameter: 1.75,
+  nozzleTemp: 220,
+  bedTemp: 50,
+  flowPercent: 100,
+  retractMm: 1.3,
+  longRetractMm: 4.0,
+  retractSpeed: 900,
+  linePrimeMm: 0.3,
+  maxVolRate: 4.0,
+};
 
-export const NOZZLE_TEMP = 220;   // TPU default
-export const BED_TEMP = 50;
-export const RETRACT_MM = 1.3;
-export const RETRACT_SPEED = 900; // 15mm/s -- fast retraction risks flat-spotting TPU at the drive gear
-export const LINE_START_PRIME_MM = 0.3; // extra one-time prime per top-level printed element
+/** Keys of a filament profile with their display units, in the order a
+ * profile editor shows them. */
+export const FILAMENT_FIELDS = [
+  ["diameter", "mm"], ["nozzleTemp", "°C"], ["bedTemp", "°C"], ["flowPercent", "%"],
+  ["retractMm", "mm"], ["longRetractMm", "mm"], ["retractSpeed", "mm/min"],
+  ["linePrimeMm", "mm"], ["maxVolRate", "mm³/s"],
+];
+
+// ---------------------------------------------------------------- globals --
+// The default profile's values under short names (header(), older scripts).
+// Brushes use em.fil instead, so they follow the chosen profile.
+export const FILAMENT_DIA = FILAMENT.diameter;
+export const FIL_AREA = Math.PI * (FILAMENT_DIA / 2) ** 2;
+export const NOZZLE_TEMP = FILAMENT.nozzleTemp;
+export const BED_TEMP = FILAMENT.bedTemp;
+export const RETRACT_MM = FILAMENT.retractMm;
+export const LONG_RETRACT_MM = FILAMENT.longRetractMm;
+export const RETRACT_SPEED = FILAMENT.retractSpeed;
+export const LINE_START_PRIME_MM = FILAMENT.linePrimeMm;
+export const FLOW_PERCENT = FILAMENT.flowPercent;
+export const MAX_EXTRUSION_RATE_MM3_S = FILAMENT.maxVolRate;
 
 export const TRAVEL_SPEED = 3000;
 export const Z_HOP = 0.4;
 export const LAYER_HEIGHT = 0.20;
-export const FLOW_PERCENT = 180;
-
-// Conservative placeholder pending a confirming print (same status as
-// every other PRINT_LIMITS number) -- the extruder's maximum volumetric
-// flow rate, for the Ender 3 V2 / Sprite direct-drive, 0.4mm nozzle, TPU.
-// Well under Takahashi & Miyashita's ~11mm3/s (UIST'16 Adjunct,
-// "Thickness Control Technique for Printing Tactile Sheets with FDM"),
-// which was measured on a different printer and not specifically TPU --
-// TPU buckles under back-pressure well before a rigid filament would, so
-// published safe rates for it on a standard hotend commonly sit lower.
-export const MAX_EXTRUSION_RATE_MM3_S = 4.0;
 
 export const BED_X = 220.0;
 export const BED_Y = 220.0;
 
-/** mm of filament per mm of XY travel, for a bead of given width/height. */
+/** mm of filament per mm of XY travel, for a bead of given width/height
+ * (for FIL_AREA; the Emitter rescales to the profile's diameter). */
 export function eRate(width, height, flowMult = 1.0) {
   return (width * height * flowMult) / FIL_AREA;
 }
@@ -74,13 +117,18 @@ export function dist(a, b) {
  * (e.g. total filament used) -- never itself written into a G-code line.
  */
 export class Emitter {
-  constructor() {
+  /** `filament`: a profile (see FILAMENT); missing keys use FILAMENT's. */
+  constructor(filament = FILAMENT) {
+    this.fil = { ...FILAMENT, ...filament };
+    // E is computed for FIL_AREA; scale extrusion to this filament's area
+    this.eScale = FIL_AREA / (Math.PI * (this.fil.diameter / 2) ** 2);
     this.lines = [];
     this.eTotal = 0;
     this.x = null;
     this.y = null;
     this.z = null;
     this.retracted = true;
+    this.retractedMm = this.fil.retractMm; // how far the last retract pulled (the next prime pushes this back)
     this.pendingPrimeBonus = false;
   }
 
@@ -90,7 +138,7 @@ export class Emitter {
 
   /**
    * Call once at the start of each top-level printed element (a line, a
-   * fill region, a dot). Adds LINE_START_PRIME_MM the NEXT time the
+   * fill region, a dot). Adds the profile's linePrimeMm the NEXT time the
    * pattern un-retracts -- once only. Does not affect internal
    * layer-to-layer or dot-to-dot un-retracts within the same element.
    */
@@ -98,7 +146,7 @@ export class Emitter {
     this.pendingPrimeBonus = true;
   }
 
-  header({ nozzleTemp = NOZZLE_TEMP, bedTemp = BED_TEMP, flowPercent = FLOW_PERCENT } = {}) {
+  header({ nozzleTemp = this.fil.nozzleTemp, bedTemp = this.fil.bedTemp, flowPercent = this.fil.flowPercent } = {}) {
     const a = (s) => this.a(s);
     a("G21"); a("G90"); a("M83");
     a("M220 S100");
@@ -118,59 +166,101 @@ export class Emitter {
     a("G1 Z2.0 F3000");
     // explicit retract (a relative delta) to establish the starting
     // retracted state
-    a(`G1 E${(-RETRACT_MM).toFixed(4)} F${RETRACT_SPEED}`);
-    this.eTotal = -RETRACT_MM;
+    a(`G1 E${(-this.fil.retractMm).toFixed(4)} F${this.fil.retractSpeed}`);
+    this.eTotal = -this.fil.retractMm;
     this.x = 10.4; this.y = 15.0; this.z = 2.0;
     this.retracted = true;
+    this.retractedMm = this.fil.retractMm;
   }
 
   footer() {
     const a = (s) => this.a(s);
+    this.finish();
     a("G91");
-    if (!this.retracted) {
-      a(`G1 E${(-RETRACT_MM).toFixed(3)} F${RETRACT_SPEED}`);
-      this.eTotal -= RETRACT_MM;
-    }
     a("G1 Z10 F3000");
     a("G90");
     a(`G1 X0 Y${(BED_Y - 2).toFixed(0)} F3000`);
     a("M104 S0"); a("M140 S0"); a("M84");
   }
 
-  /** Hop to a safe height, travel, settle, un-retract-if-needed. */
+  /** Retract (if primed), hop to a safe height, travel, settle. Leaves the
+   * nozzle retracted -- the caller primes with unretract(). */
   goto(x, y, z) {
+    this.retract();
     const hopZ = Math.max(z, this.z ?? 0) + Z_HOP;
     this.a(`G1 Z${hopZ.toFixed(3)} F3000`);
-    if (!this.retracted) {
-      this.a(`G1 E${(-RETRACT_MM).toFixed(4)} F${RETRACT_SPEED}`);
-      this.eTotal -= RETRACT_MM;
-      this.retracted = true;
-    }
     this.a(`G0 X${x.toFixed(3)} Y${y.toFixed(3)} F${TRAVEL_SPEED}`);
     this.a(`G1 Z${z.toFixed(3)} F1500`);
     this.x = x; this.y = y; this.z = z;
   }
 
+  /** Straight up or down to `z`, no XY move, no extrusion. */
+  moveZ(z, speed = 1500) {
+    this.a(`G1 Z${z.toFixed(3)} F${Math.round(speed)}`);
+    this.z = z;
+  }
+
+  /** Prime: push back exactly what the last retract pulled, plus the
+   * once-per-element linePrimeMm after newPattern(). */
   unretract() {
     if (this.retracted) {
-      const bonus = this.pendingPrimeBonus ? LINE_START_PRIME_MM : 0.0;
+      const bonus = this.pendingPrimeBonus ? this.fil.linePrimeMm : 0.0;
       this.pendingPrimeBonus = false;
-      const amt = RETRACT_MM + bonus;
-      this.a(`G1 E${amt.toFixed(4)} F${RETRACT_SPEED}`);
+      const amt = this.retractedMm + bonus;
+      this.a(`G1 E${amt.toFixed(4)} F${this.fil.retractSpeed}`);
       this.eTotal += amt;
       this.retracted = false;
     }
   }
 
-  retract() {
+  /** Retract if primed -- the profile's retractMm, or its longRetractMm
+   * with `long` (the dot brushes) -- and remember how far for the next
+   * prime. */
+  retract(long = false) {
     if (!this.retracted) {
-      this.a(`G1 E${(-RETRACT_MM).toFixed(4)} F${RETRACT_SPEED}`);
-      this.eTotal -= RETRACT_MM;
+      const mm = long ? this.fil.longRetractMm : this.fil.retractMm;
+      this.a(`G1 E${(-mm).toFixed(4)} F${this.fil.retractSpeed}`);
+      this.eTotal -= mm;
       this.retracted = true;
+      this.retractedMm = mm;
     }
   }
 
+  /** End of a card / file: retracted by exactly the standard retractMm, so
+   * whatever prints next (a separate Emitter) primes the right amount. A
+   * longer dot retract is partly pushed back here, nozzle still lifted. */
+  finish() {
+    this.retract();
+    const extra = this.retractedMm - this.fil.retractMm;
+    if (extra > 1e-9) {
+      this.a(`G1 E${extra.toFixed(4)} F${this.fil.retractSpeed}`);
+      this.eTotal += extra;
+      this.retractedMm = this.fil.retractMm;
+    }
+  }
+
+  /**
+   * Extrude `eMm` of filament (computed for FIL_AREA, like printMove) at
+   * feedrate `speed` (F, mm/min), optionally while moving to `to` =
+   * {x, y, z} (any subset). Marlin applies F to the XYZ distance when the
+   * move has one, and to E only when it doesn't.
+   */
+  extrude(eMm, speed, to = {}) {
+    const e = eMm * this.eScale;
+    const nx = to.x ?? this.x, ny = to.y ?? this.y, nz = to.z ?? this.z;
+    let s = "G1";
+    if (to.x != null) s += ` X${nx.toFixed(3)}`;
+    if (to.y != null) s += ` Y${ny.toFixed(3)}`;
+    if (to.z != null) s += ` Z${nz.toFixed(3)}`;
+    this.a(`${s} E${e.toFixed(4)} F${Math.round(speed)}`);
+    this.eTotal += e;
+    this.x = nx; this.y = ny; this.z = nz;
+  }
+
+  /** One extruding move to (x, y[, z]) at `speed` (F, mm/min). `eAdd` is
+   * computed for FIL_AREA; it is rescaled to the profile's diameter. */
   printMove(x, y, eAdd, speed, z = null) {
+    eAdd *= this.eScale;
     this.eTotal += eAdd;
     const zpart = z !== null ? ` Z${z.toFixed(3)}` : "";
     this.a(`G1 X${x.toFixed(3)} Y${y.toFixed(3)}${zpart} E${eAdd.toFixed(4)} F${speed.toFixed(0)}`);
@@ -329,6 +419,26 @@ function restOfPath(pts, a) {
   return out;
 }
 
+/** Lays `nLayers` of the same point list, back and forth: one travel and
+ * prime at the start, each next layer starts where the last one ended,
+ * LAYER_HEIGHT higher and walking the other way, one retract at the end.
+ * `bead(a, b)` prints one bead from point a to point b at the nozzle's
+ * current height. */
+function printLayers(em, pts, nLayers, bead) {
+  if (pts.length < 2) return;
+  em.goto(pts[0][0], pts[0][1], LAYER_HEIGHT);
+  em.unretract();
+  let path = pts;
+  for (let layer = 1; layer <= nLayers; layer++) {
+    if (layer > 1) {
+      path = [...path].reverse();
+      em.moveZ(LAYER_HEIGHT * layer);
+    }
+    for (let i = 1; i < path.length; i++) bead(path[i - 1], path[i]);
+  }
+  em.retract();
+}
+
 /** BRUSH: one straight bead from p0 to p1, one layer high, at the nozzle's
  * current height -- the stroke has already travelled, primed and set Z. */
 function brushSolid(em, p0, p1, { width = 0.5, speed = 400 } = {}) {
@@ -337,23 +447,18 @@ function brushSolid(em, p0, p1, { width = 0.5, speed = 400 } = {}) {
   em.printMove(p1[0], p1[1], seg * eRate(width, LAYER_HEIGHT), speed);
 }
 
-/** STROKE: a continuous solid ridge, `nLayers` high. Per layer: travel to
- * the start at that layer's height, prime, one brushSolid() bead per pair
- * of points, retract. */
+/** STROKE: a continuous solid ridge, `nLayers` high. One travel and prime,
+ * then the layers back and forth along the line (printLayers), one
+ * brushSolid() bead per pair of points, one retract. */
 export function strokeSolid(em, pts, { nLayers = 2, ...brush } = {}) {
-  for (let layer = 1; layer <= nLayers; layer++) {
-    em.goto(pts[0][0], pts[0][1], LAYER_HEIGHT * layer);
-    em.unretract();
-    for (let i = 1; i < pts.length; i++) brushSolid(em, pts[i - 1], pts[i], brush);
-    em.retract();
-  }
+  printLayers(em, pts, nLayers, (a, b) => brushSolid(em, a, b, brush));
   return pts;
 }
 
 /** BRUSH: one dash -- `segLen` mm of solid ridge from the start of `pts`
- * (shorter if the path ends first), `nLayers` high, each layer with its own
- * travel / prime / walk / retract -- followed by `gapLen` mm left blank.
- * Returns segLen + gapLen, where the next dash starts. */
+ * (shorter if the path ends first), `nLayers` high, laid back and forth
+ * with one travel / prime / retract (printLayers) -- followed by `gapLen`
+ * mm left blank. Returns segLen + gapLen, where the next dash starts. */
 function brushDashed(em, pts, {
   segLen = 8, gapLen = 4, width = 0.5, nLayers = 2, speed = 400,
 } = {}) {
@@ -361,16 +466,7 @@ function brushDashed(em, pts, {
     throw new RangeError(`dashed brush: segLen must be > 0 and gapLen >= 0 (got ${segLen}, ${gapLen})`);
   }
   const dash = pts.filter((p) => p[2] <= segLen);
-  for (let layer = 1; layer <= nLayers; layer++) {
-    em.goto(dash[0][0], dash[0][1], LAYER_HEIGHT * layer);
-    em.unretract();
-    for (let i = 1; i < dash.length; i++) {
-      const seg = Math.hypot(dash[i][0] - dash[i - 1][0], dash[i][1] - dash[i - 1][1]);
-      if (seg < 1e-9) continue;
-      em.printMove(dash[i][0], dash[i][1], seg * eRate(width, LAYER_HEIGHT), speed);
-    }
-    em.retract();
-  }
+  printLayers(em, dash, nLayers, (a, b) => brushSolid(em, a, b, { width, speed }));
   return segLen + gapLen;
 }
 
@@ -470,42 +566,31 @@ export function strokeDirectionalBlobDotted(em, pts, {
   });
 }
 
-/** BRUSH: one vertical-lift hair strand at (x, y). At the start of a line
- * (nozzle retracted) it travels there at `baseZ` and primes; otherwise the
- * stroke has already moved it there, still lifted from the last strand,
- * and it drops back to `baseZ`. Leaves the nozzle lifted with `retractMm`
- * pulled back -- not recorded as a retract, since the next strand's
- * `esegmentMm` pushes it out again. */
+/** BRUSH: one vertical-lift hair strand at (x, y). If the nozzle is
+ * already above (x, y) -- the stroke moved it there, still lifted from the
+ * last strand -- it drops straight to `baseZ`; otherwise it travels there
+ * (goto). Then it primes, extrudes `esegmentMm` in place at F500, lifts `smallLift`, dwells, lifts `bigLift`
+ * and retracts, leaving the nozzle lifted above the strand. */
 function brushHairyStrand(em, x, y, {
-  esegmentMm = 1.2, retractMm = 1.3, dwellMs = 400,
+  esegmentMm = 1.2, dwellMs = 400,
   smallLift = 0.2, bigLift = 4.0, baseZ = 0.3,
 } = {}) {
-  if (em.retracted) {
-    em.goto(x, y, baseZ);
-    em.unretract();
-  } else {
-    em.a(`G0 Z${baseZ.toFixed(3)} F600`);
-    em.z = baseZ;
-  }
-  em.a(`G1 E${esegmentMm.toFixed(4)} F500`);
-  em.eTotal += esegmentMm;
-  const z1 = baseZ + smallLift;
-  em.a(`G0 Z${z1.toFixed(3)}`);
-  em.z = z1;
+  const above = em.x != null && Math.hypot(em.x - x, em.y - y) < 1e-6;
+  if (above && em.retracted) em.moveZ(baseZ, 600);
+  else em.goto(x, y, baseZ);
+  em.unretract();
+  em.extrude(esegmentMm, 500);
+  em.moveZ(baseZ + smallLift, 600);
   em.dwell(dwellMs);
-  const z2 = z1 + bigLift;
-  em.a(`G0 Z${z2.toFixed(3)} F600`);
-  em.z = z2;
-  em.a(`G1 E${(-retractMm).toFixed(4)} F${RETRACT_SPEED}`);
-  em.eTotal -= retractMm;
+  em.moveZ(em.z + bigLift, 600);
+  em.retract();
 }
 
 /** STROKE: hair strands (brushHairyStrand) every `spacing` mm. Between
  * strands it travels while still lifted, at `speed`, so the nozzle clears
- * the strand just placed instead of dragging through it -- one prime for
- * the whole line, not a full retract/travel/prime per strand. CAUTION:
- * each strand is still a retract/un-retract cycle -- mind the
- * retraction-cycle cap before a dense spacing over a long path. */
+ * the strand just placed instead of dragging through it. Each strand
+ * primes and retracts on its own -- mind the retraction-cycle cap before a
+ * dense spacing over a long path. */
 export function strokeHairy(em, pts, { spacing = 2.0, speed = 200, ...brush } = {}) {
   const nRoots = Math.floor(totalLength(pts) / spacing) + 1;
   for (let i = 0; i < nRoots; i++) {
@@ -516,7 +601,6 @@ export function strokeHairy(em, pts, { spacing = 2.0, speed = 200, ...brush } = 
     }
     brushHairyStrand(em, x, y, brush);
   }
-  em.retracted = true;
   return pts;
 }
 
@@ -576,19 +660,15 @@ function brushSegmented(em, pts, {
 }
 
 /** STROKE: a continuous single-layer line of thin + fat pairs
- * (brushSegmented) to the end of the path. One prime at the start
- * (`eprime` mm, just over the RETRACT_MM the goto() pulled, then
- * `primedwellS`), one retract at the very end. Absolute (G90) throughout;
- * each section's height rides in its own G1 line. */
-export function strokeSegmented(em, pts, {
-  eprime = 1.6, primedwellS = 1.0, retractMm = 4.0, retractSpeed = 1000, ...brush
-} = {}) {
+ * (brushSegmented) to the end of the path. One travel and prime at the
+ * start, then `primedwellS` for the melt to settle, one retract at the
+ * very end. Absolute (G90) throughout; each section's height rides in its
+ * own G1 line. */
+export function strokeSegmented(em, pts, { primedwellS = 1.0, ...brush } = {}) {
   // start at the first (thin) section's height -- 0.2 is brushSegmented's default thinHeight
   em.goto(pts[0][0], pts[0][1], brush.thinHeight ?? 0.2);
-  em.a(`G1 E${eprime.toFixed(4)} F150`);
-  em.eTotal += eprime;
+  em.unretract();
   em.dwell(primedwellS * 1000);
-  em.retracted = false;
 
   const total = totalLength(pts);
   let s = 0;
@@ -597,9 +677,7 @@ export function strokeSegmented(em, pts, {
     if (!(used > 0)) break;
     s += used;
   }
-  em.a(`G1 E${(-retractMm).toFixed(4)} F${retractSpeed}`);
-  em.eTotal -= retractMm;
-  em.retracted = true;
+  em.retract();
   return pts;
 }
 
@@ -926,97 +1004,84 @@ export function verifyCheckerboard(diamonds, diag) {
  */
 
 /** BRUSH: one flat, spiral-filled dot of radius `dotRadius`, `nLayers`
- * high -- per layer: travel to the spiral's start at that layer's height,
- * prime, walk the spiral, retract. */
-function brushSpiralDot(em, cx, cy, { dotRadius = 0.8, nLayers = 2, speed = 250 } = {}) {
-  const dotPts = spiralDisc([cx, cy], dotRadius);
-  for (let layer = 1; layer <= nLayers; layer++) {
-    em.goto(dotPts[0][0], dotPts[0][1], LAYER_HEIGHT * layer);
-    em.unretract();
-    for (let i = 1; i < dotPts.length; i++) {
-      const seg = dist(dotPts[i - 1], dotPts[i]);
-      if (seg < 1e-9) continue;
-      em.printMove(dotPts[i][0], dotPts[i][1], seg * eRate(0.42, LAYER_HEIGHT), speed);
-    }
-    em.retract();
-  }
+ * high, beads `width` wide -- one travel and prime, the layers walk the
+ * spiral out and back in (printLayers), one retract. */
+function brushSpiralDot(em, cx, cy, { dotRadius = 0.8, nLayers = 2, width = 0.42, speed = 250 } = {}) {
+  printLayers(em, spiralDisc([cx, cy], dotRadius), nLayers, (a, b) => {
+    const seg = dist(a, b);
+    if (seg >= 1e-9) em.printMove(b[0], b[1], seg * eRate(width, LAYER_HEIGHT), speed);
+  });
 }
 
 /**
- * BRUSH: one blob dome at (cx, cy), for strokeBlobDotted(). Builds a small dome by extruding WHILE rising in Z (no XY movement),
- * dwell, retract, orbit around the dome at its own height, then (via the
- * caller's next goto()) travel to the next spot. `diameter` is the primary
- * sizing knob; filament amount is DERIVED from it via a standoff-cylinder
- * + hemispherical-dome volume model, converted through FIL_AREA and scaled
- * by `extrusionMultiplier`.
- *
- * The rise is split into `buildSteps` increments, extruding at each step,
- * tapering toward the top by `taperFactor` (deliberate "coasting" so
- * residual nozzle pressure finishes the tip instead of a hard stop). The
- * first step also carries the priming restoration (folded in rather than
- * emitted as a stationary E-only line -- extrusion and motion are never
- * separated here) plus `baseExtraMm`, a deliberately bigger first-contact
- * blob meant to spread and stick to the bed before the rest piles on top,
- * followed by its own `baseDwellMs` dwell.
- *
- * `retractMm` (default 4.0mm) is dot-specific, larger than the shared
- * global default (1.3mm) -- confirmed on hardware to reduce stringing for
- * this deposition method; only the distance is increased; speed stays at
- * the global default (TPU filament-damage caution: don't retract fast).
- *
- * Anti-stringing: after retract + `postRetractDwellMs`, trace an orbit
- * (`orbitRadius`, default the dot's own radius) around (cx, cy) at the
- * dome's own top height, repeated `orbitLoops` times, no extrusion --
- * confirmed on hardware to reduce stringing. Pass `orbitRadius: 0` to
- * disable it. Then rise `blobClearanceMm` above the dome, recenter, dwell
- * `orbitDwellMs`, and trace the same circle `topOrbitLoops` times at that
- * hover height (0 skips this second orbit).
+ * The rising build shared by the dot brushes. From the nozzle's position
+ * at `baseZ` (travelled there and primed by the caller), rise `radius` mm
+ * in `buildSteps` steps, extruding a standoff cylinder (radius x baseZ)
+ * plus a hemisphere of that radius, scaled by `extrusionMultiplier`. More
+ * goes into the low steps than the high ones (`taperFactor`): residual
+ * nozzle pressure finishes the tip instead of a hard stop. The first step
+ * also lays `baseExtraMm`, a bigger first-contact blob to stick to the
+ * bed, then dwells `baseDwellMs`. Every step runs at F `extrudeSpeed`
+ * (which Marlin applies to the step's short XYZ distance). `lean` [dx, dy] moves the nozzle that far in XY over the rise
+ * (the directional dot). Returns the top Z.
  */
-function brushBlobDot(em, cx, cy, {
-  diameter = 1.6, baseZ = 0.2, buildSteps = 6, taperFactor = 0.7,
-  extrudeSpeed = 120, dwellMs = 2000, extrusionMultiplier = 1.3,
-  retractMm = 4.0, postRetractDwellMs = 2000, baseExtraMm = 0.3,
-  baseDwellMs = 1000, orbitRadius = null, orbitPts = 16, orbitSpeed = 600,
-  orbitLoops = 3, orbitDwellMs = 2000, blobClearanceMm = 0.3,
-  topOrbitLoops = 3,
-} = {}) {
-  const radius = diameter / 2.0;
-  const domeHeight = radius;
+function buildDome(em, {
+  radius, baseZ, buildSteps, taperFactor, extrusionMultiplier,
+  baseExtraMm, baseDwellMs, extrudeSpeed, lean = null,
+}) {
   const standoffVolume = Math.PI * radius * radius * baseZ;
   const domeVolume = (2 / 3) * Math.PI * radius ** 3;
   const totalE = ((standoffVolume + domeVolume) / FIL_AREA) * extrusionMultiplier;
 
-  em.goto(cx, cy, baseZ);
-
-  const bonus = em.pendingPrimeBonus ? LINE_START_PRIME_MM : 0.0;
-  em.pendingPrimeBonus = false;
-  const primeE = retractMm + bonus;
-  em.retracted = false;
-
   const nSteps = Math.max(1, Math.round(buildSteps));
-  const zStep = domeHeight / nSteps;
   const weights = [];
   for (let i = 0; i < nSteps; i++) {
     weights.push(1 - taperFactor * (nSteps > 1 ? i / (nSteps - 1) : 0));
   }
   const weightSum = weights.reduce((a, b) => a + b, 0);
 
-  let z = baseZ;
+  const x0 = em.x, y0 = em.y;
   for (let i = 0; i < nSteps; i++) {
-    z += zStep;
-    const stepE = totalE * (weights[i] / weightSum) + (i === 0 ? primeE + baseExtraMm : 0);
-    em.a(`G1 Z${z.toFixed(3)} E${stepE.toFixed(4)} F${extrudeSpeed}`);
-    em.eTotal += stepE;
+    const f = (i + 1) / nSteps;
+    const to = { z: baseZ + radius * f };
+    if (lean) { to.x = x0 + lean[0] * f; to.y = y0 + lean[1] * f; }
+    em.extrude(totalE * (weights[i] / weightSum) + (i === 0 ? baseExtraMm : 0), extrudeSpeed, to);
     if (i === 0) em.dwell(baseDwellMs);
   }
-  em.z = z;
+  return em.z;
+}
 
+/**
+ * BRUSH: one blob dome at (cx, cy), for strokeBlobDotted(). Travels there,
+ * primes, and builds a dome by extruding WHILE rising in Z, no XY movement
+ * (buildDome: `diameter` sets the size, the filament amount is derived
+ * from it, scaled by `extrusionMultiplier`; F `extrudeSpeed`). Then dwell, the filament's long retract (longRetractMm,
+ * against stringing -- the next prime pushes the same amount back), and
+ * `postRetractDwellMs`.
+ *
+ * Anti-stringing: trace an orbit (`orbitRadius`, default the dot's own
+ * radius) around (cx, cy) at the dome's own top height, `orbitLoops` times,
+ * no extrusion -- confirmed on hardware to reduce stringing. Pass
+ * `orbitRadius: 0` to disable it. Then rise `blobClearanceMm` above the
+ * dome, recenter, dwell `orbitDwellMs`, and trace the same circle
+ * `topOrbitLoops` times at that hover height (0 skips this second orbit).
+ */
+function brushBlobDot(em, cx, cy, {
+  diameter = 1.6, baseZ = 0.2, buildSteps = 6, taperFactor = 0.7,
+  extrudeSpeed = 120, dwellMs = 2000, extrusionMultiplier = 1.3,
+  postRetractDwellMs = 2000, baseExtraMm = 0.3,
+  baseDwellMs = 1000, orbitRadius = null, orbitPts = 16, orbitSpeed = 600,
+  orbitLoops = 3, orbitDwellMs = 2000, blobClearanceMm = 0.3,
+  topOrbitLoops = 3,
+} = {}) {
+  const radius = diameter / 2.0;
+  em.goto(cx, cy, baseZ);
+  em.unretract();
+  const z = buildDome(em, {
+    radius, baseZ, buildSteps, taperFactor, extrusionMultiplier, baseExtraMm, baseDwellMs, extrudeSpeed,
+  });
   em.dwell(dwellMs);
-
-  em.a(`G1 E${(-retractMm).toFixed(4)} F${RETRACT_SPEED}`);
-  em.eTotal -= retractMm;
-  em.retracted = true;
-
+  em.retract(true);
   em.dwell(postRetractDwellMs);
 
   const actualOrbitRadius = orbitRadius ?? radius;
@@ -1041,9 +1106,7 @@ function brushBlobDot(em, cx, cy, {
   // topOrbitLoops: 0 skips this whole step.
   const nTopLoops = Math.max(0, Math.round(topOrbitLoops));
   if (actualOrbitRadius > 0 && nTopLoops > 0) {
-    const zHover = z + blobClearanceMm;
-    em.a(`G1 Z${zHover.toFixed(3)} F${orbitSpeed}`);
-    em.z = zHover;
+    em.moveZ(z + blobClearanceMm, orbitSpeed);
     em.a(`G0 X${cx.toFixed(3)} Y${cy.toFixed(3)} F${orbitSpeed}`);
     em.x = cx; em.y = cy;
     em.dwell(orbitDwellMs);
@@ -1061,8 +1124,9 @@ function brushBlobDot(em, cx, cy, {
 
 /**
  * BRUSH: one "directional" blob dot -- a brushBlobDot()-style dome that LEANS in a chosen
- * compass direction, for a raked/combed-looking tactile bump. Reuses
- * brushBlobDot()'s volume model, with two `azimuthDeg`-driven changes:
+ * compass direction, for a raked/combed-looking tactile bump. Same
+ * travel, prime, volume model and long retract as brushBlobDot(), with two
+ * `azimuthDeg`-driven changes:
  *  1. SHEARED BUILD -- the nozzle travels `radius` in the azimuth
  *     direction as it rises through `buildSteps` to the dome top, while
  *     extruding, so the apex ends off-center in that direction.
@@ -1077,54 +1141,26 @@ function brushBlobDot(em, cx, cy, {
 function brushDirectionalBlobDot(em, cx, cy, {
   diameter = 2.0, azimuthDeg = 0, baseZ = 0.2, buildSteps = 6,
   taperFactor = 0.7, extrudeSpeed = 120, dwellMs = 2000,
-  extrusionMultiplier = 1.3, retractMm = 4.0, postRetractDwellMs = 2000,
+  extrusionMultiplier = 1.3, postRetractDwellMs = 2000,
   baseExtraMm = 0.3, baseDwellMs = 1000, dragSpeed = 600,
 } = {}) {
   const radius = diameter / 2.0;
-  const domeHeight = radius;
-  const standoffVolume = Math.PI * radius * radius * baseZ;
-  const domeVolume = (2 / 3) * Math.PI * radius ** 3;
-  const totalE = ((standoffVolume + domeVolume) / FIL_AREA) * extrusionMultiplier;
-
   const azR = (azimuthDeg * Math.PI) / 180;
   const ax = Math.cos(azR), ay = Math.sin(azR);
 
   em.goto(cx, cy, baseZ);
-
-  const bonus = em.pendingPrimeBonus ? LINE_START_PRIME_MM : 0.0;
-  em.pendingPrimeBonus = false;
-  const primeE = retractMm + bonus;
-  em.retracted = false;
-
-  const nSteps = Math.max(1, Math.round(buildSteps));
-  const zStep = domeHeight / nSteps;
-  const xStep = (ax * radius) / nSteps, yStep = (ay * radius) / nSteps;
-  const weights = [];
-  for (let i = 0; i < nSteps; i++) {
-    weights.push(1 - taperFactor * (nSteps > 1 ? i / (nSteps - 1) : 0));
-  }
-  const weightSum = weights.reduce((a, b) => a + b, 0);
-
-  let z = baseZ, bx = cx, by = cy;
-  for (let i = 0; i < nSteps; i++) {
-    z += zStep; bx += xStep; by += yStep;
-    const stepE = totalE * (weights[i] / weightSum) + (i === 0 ? primeE + baseExtraMm : 0);
-    em.a(`G1 X${bx.toFixed(3)} Y${by.toFixed(3)} Z${z.toFixed(3)} E${stepE.toFixed(4)} F${extrudeSpeed}`);
-    em.eTotal += stepE;
-    if (i === 0) em.dwell(baseDwellMs);
-  }
-  em.x = bx; em.y = by; em.z = z;
-  const apexX = bx, apexY = by;
+  em.unretract();
+  buildDome(em, {
+    radius, baseZ, buildSteps, taperFactor, extrusionMultiplier, baseExtraMm, baseDwellMs, extrudeSpeed,
+    lean: [ax * radius, ay * radius],
+  });
+  const apexX = em.x, apexY = em.y;
 
   em.dwell(dwellMs);
-
-  em.a(`G1 E${(-retractMm).toFixed(4)} F${RETRACT_SPEED}`);
-  em.eTotal -= retractMm;
-  em.retracted = true;
+  em.retract(true);
   em.dwell(postRetractDwellMs);
 
-  em.a(`G1 Z${baseZ.toFixed(3)} F${dragSpeed}`);
-  em.z = baseZ;
+  em.moveZ(baseZ, dragSpeed);
   const endX = apexX - ax * diameter, endY = apexY - ay * diameter;
   em.a(`G1 X${endX.toFixed(3)} Y${endY.toFixed(3)} F${dragSpeed}`);
   em.x = endX; em.y = endY;
@@ -1174,16 +1210,16 @@ function resolveHairDir(hairDirection = "top", azimuthDeg, elevationDeg) {
 
 /**
  * BRUSH: one dot with ONE hair strand pulled from its center, for
- * strokeHairyDotted(). Builds a real
- * root dome first (reusing brushBlobDot's own tapered-rise build mechanism
- * and volume model), then pulls a hair out of that dome's own melt:
- *  1. EXTRUDE segment -- move `hairLength` mm along the pull vector while
- *     extruding a real bead (cross-section via the shared `eRate()`
- *     helper), split into a rate-matched extrude sub-move plus a
- *     no-extrusion "dry rise" finishing the climb, so the bead is fully
- *     laid down before the tip stretches to height.
- *  2. Retract immediately (fixes whole-pull stringing from the
- *     pressurized root), dwell.
+ * strokeHairyDotted(). Travels there, primes, builds a root dome
+ * (buildDome, as brushBlobDot), then pulls a hair out of that dome's own
+ * melt:
+ *  1. EXTRUDE segment -- move along the pull vector while extruding a real
+ *     bead (cross-section via the shared `eRate()` helper, x
+ *     `beadFlowMult`) at F `pullExtrudeSpeed`; then a no-extrusion "dry
+ *     rise" finishes the climb to `hairLength`, `dryRiseFeedDrop` F slower,
+ *     so the bead is fully laid down before the tip stretches to height.
+ *  2. The filament's long retract immediately (fixes whole-pull stringing
+ *     from the pressurized root), dwell.
  *  3. An optional clearance hop (near-horizontal pulls only), then a
  *     short STRING segment (fast, zero extrusion) and `overtravelMm` for
  *     final clearance from wherever the next dot is.
@@ -1199,8 +1235,7 @@ function brushHairyDot(em, cx, cy, {
   rootDiameter = 2.0, baseZ = 0.2, buildSteps = 6, taperFactor = 0.7,
   extrudeSpeed = 120, baseExtraMm = 0.3, baseDwellMs = 1000,
   dwellMs = 2000, extrusionMultiplier = 1.3, hairThickness = null,
-  hairLength = 10.0, pullExtrudeSpeed = 150, beadFlowMult = 3.5,
-  dryRiseFeedDrop = 10, retractMm = 4.0,
+  hairLength = 10.0, pullExtrudeSpeed = 150, beadFlowMult = 3.5, dryRiseFeedDrop = 10,
   postRetractDwellMs = 500, hairDirection = "top",
   hairAzimuthDeg = null, hairElevationDeg = null, stringMm = 2.0,
   hairSpeed = 8000, clearanceZ = 0.5, clearanceSpeed = 600,
@@ -1209,69 +1244,44 @@ function brushHairyDot(em, cx, cy, {
   const { elDeg, dx, dy, dz } = resolveHairDir(
     hairDirection, hairAzimuthDeg, hairElevationDeg);
 
-  // root dome build -- identical formulas/loop to brushBlobDot's own build.
-  const radius = rootDiameter / 2.0;
-  const domeHeight = radius;
-  const standoffVolume = Math.PI * radius * radius * baseZ;
-  const domeVolume = (2 / 3) * Math.PI * radius ** 3;
-  const totalE = ((standoffVolume + domeVolume) / FIL_AREA) * extrusionMultiplier;
-
   const HAIR_T_REF = 0.5, HAIR_L_REF = 4.0;
   const effThickness = hairThickness ??
     Math.min(2.0, Math.max(0.4, HAIR_T_REF * (hairLength / HAIR_L_REF)));
-
   const pullERate = eRate(effThickness, effThickness, extrusionMultiplier * beadFlowMult);
 
   em.goto(cx, cy, baseZ);
-
-  const bonus = em.pendingPrimeBonus ? LINE_START_PRIME_MM : 0.0;
-  em.pendingPrimeBonus = false;
-  const primeE = retractMm + bonus;
-  em.retracted = false;
-
-  const nSteps = Math.max(1, Math.round(buildSteps));
-  const zStep = domeHeight / nSteps;
-  const weights = [];
-  for (let i = 0; i < nSteps; i++) {
-    weights.push(1 - taperFactor * (nSteps > 1 ? i / (nSteps - 1) : 0));
-  }
-  const weightSum = weights.reduce((a, b) => a + b, 0);
-
-  let z = baseZ;
-  for (let i = 0; i < nSteps; i++) {
-    z += zStep;
-    const stepE = totalE * (weights[i] / weightSum) + (i === 0 ? primeE + baseExtraMm : 0);
-    em.a(`G1 Z${z.toFixed(3)} E${stepE.toFixed(4)} F${extrudeSpeed}`);
-    em.eTotal += stepE;
-    if (i === 0) em.dwell(baseDwellMs);
-  }
-  em.z = z;
-
+  em.unretract();
+  buildDome(em, {
+    radius: rootDiameter / 2.0, baseZ, buildSteps, taperFactor, extrusionMultiplier,
+    baseExtraMm, baseDwellMs, extrudeSpeed,
+  });
   em.dwell(dwellMs);
 
-  const dryF = Math.max(1, pullExtrudeSpeed - dryRiseFeedDrop);
   const eA = pullERate * hairLength;
   const dExtrude = Math.min(eA, hairLength);
 
   const HORIZ = Math.abs(dx) > 1e-9 || Math.abs(dy) > 1e-9;
   const VERT = Math.abs(dz) > 1e-9;
-  const pull = (d, e, f, rapid) => {
+  const target = (d) => {
+    const to = {};
+    if (HORIZ) { to.x = em.x + dx * d; to.y = em.y + dy * d; }
+    if (VERT) to.z = em.z + dz * d;
+    return to;
+  };
+  const move = (d, f, rapid) => {
     const nx = em.x + dx * d, ny = em.y + dy * d, nz = em.z + dz * d;
     let s = rapid ? "G0" : "G1";
     if (HORIZ) s += ` X${nx.toFixed(3)} Y${ny.toFixed(3)}`;
     if (VERT) s += ` Z${nz.toFixed(3)}`;
-    if (e != null) { s += ` E${e.toFixed(4)}`; em.eTotal += e; }
-    s += ` F${f}`;
-    em.a(s);
+    em.a(`${s} F${Math.round(f)}`);
     em.x = nx; em.y = ny; em.z = nz;
   };
 
-  pull(dExtrude, eA, pullExtrudeSpeed, false);
-  if (hairLength > dExtrude + 1e-6) pull(hairLength - dExtrude, null, dryF, false);
+  // the extruding pull; the dry rise follows a little slower
+  em.extrude(eA, pullExtrudeSpeed, target(dExtrude));
+  if (hairLength > dExtrude + 1e-6) move(hairLength - dExtrude, Math.max(1, pullExtrudeSpeed - dryRiseFeedDrop), false);
 
-  em.a(`G1 E${(-retractMm).toFixed(4)} F${RETRACT_SPEED}`);
-  em.eTotal -= retractMm;
-  em.retracted = true;
+  em.retract(true);
   em.dwell(postRetractDwellMs);
 
   const HAIR_CLEARANCE_MAX_EL_DEG = 30;
@@ -1280,15 +1290,23 @@ function brushHairyDot(em, cx, cy, {
     em.z += clearanceZ;
   }
 
-  if (stringMm > 0) pull(stringMm, null, hairSpeed, true);
-  pull(overtravelMm, null, overtravelSpeed, true);
+  if (stringMm > 0) move(stringMm, hairSpeed, true);
+  move(overtravelMm, overtravelSpeed, true);
 }
 
+/** STROKE: petals (brushPetalDot) every `gap` mm, each dragged out along
+ * the line's direction plus `azimuthDeg` (180 = back the way the line
+ * came, so each petal's tail trails behind it). */
 export function strokePetalDotted(em, pts, { gap = 6.0, azimuthDeg = 180, ...brush } = {}) {
   return walkArcLengthStops(pts, gap, 0.1, { withTangent: true }, (cx, cy, { headingDeg }) =>
     brushPetalDot(em, cx, cy, { ...brush, azimuthDeg: headingDeg + azimuthDeg }));
 }
 
+/** BRUSH: one petal at (cx, cy). Travels there at `height`, primes, and
+ * extrudes a disc's worth (diameter x height, x 0.75) in place at
+ * `extrudeSpeed` (F of the filament, mm/min), retracts, then drags the
+ * nozzle `dragMm` toward `azimuthDeg` (CCW from +X) while dropping to Z0,
+ * pulling the melt into a tapered tail. */
 function brushPetalDot(em, cx, cy, {
   diameter = 3.0, height = 1.0, extrudeSpeed = 150,
   dragMm = 5.0, azimuthDeg = 270, dragSpeed = 600,

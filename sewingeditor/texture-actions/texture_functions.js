@@ -779,6 +779,76 @@ export function strokeVariableThickness(em, pts, { gapLen = 0, ...brush } = {}) 
   return pts;
 }
 
+/** Bead spacing of a printed wall: 0.5 mm beads (brushSolid's width) at a
+ * 0.45 mm pitch, so neighbouring lines overlap and fuse. */
+const WALL_PITCH = 0.45;
+
+/** The path moved sideways by `d` mm -- to the LEFT of the direction of
+ * travel for d > 0 -- each point along its local normal. Fine for gentle
+ * curves; a large offset on the inside of a tight bend folds over itself. */
+function offsetLine(pts, d) {
+  const n = pts.length;
+  return pts.map((p, i) => {
+    const a = pts[Math.max(0, i - 1)], b = pts[Math.min(n - 1, i + 1)];
+    const tx = b[0] - a[0], ty = b[1] - a[1];
+    const len = Math.hypot(tx, ty) || 1;
+    return [p[0] - (ty / len) * d, p[1] + (tx / len) * d, p[2]]; // keeps the source arc length
+  });
+}
+
+/** A solid wall `nLines` beads thick and `nLayers` high along `pts`: line
+ * k is the path offset by `dir` x k x WALL_PITCH; the lines of a layer
+ * are walked as one serpentine, layers back and forth (printLayers). */
+function printWall(em, pts, nLines, nLayers, dir, speed) {
+  // a wall needs no 0.1 mm point density: keep a point every ~0.5 mm
+  const last = pts.length - 1;
+  pts = pts.filter((p, i, a) => i === 0 || i === last || Math.floor(p[2] / 0.5) !== Math.floor(a[i - 1][2] / 0.5));
+  let serp = [];
+  for (let k = 0; k < nLines; k++) {
+    const line = offsetLine(pts, dir * k * WALL_PITCH);
+    serp = serp.concat(k % 2 ? line.reverse() : line);
+  }
+  printLayers(em, serp, nLayers, (a, b) => brushSolid(em, a, b, { speed }));
+}
+
+/** STROKE: hair strands suspended in the air off the top of a printed wall.
+ * Two-step suspend printing after Wang et al., "X-Hair: 3D Printing
+ * Hair-like Structures with Multi-form, Multi-property and Multi-function"
+ * (UIST'24). Prints a solid foundation wall along the line --
+ * `foundationHeight` high, `foundationWidth` thick, the path being its
+ * hair-side edge, the rest of the wall on the other side -- then, every
+ * `spacing` mm along it, one brushSuspendHair() strand off the top of the
+ * wall, pointing out sideways (`side` of the direction of travel) into the
+ * air. Optional `supportWallMm` > 0: a second wall of the same size that
+ * far out on the hair side, printed before the hair, for the strands to
+ * land on (the paper's extra wall for fine and curly hair; trim it off
+ * afterwards). Paper defaults: 0.5 mm between strands (0.2 mm with the
+ * start inset and a 3 deg angle), a 20 x 10 mm foundation. Put the hair on
+ * the OUTSIDE of a curve -- strands aimed inward can run into the far side
+ * of the foundation. One retract cycle PER strand: mind the
+ * retraction-cycle cap before a dense spacing over a long line. */
+export function strokeSuspendHair(em, pts, {
+  spacing = 1.0, side = "left", foundationHeight = 10.0, foundationWidth = 2.0,
+  supportWallMm = 0, speed = 400, step = 0.1, ...brush
+} = {}) {
+  if (side !== "left" && side !== "right") throw new RangeError(`strokeSuspendHair: side must be "left" or "right" (got "${side}")`);
+  if (!(spacing > 0)) throw new RangeError(`strokeSuspendHair: spacing must be > 0 mm (got ${spacing})`);
+  if (!(foundationHeight > 0)) throw new RangeError(`strokeSuspendHair: foundationHeight must be > 0 mm (got ${foundationHeight})`);
+  if (!(supportWallMm >= 0)) throw new RangeError(`strokeSuspendHair: supportWallMm must be >= 0 mm (got ${supportWallMm})`);
+  const s = side === "left" ? 1 : -1; // +1: hair to the left of travel
+  const nLayers = Math.max(1, Math.round(foundationHeight / LAYER_HEIGHT));
+  const nLines = Math.max(1, Math.round(foundationWidth / WALL_PITCH));
+  const topZ = nLayers * LAYER_HEIGHT;
+
+  printWall(em, pts, nLines, nLayers, -s, speed);
+  if (supportWallMm > 0) printWall(em, offsetLine(pts, s * supportWallMm), nLines, nLayers, s, speed);
+
+  walkArcLengthStops(pts, spacing, step, { withTangent: true }, (cx, cy, { headingDeg }) =>
+    brushSuspendHair(em, cx, cy, topZ, headingDeg + s * 90, brush));
+  em.retract();
+  return pts;
+}
+
 /**
  * ============================================================================
  * SECTION 4: PATTERNS -- stroke generators for filling a region
@@ -1294,6 +1364,71 @@ function brushHairyDot(em, cx, cy, {
   move(overtravelMm, overtravelSpeed, true);
 }
 
+/**
+ * BRUSH: one strand of two-step suspend printing (X-Hair, Wang et al.,
+ * UIST'24), for strokeSuspendHair(). (x, y) is a point on the foundation's
+ * edge, `topZ` the foundation's top, `azimuthDeg` (CCW from +X) the way the
+ * strand points out from it. The paper's four steps:
+ *  (d) RELOAD -- travel to the root, `startInset` mm back inside the
+ *      foundation (strands rooted inside it stick to each other less), and
+ *      prime back what the last cut retracted;
+ *  (a) EXTRUDE -- a normal bead, `beadWidth` x one layer x
+ *      `extrusionMultiplier`, at `extrudeSpeed`: flat across the inset,
+ *      then out of the edge into the air for extrudeRatio x hairLength mm,
+ *      tilted `hairAngleDeg` above horizontal (3 deg keeps the nozzle off
+ *      the strand before it; -15..90 printed well from separate roots);
+ *  (b) STRING -- with no extrusion, on at `stringSpeed` for the rest of
+ *      hairLength, drawing the melt left in the nozzle into a fine strand;
+ *  (c) CUT -- retract and lift `cutHopMm`, breaking the strand off.
+ * The two numbers that decide the form (paper Fig. 6, PLA at 200 C, no
+ * extra wall unless noted) are L = hairLength and alpha = extrudeRatio:
+ *   alpha ~1, L 30-50   BRISTLE  stiff, pointed
+ *   alpha ~0.2, L < 50  BARB     a little hook at the tip
+ *   alpha < 0.1, L 100+ FLUFF    very soft, tangled
+ *   alpha > 0.1, L 100+ FINE HAIR    (needs the support wall)
+ *   alpha < 0.1, L 200+ CURLY HAIR   (support wall, curls once trimmed)
+ * Higher alpha = stiffer strand. Paper speeds: extrude 1000, string 8000
+ * (7000-9000 worked; too slow sags, too fast snaps). The ranges are the
+ * paper's PLA results -- every default here is a placeholder for TPU.
+ */
+function brushSuspendHair(em, x, y, topZ, azimuthDeg, {
+  hairLength = 50.0, extrudeRatio = 0.2, hairAngleDeg = 3, startInset = 0.5,
+  beadWidth = 0.4, extrusionMultiplier = 1.0, extrudeSpeed = 1000,
+  stringSpeed = 8000, cutHopMm = 2.0,
+} = {}) {
+  if (!(hairLength > 0)) throw new RangeError(`brushSuspendHair: hairLength must be > 0 mm (got ${hairLength})`);
+  if (!(extrudeRatio >= 0 && extrudeRatio <= 1)) throw new RangeError(`brushSuspendHair: extrudeRatio must be 0..1 (got ${extrudeRatio})`);
+  if (!(hairAngleDeg >= -90 && hairAngleDeg <= 90)) throw new RangeError(`brushSuspendHair: hairAngleDeg must be -90..90 (got ${hairAngleDeg})`);
+  if (!(startInset >= 0)) throw new RangeError(`brushSuspendHair: startInset must be >= 0 mm (got ${startInset})`);
+
+  const DEG = Math.PI / 180;
+  const ux = Math.cos(azimuthDeg * DEG), uy = Math.sin(azimuthDeg * DEG);
+  const ch = Math.cos(hairAngleDeg * DEG), sh = Math.sin(hairAngleDeg * DEG);
+  const z0 = topZ + LAYER_HEIGHT;
+  const endZ = z0 + sh * hairLength;
+  if (endZ < LAYER_HEIGHT) {
+    throw new RangeError(`brushSuspendHair: a ${hairLength} mm strand at ${hairAngleDeg} deg ends ${endZ.toFixed(2)} mm up -- into the bed; raise the foundation or the angle`);
+  }
+  const perMm = eRate(beadWidth, LAYER_HEIGHT, extrusionMultiplier);
+
+  // (d) reload at the root, inside the foundation
+  em.goto(x - ux * startInset, y - uy * startInset, z0);
+  em.unretract();
+  // (a) extrude: across the inset to the edge, then out into the air
+  if (startInset > 0) em.extrude(perMm * startInset, extrudeSpeed, { x, y });
+  const le = extrudeRatio * hairLength;
+  if (le > 0) em.extrude(perMm * le, extrudeSpeed, { x: x + ux * ch * le, y: y + uy * ch * le, z: z0 + sh * le });
+  // (b) string: no extrusion, fast, to the full length
+  const ex = x + ux * ch * hairLength, ey = y + uy * ch * hairLength;
+  if (hairLength - le > 1e-9) {
+    em.a(`G1 X${ex.toFixed(3)} Y${ey.toFixed(3)} Z${endZ.toFixed(3)} F${Math.round(stringSpeed)}`);
+    em.x = ex; em.y = ey; em.z = endZ;
+  }
+  // (c) cut: retract and lift
+  em.retract();
+  if (cutHopMm > 0) em.moveZ(em.z + cutHopMm, 3000);
+}
+
 /** STROKE: petals (brushPetalDot) every `gap` mm, each dragged out along
  * the line's direction plus `azimuthDeg` (180 = back the way the line
  * came, so each petal's tail trails behind it). */
@@ -1331,4 +1466,5 @@ export const BRUSHES = {
   hairy: strokeHairy, hairyDotted: strokeHairyDotted, segmented: strokeSegmented,
   variableThickness: strokeVariableThickness,
   petalDot: strokePetalDotted,
+  suspendHair: strokeSuspendHair,
 };

@@ -7,6 +7,7 @@ M83
 M221 S100
 G1 Z5.000 F3000
 ; --- swirl rose at X110 Y35 ---
+; strokePetalDotted  gap 3 diameter 2.5 height 1 dragMm 2.5 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z5.400 F3000
 G0 X108.786 Y34.118 F3000
 G1 Z1.000 F1500
@@ -856,6 +857,7 @@ G1 E-1.3000 F900
 G0 X116.896 Y19.204 Z0.000 F600
 G1 Z5.000 F3000
 ; --- daisy at X35 Y35 ---
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 3 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z5.400 F3000
 G0 X41.761 Y36.812 F3000
 G1 Z1.000 F1500
@@ -884,6 +886,7 @@ G1 E1.3000 F900
 G1 X50.455 Y39.141 E0.9796 F150
 G1 E-1.3000 F900
 G0 X53.353 Y39.918 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 3 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X39.950 Y39.950 F3000
 G1 Z1.000 F1500
@@ -912,6 +915,7 @@ G1 E1.3000 F900
 G1 X46.314 Y46.314 E0.9796 F150
 G1 E-1.3000 F900
 G0 X48.435 Y48.435 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 3 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X36.812 Y41.761 F3000
 G1 Z1.000 F1500
@@ -940,6 +944,7 @@ G1 E1.3000 F900
 G1 X39.141 Y50.455 E0.9796 F150
 G1 E-1.3000 F900
 G0 X39.918 Y53.353 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 3 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X33.188 Y41.761 F3000
 G1 Z1.000 F1500
@@ -968,6 +973,7 @@ G1 E1.3000 F900
 G1 X30.859 Y50.455 E0.9796 F150
 G1 E-1.3000 F900
 G0 X30.082 Y53.353 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 3 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X30.050 Y39.950 F3000
 G1 Z1.000 F1500
@@ -996,6 +1002,7 @@ G1 E1.3000 F900
 G1 X23.686 Y46.314 E0.9796 F150
 G1 E-1.3000 F900
 G0 X21.565 Y48.435 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 3 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X28.239 Y36.812 F3000
 G1 Z1.000 F1500
@@ -1024,6 +1031,7 @@ G1 E1.3000 F900
 G1 X19.545 Y39.141 E0.9796 F150
 G1 E-1.3000 F900
 G0 X16.647 Y39.918 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 3 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X28.239 Y33.188 F3000
 G1 Z1.000 F1500
@@ -1052,6 +1060,7 @@ G1 E1.3000 F900
 G1 X19.545 Y30.859 E0.9796 F150
 G1 E-1.3000 F900
 G0 X16.647 Y30.082 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 3 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X30.050 Y30.050 F3000
 G1 Z1.000 F1500
@@ -1080,6 +1089,7 @@ G1 E1.3000 F900
 G1 X23.686 Y23.686 E0.9796 F150
 G1 E-1.3000 F900
 G0 X21.565 Y21.565 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 3 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X33.188 Y28.239 F3000
 G1 Z1.000 F1500
@@ -1108,6 +1118,7 @@ G1 E1.3000 F900
 G1 X30.859 Y19.545 E0.9796 F150
 G1 E-1.3000 F900
 G0 X30.082 Y16.647 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 3 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X36.812 Y28.239 F3000
 G1 Z1.000 F1500
@@ -1136,6 +1147,7 @@ G1 E1.3000 F900
 G1 X39.141 Y19.545 E0.9796 F150
 G1 E-1.3000 F900
 G0 X39.918 Y16.647 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 3 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X39.950 Y30.050 F3000
 G1 Z1.000 F1500
@@ -1164,6 +1176,7 @@ G1 E1.3000 F900
 G1 X46.314 Y23.686 E0.9796 F150
 G1 E-1.3000 F900
 G0 X48.435 Y21.565 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 3 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X41.761 Y33.188 F3000
 G1 Z1.000 F1500
@@ -1192,6 +1205,7 @@ G1 E1.3000 F900
 G1 X50.455 Y30.859 E0.9796 F150
 G1 E-1.3000 F900
 G0 X53.353 Y30.082 Z0.000 F600
+; strokePetalDotted  gap 2.5 diameter 2 height 1 dragMm 2 azimuthDeg 90 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X34.000 Y35.000 F3000
 G1 Z1.000 F1500
@@ -1306,6 +1320,7 @@ G1 E-1.3000 F900
 G0 X32.005 Y35.033 Z0.000 F600
 G1 Z5.000 F3000
 ; --- rose curve at X35 Y110 ---
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2 azimuthDeg 90 extrudeSpeed 150 dragSpeed 600
 G1 Z5.400 F3000
 G0 X36.074 Y113.853 F3000
 G1 Z1.000 F1500
@@ -1383,6 +1398,7 @@ G1 E1.3000 F900
 G1 X33.532 Y115.729 E0.9796 F150
 G1 E-1.3000 F900
 G0 X35.498 Y116.097 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2 azimuthDeg 90 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X35.975 Y113.879 F3000
 G1 Z1.000 F1500
@@ -1425,6 +1441,7 @@ G1 E1.3000 F900
 G1 X33.735 Y116.065 E0.9796 F150
 G1 E-1.3000 F900
 G0 X35.728 Y116.234 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2 azimuthDeg 90 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X31.667 Y112.212 F3000
 G1 Z1.000 F1500
@@ -1502,6 +1519,7 @@ G1 E1.3000 F900
 G1 X29.098 Y110.374 E0.9796 F150
 G1 E-1.3000 F900
 G0 X29.355 Y112.358 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2 azimuthDeg 90 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X31.612 Y112.126 F3000
 G1 Z1.000 F1500
@@ -1544,6 +1562,7 @@ G1 E1.3000 F900
 G1 X28.841 Y110.671 E0.9796 F150
 G1 E-1.3000 F900
 G0 X29.296 Y112.619 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2 azimuthDeg 90 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X31.867 Y107.514 F3000
 G1 Z1.000 F1500
@@ -1621,6 +1640,7 @@ G1 E1.3000 F900
 G1 X32.820 Y104.503 E0.9796 F150
 G1 E-1.3000 F900
 G0 X31.013 Y105.360 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2 azimuthDeg 90 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X31.931 Y107.435 F3000
 G1 Z1.000 F1500
@@ -1663,6 +1683,7 @@ G1 E1.3000 F900
 G1 X32.459 Y104.350 E0.9796 F150
 G1 E-1.3000 F900
 G0 X30.747 Y105.384 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2 azimuthDeg 90 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X36.396 Y106.252 F3000
 G1 Z1.000 F1500
@@ -1740,6 +1761,7 @@ G1 E1.3000 F900
 G1 X39.555 Y106.228 E0.9796 F150
 G1 E-1.3000 F900
 G0 X38.181 Y104.775 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2 azimuthDeg 90 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X36.492 Y106.289 F3000
 G1 Z1.000 F1500
@@ -1782,6 +1804,7 @@ G1 E1.3000 F900
 G1 X39.588 Y105.837 E0.9796 F150
 G1 E-1.3000 F900
 G0 X38.076 Y104.529 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2 azimuthDeg 90 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X38.996 Y110.170 F3000
 G1 Z1.000 F1500
@@ -1859,6 +1882,7 @@ G1 E1.3000 F900
 G1 X39.995 Y113.166 E0.9796 F150
 G1 E-1.3000 F900
 G0 X40.952 Y111.411 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2 azimuthDeg 90 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X38.991 Y110.272 F3000
 G1 Z1.000 F1500
@@ -1901,6 +1925,7 @@ G1 E1.3000 F900
 G1 X40.377 Y113.077 E0.9796 F150
 G1 E-1.3000 F900
 G0 X41.154 Y111.234 Z0.000 F600
+; strokePetalDotted  gap 2.513 diameter 1.6 height 1 dragMm 1.5 azimuthDeg 90 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X37.000 Y110.000 F3000
 G1 Z1.000 F1500
@@ -1938,6 +1963,7 @@ G1 E-1.3000 F900
 G0 X35.521 Y109.595 Z0.000 F600
 G1 Z5.000 F3000
 ; --- four-petal at X35 Y185 ---
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2.5 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z5.400 F3000
 G0 X47.907 Y181.034 F3000
 G1 Z1.000 F1500
@@ -1945,6 +1971,7 @@ G1 E1.6000 F900
 G1 X47.907 Y181.034 E0.9796 F150
 G1 E-1.3000 F900
 G0 X45.623 Y182.051 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2.5 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X52.388 Y182.154 F3000
 G1 Z1.000 F1500
@@ -1966,6 +1993,7 @@ G1 E1.3000 F900
 G1 X46.520 Y183.402 E0.9796 F150
 G1 E-1.3000 F900
 G0 X44.074 Y183.921 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2.5 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X54.000 Y185.000 F3000
 G1 Z1.000 F1500
@@ -2001,6 +2029,7 @@ G1 E1.3000 F900
 G1 X42.000 Y185.000 E0.9796 F150
 G1 E-1.3000 F900
 G0 X39.500 Y185.000 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2.5 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X52.388 Y187.846 F3000
 G1 Z1.000 F1500
@@ -2022,6 +2051,7 @@ G1 E1.3000 F900
 G1 X46.520 Y186.598 E0.9796 F150
 G1 E-1.3000 F900
 G0 X44.074 Y186.079 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2.5 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X47.907 Y188.966 F3000
 G1 Z1.000 F1500
@@ -2029,6 +2059,7 @@ G1 E1.6000 F900
 G1 X47.907 Y188.966 E0.9796 F150
 G1 E-1.3000 F900
 G0 X45.623 Y187.949 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 1.6 height 1 dragMm 2 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X42.778 Y192.778 F3000
 G1 Z1.000 F1500
@@ -2050,6 +2081,7 @@ G1 E1.3000 F900
 G1 X38.536 Y188.536 E0.6269 F150
 G1 E-1.3000 F900
 G0 X37.121 Y187.121 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2.5 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X38.966 Y197.907 F3000
 G1 Z1.000 F1500
@@ -2057,6 +2089,7 @@ G1 E1.6000 F900
 G1 X38.966 Y197.907 E0.9796 F150
 G1 E-1.3000 F900
 G0 X37.949 Y195.623 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2.5 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X37.846 Y202.388 F3000
 G1 Z1.000 F1500
@@ -2078,6 +2111,7 @@ G1 E1.3000 F900
 G1 X36.598 Y196.520 E0.9796 F150
 G1 E-1.3000 F900
 G0 X36.079 Y194.074 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2.5 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X35.000 Y204.000 F3000
 G1 Z1.000 F1500
@@ -2113,6 +2147,7 @@ G1 E1.3000 F900
 G1 X35.000 Y192.000 E0.9796 F150
 G1 E-1.3000 F900
 G0 X35.000 Y189.500 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2.5 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X32.154 Y202.388 F3000
 G1 Z1.000 F1500
@@ -2134,6 +2169,7 @@ G1 E1.3000 F900
 G1 X33.402 Y196.520 E0.9796 F150
 G1 E-1.3000 F900
 G0 X33.921 Y194.074 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2.5 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X31.034 Y197.907 F3000
 G1 Z1.000 F1500
@@ -2141,6 +2177,7 @@ G1 E1.6000 F900
 G1 X31.034 Y197.907 E0.9796 F150
 G1 E-1.3000 F900
 G0 X32.051 Y195.623 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 1.6 height 1 dragMm 2 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X27.222 Y192.778 F3000
 G1 Z1.000 F1500
@@ -2162,6 +2199,7 @@ G1 E1.3000 F900
 G1 X31.464 Y188.536 E0.6269 F150
 G1 E-1.3000 F900
 G0 X32.879 Y187.121 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2.5 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X22.093 Y188.966 F3000
 G1 Z1.000 F1500
@@ -2169,6 +2207,7 @@ G1 E1.6000 F900
 G1 X22.093 Y188.966 E0.9796 F150
 G1 E-1.3000 F900
 G0 X24.377 Y187.949 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2.5 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X17.612 Y187.846 F3000
 G1 Z1.000 F1500
@@ -2190,6 +2229,7 @@ G1 E1.3000 F900
 G1 X23.480 Y186.598 E0.9796 F150
 G1 E-1.3000 F900
 G0 X25.926 Y186.079 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2.5 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X16.000 Y185.000 F3000
 G1 Z1.000 F1500
@@ -2225,6 +2265,7 @@ G1 E1.3000 F900
 G1 X28.000 Y185.000 E0.9796 F150
 G1 E-1.3000 F900
 G0 X30.500 Y185.000 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2.5 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X17.612 Y182.154 F3000
 G1 Z1.000 F1500
@@ -2246,6 +2287,7 @@ G1 E1.3000 F900
 G1 X23.480 Y183.402 E0.9796 F150
 G1 E-1.3000 F900
 G0 X25.926 Y183.921 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2.5 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X22.093 Y181.034 F3000
 G1 Z1.000 F1500
@@ -2253,6 +2295,7 @@ G1 E1.6000 F900
 G1 X22.093 Y181.034 E0.9796 F150
 G1 E-1.3000 F900
 G0 X24.377 Y182.051 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 1.6 height 1 dragMm 2 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X27.222 Y177.222 F3000
 G1 Z1.000 F1500
@@ -2274,6 +2317,7 @@ G1 E1.3000 F900
 G1 X31.464 Y181.464 E0.6269 F150
 G1 E-1.3000 F900
 G0 X32.879 Y182.879 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2.5 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X31.034 Y172.093 F3000
 G1 Z1.000 F1500
@@ -2281,6 +2325,7 @@ G1 E1.6000 F900
 G1 X31.034 Y172.093 E0.9796 F150
 G1 E-1.3000 F900
 G0 X32.051 Y174.377 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2.5 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X32.154 Y167.612 F3000
 G1 Z1.000 F1500
@@ -2302,6 +2347,7 @@ G1 E1.3000 F900
 G1 X33.402 Y173.480 E0.9796 F150
 G1 E-1.3000 F900
 G0 X33.921 Y175.926 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2.5 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X35.000 Y166.000 F3000
 G1 Z1.000 F1500
@@ -2337,6 +2383,7 @@ G1 E1.3000 F900
 G1 X35.000 Y178.000 E0.9796 F150
 G1 E-1.3000 F900
 G0 X35.000 Y180.500 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2.5 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X37.846 Y167.612 F3000
 G1 Z1.000 F1500
@@ -2358,6 +2405,7 @@ G1 E1.3000 F900
 G1 X36.598 Y173.480 E0.9796 F150
 G1 E-1.3000 F900
 G0 X36.079 Y175.926 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 2 height 1 dragMm 2.5 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X38.966 Y172.093 F3000
 G1 Z1.000 F1500
@@ -2365,6 +2413,7 @@ G1 E1.6000 F900
 G1 X38.966 Y172.093 E0.9796 F150
 G1 E-1.3000 F900
 G0 X37.949 Y174.377 Z0.000 F600
+; strokePetalDotted  gap 3 diameter 1.6 height 1 dragMm 2 azimuthDeg 0 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X42.778 Y177.222 F3000
 G1 Z1.000 F1500
@@ -2386,6 +2435,7 @@ G1 E1.3000 F900
 G1 X38.536 Y181.464 E0.6269 F150
 G1 E-1.3000 F900
 G0 X37.121 Y182.879 Z0.000 F600
+; strokePetalDotted  gap 3.142 diameter 2 height 1 dragMm 1.5 azimuthDeg 90 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X37.000 Y185.000 F3000
 G1 Z1.000 F1500
@@ -2416,6 +2466,7 @@ G1 E-1.3000 F900
 G0 X35.370 Y184.454 Z0.000 F600
 G1 Z5.000 F3000
 ; --- sunflower at X110 Y185 ---
+; strokePetalDotted  gap 2.513 diameter 1.6 height 1 dragMm 1.2 azimuthDeg -90 extrudeSpeed 150 dragSpeed 600
 G1 Z5.400 F3000
 G0 X112.000 Y185.000 F3000
 G1 Z1.000 F1500
@@ -2451,6 +2502,7 @@ G1 E1.3000 F900
 G1 X110.618 Y183.098 E0.6269 F150
 G1 E-1.3000 F900
 G0 X110.696 Y181.900 Z0.000 F600
+; strokePetalDotted  gap 2.57 diameter 1.6 height 1 dragMm 1.2 azimuthDeg -90 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X114.318 Y186.268 F3000
 G1 Z1.000 F1500
@@ -2528,6 +2580,7 @@ G1 E1.3000 F900
 G1 X114.318 Y183.732 E0.6269 F150
 G1 E-1.3000 F900
 G0 X115.425 Y183.269 Z0.000 F600
+; strokePetalDotted  gap 2.443 diameter 1.6 height 1 dragMm 1.2 azimuthDeg -90 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X117.000 Y185.000 F3000
 G1 Z1.000 F1500
@@ -2654,6 +2707,7 @@ G1 E1.3000 F900
 G1 X116.578 Y182.606 E0.6269 F150
 G1 E-1.3000 F900
 G0 X117.674 Y182.117 Z0.000 F600
+; strokePetalDotted  gap 2.487 diameter 1.6 height 1 dragMm 1.2 azimuthDeg -90 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X119.419 Y186.240 F3000
 G1 Z1.000 F1500
@@ -2822,6 +2876,7 @@ G1 E1.3000 F900
 G1 X119.419 Y183.760 E0.6269 F150
 G1 E-1.3000 F900
 G0 X120.599 Y183.542 Z0.000 F600
+; strokePetalDotted  gap 3.57 diameter 2.5 height 1 dragMm 6 azimuthDeg -90 extrudeSpeed 150 dragSpeed 600
 G1 Z1.400 F3000
 G0 X122.500 Y185.000 F3000
 G1 Z1.000 F1500

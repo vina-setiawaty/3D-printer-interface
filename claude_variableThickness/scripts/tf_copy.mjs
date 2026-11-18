@@ -44,9 +44,10 @@
  *   retractSpeed    E speed for retract and prime, mm/min -- fast retraction
  *                   risks flat-spotting TPU at the drive gear
  *   linePrimeMm     extra prime once per printed element (newPattern())
- *   maxVolRate      the extruder's maximum volumetric flow, mm3/s. Brushes
- *                   that extrude without a set nozzle speed (dot domes, hair
- *                   pulls, stationary E) run at this rate. Conservative
+ *   maxVolRate      the extruder's maximum volumetric flow, mm3/s -- recorded
+ *                   here, not enforced by any brush yet (each sets its own
+ *                   speed; keep strokeVariableThickness's volRate under it).
+ *                   Conservative
  *                   placeholder pending a confirming print, for the Ender 3
  *                   V2 / Sprite direct-drive, 0.4mm nozzle, TPU -- well under
  *                   Takahashi & Miyashita's ~11mm3/s (UIST'16 Adjunct), which
@@ -239,25 +240,19 @@ export class Emitter {
   }
 
   /**
-   * Extrude `eMm` of filament (computed for FIL_AREA, like printMove) at a
-   * volumetric rate (`volRate` mm3/s, null = the profile's maxVolRate,
-   * never above it), optionally while moving to `to` = {x, y, z} (any
-   * subset). The move takes volume / volRate seconds whatever its length:
-   * with motion, F is set for the XYZ distance (Marlin applies F to XYZ,
-   * not E); with none, it is an E-only move and F is the filament speed.
+   * Extrude `eMm` of filament (computed for FIL_AREA, like printMove) at
+   * feedrate `speed` (F, mm/min), optionally while moving to `to` =
+   * {x, y, z} (any subset). Marlin applies F to the XYZ distance when the
+   * move has one, and to E only when it doesn't.
    */
-  extrude(eMm, volRate = null, to = {}) {
-    const rate = Math.min(volRate ?? this.fil.maxVolRate, this.fil.maxVolRate);
-    const seconds = Math.max(1e-6, (eMm * FIL_AREA) / rate);
+  extrude(eMm, speed, to = {}) {
     const e = eMm * this.eScale;
     const nx = to.x ?? this.x, ny = to.y ?? this.y, nz = to.z ?? this.z;
-    const d = Math.hypot((nx ?? 0) - (this.x ?? 0), (ny ?? 0) - (this.y ?? 0), (nz ?? 0) - (this.z ?? 0));
     let s = "G1";
     if (to.x != null) s += ` X${nx.toFixed(3)}`;
     if (to.y != null) s += ` Y${ny.toFixed(3)}`;
     if (to.z != null) s += ` Z${nz.toFixed(3)}`;
-    const f = d > 1e-9 ? (d / seconds) * 60 : (e / seconds) * 60;
-    this.a(`${s} E${e.toFixed(4)} F${Math.max(1, f).toFixed(1)}`);
+    this.a(`${s} E${e.toFixed(4)} F${Math.round(speed)}`);
     this.eTotal += e;
     this.x = nx; this.y = ny; this.z = nz;
   }
@@ -574,18 +569,17 @@ export function strokeDirectionalBlobDotted(em, pts, {
 /** BRUSH: one vertical-lift hair strand at (x, y). If the nozzle is
  * already above (x, y) -- the stroke moved it there, still lifted from the
  * last strand -- it drops straight to `baseZ`; otherwise it travels there
- * (goto). Then it primes, extrudes `esegmentMm` in place at `volRate`
- * (null = the filament's max), lifts `smallLift`, dwells, lifts `bigLift`
+ * (goto). Then it primes, extrudes `esegmentMm` in place at F500, lifts `smallLift`, dwells, lifts `bigLift`
  * and retracts, leaving the nozzle lifted above the strand. */
 function brushHairyStrand(em, x, y, {
-  esegmentMm = 1.2, volRate = null, dwellMs = 400,
+  esegmentMm = 1.2, dwellMs = 400,
   smallLift = 0.2, bigLift = 4.0, baseZ = 0.3,
 } = {}) {
   const above = em.x != null && Math.hypot(em.x - x, em.y - y) < 1e-6;
   if (above && em.retracted) em.moveZ(baseZ, 600);
   else em.goto(x, y, baseZ);
   em.unretract();
-  em.extrude(esegmentMm, volRate);
+  em.extrude(esegmentMm, 500);
   em.moveZ(baseZ + smallLift, 600);
   em.dwell(dwellMs);
   em.moveZ(em.z + bigLift, 600);
@@ -1027,14 +1021,13 @@ function brushSpiralDot(em, cx, cy, { dotRadius = 0.8, nLayers = 2, width = 0.42
  * goes into the low steps than the high ones (`taperFactor`): residual
  * nozzle pressure finishes the tip instead of a hard stop. The first step
  * also lays `baseExtraMm`, a bigger first-contact blob to stick to the
- * bed, then dwells `baseDwellMs`. Every step runs at `volRate` mm3/s (null
- * = the filament's maxVolRate), so the feedrate follows the volume, not a
- * fixed F. `lean` [dx, dy] moves the nozzle that far in XY over the rise
+ * bed, then dwells `baseDwellMs`. Every step runs at F `extrudeSpeed`
+ * (which Marlin applies to the step's short XYZ distance). `lean` [dx, dy] moves the nozzle that far in XY over the rise
  * (the directional dot). Returns the top Z.
  */
 function buildDome(em, {
   radius, baseZ, buildSteps, taperFactor, extrusionMultiplier,
-  baseExtraMm, baseDwellMs, volRate, lean = null,
+  baseExtraMm, baseDwellMs, extrudeSpeed, lean = null,
 }) {
   const standoffVolume = Math.PI * radius * radius * baseZ;
   const domeVolume = (2 / 3) * Math.PI * radius ** 3;
@@ -1052,7 +1045,7 @@ function buildDome(em, {
     const f = (i + 1) / nSteps;
     const to = { z: baseZ + radius * f };
     if (lean) { to.x = x0 + lean[0] * f; to.y = y0 + lean[1] * f; }
-    em.extrude(totalE * (weights[i] / weightSum) + (i === 0 ? baseExtraMm : 0), volRate, to);
+    em.extrude(totalE * (weights[i] / weightSum) + (i === 0 ? baseExtraMm : 0), extrudeSpeed, to);
     if (i === 0) em.dwell(baseDwellMs);
   }
   return em.z;
@@ -1062,8 +1055,7 @@ function buildDome(em, {
  * BRUSH: one blob dome at (cx, cy), for strokeBlobDotted(). Travels there,
  * primes, and builds a dome by extruding WHILE rising in Z, no XY movement
  * (buildDome: `diameter` sets the size, the filament amount is derived
- * from it, scaled by `extrusionMultiplier`; `volRate` sets how fast it
- * goes in). Then dwell, the filament's long retract (longRetractMm,
+ * from it, scaled by `extrusionMultiplier`; F `extrudeSpeed`). Then dwell, the filament's long retract (longRetractMm,
  * against stringing -- the next prime pushes the same amount back), and
  * `postRetractDwellMs`.
  *
@@ -1076,7 +1068,7 @@ function buildDome(em, {
  */
 function brushBlobDot(em, cx, cy, {
   diameter = 1.6, baseZ = 0.2, buildSteps = 6, taperFactor = 0.7,
-  volRate = null, dwellMs = 2000, extrusionMultiplier = 1.3,
+  extrudeSpeed = 120, dwellMs = 2000, extrusionMultiplier = 1.3,
   postRetractDwellMs = 2000, baseExtraMm = 0.3,
   baseDwellMs = 1000, orbitRadius = null, orbitPts = 16, orbitSpeed = 600,
   orbitLoops = 3, orbitDwellMs = 2000, blobClearanceMm = 0.3,
@@ -1086,7 +1078,7 @@ function brushBlobDot(em, cx, cy, {
   em.goto(cx, cy, baseZ);
   em.unretract();
   const z = buildDome(em, {
-    radius, baseZ, buildSteps, taperFactor, extrusionMultiplier, baseExtraMm, baseDwellMs, volRate,
+    radius, baseZ, buildSteps, taperFactor, extrusionMultiplier, baseExtraMm, baseDwellMs, extrudeSpeed,
   });
   em.dwell(dwellMs);
   em.retract(true);
@@ -1148,7 +1140,7 @@ function brushBlobDot(em, cx, cy, {
  */
 function brushDirectionalBlobDot(em, cx, cy, {
   diameter = 2.0, azimuthDeg = 0, baseZ = 0.2, buildSteps = 6,
-  taperFactor = 0.7, volRate = null, dwellMs = 2000,
+  taperFactor = 0.7, extrudeSpeed = 120, dwellMs = 2000,
   extrusionMultiplier = 1.3, postRetractDwellMs = 2000,
   baseExtraMm = 0.3, baseDwellMs = 1000, dragSpeed = 600,
 } = {}) {
@@ -1159,7 +1151,7 @@ function brushDirectionalBlobDot(em, cx, cy, {
   em.goto(cx, cy, baseZ);
   em.unretract();
   buildDome(em, {
-    radius, baseZ, buildSteps, taperFactor, extrusionMultiplier, baseExtraMm, baseDwellMs, volRate,
+    radius, baseZ, buildSteps, taperFactor, extrusionMultiplier, baseExtraMm, baseDwellMs, extrudeSpeed,
     lean: [ax * radius, ay * radius],
   });
   const apexX = em.x, apexY = em.y;
@@ -1223,8 +1215,7 @@ function resolveHairDir(hairDirection = "top", azimuthDeg, elevationDeg) {
  * melt:
  *  1. EXTRUDE segment -- move along the pull vector while extruding a real
  *     bead (cross-section via the shared `eRate()` helper, x
- *     `beadFlowMult`) at `volRate` (null = the filament's maxVolRate), so
- *     the pull speed follows the bead's volume; then a no-extrusion "dry
+ *     `beadFlowMult`) at F `pullExtrudeSpeed`; then a no-extrusion "dry
  *     rise" finishes the climb to `hairLength`, `dryRiseFeedDrop` F slower,
  *     so the bead is fully laid down before the tip stretches to height.
  *  2. The filament's long retract immediately (fixes whole-pull stringing
@@ -1242,9 +1233,9 @@ function resolveHairDir(hairDirection = "top", azimuthDeg, elevationDeg) {
  */
 function brushHairyDot(em, cx, cy, {
   rootDiameter = 2.0, baseZ = 0.2, buildSteps = 6, taperFactor = 0.7,
-  volRate = null, baseExtraMm = 0.3, baseDwellMs = 1000,
+  extrudeSpeed = 120, baseExtraMm = 0.3, baseDwellMs = 1000,
   dwellMs = 2000, extrusionMultiplier = 1.3, hairThickness = null,
-  hairLength = 10.0, beadFlowMult = 3.5, dryRiseFeedDrop = 10,
+  hairLength = 10.0, pullExtrudeSpeed = 150, beadFlowMult = 3.5, dryRiseFeedDrop = 10,
   postRetractDwellMs = 500, hairDirection = "top",
   hairAzimuthDeg = null, hairElevationDeg = null, stringMm = 2.0,
   hairSpeed = 8000, clearanceZ = 0.5, clearanceSpeed = 600,
@@ -1262,7 +1253,7 @@ function brushHairyDot(em, cx, cy, {
   em.unretract();
   buildDome(em, {
     radius: rootDiameter / 2.0, baseZ, buildSteps, taperFactor, extrusionMultiplier,
-    baseExtraMm, baseDwellMs, volRate,
+    baseExtraMm, baseDwellMs, extrudeSpeed,
   });
   em.dwell(dwellMs);
 
@@ -1286,11 +1277,9 @@ function brushHairyDot(em, cx, cy, {
     em.x = nx; em.y = ny; em.z = nz;
   };
 
-  // the extruding pull, timed by volume; the dry rise follows a little slower
-  em.extrude(eA, volRate, target(dExtrude));
-  const rate = Math.min(volRate ?? em.fil.maxVolRate, em.fil.maxVolRate);
-  const pullF = (dExtrude / ((eA * FIL_AREA) / rate)) * 60;
-  if (hairLength > dExtrude + 1e-6) move(hairLength - dExtrude, Math.max(1, pullF - dryRiseFeedDrop), false);
+  // the extruding pull; the dry rise follows a little slower
+  em.extrude(eA, pullExtrudeSpeed, target(dExtrude));
+  if (hairLength > dExtrude + 1e-6) move(hairLength - dExtrude, Math.max(1, pullExtrudeSpeed - dryRiseFeedDrop), false);
 
   em.retract(true);
   em.dwell(postRetractDwellMs);

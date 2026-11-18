@@ -16,13 +16,15 @@
 //   piece = tube | beehive | garden | cactus
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
+import { labelled } from "./label.mjs";
 import { dirname, join } from "node:path";
 
 const [, , libPath, PIECE, outPath] = process.argv;
 const copy = join(dirname(fileURLToPath(import.meta.url)), "tf_copy.mjs");
 writeFileSync(copy, readFileSync(libPath, "utf8") + "\nexport { brushVariableThickness, restOfPath, brushPetalDot };\n");
 const TF = await import(pathToFileURL(copy).href + `?t=${Date.now()}`);
-const { Emitter, samplePath, totalLength, brushVariableThickness, restOfPath, brushPetalDot } = TF;
+const { Emitter, samplePath, totalLength, restOfPath, brushPetalDot } = TF;
+const brushVariableThickness = labelled("brushVariableThickness", TF.brushVariableThickness);
 
 const TAU = 2 * Math.PI, D2R = Math.PI / 180;
 const CX = 110, CY = 110; // every piece is centred on the bed

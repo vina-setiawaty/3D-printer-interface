@@ -7,13 +7,16 @@
 //   node scripts/make_vt_sheet.mjs ../sewingeditor/texture-actions/texture_functions.js vt-sheet.gcode
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
+import { labelled } from "./label.mjs";
 import { dirname, join } from "node:path";
 
 const [, , libPath, outPath] = process.argv;
 const copy = join(dirname(fileURLToPath(import.meta.url)), "tf_copy.mjs");
 writeFileSync(copy, readFileSync(libPath, "utf8") + "\nexport { brushVariableThickness, restOfPath, brushPetalDot };\n");
 const TF = await import(pathToFileURL(copy).href + `?t=${Date.now()}`);
-const { Emitter, samplePath, polylineToPts, totalLength, pointAtArcLength, brushVariableThickness, restOfPath, brushPetalDot } = TF;
+const { Emitter, samplePath, polylineToPts, totalLength, pointAtArcLength, restOfPath } = TF;
+const brushVariableThickness = labelled("brushVariableThickness", TF.brushVariableThickness);
+const brushPetalDot = labelled("brushPetalDot", TF.brushPetalDot);
 
 const D2R = Math.PI / 180, TAU = 2 * Math.PI;
 const SAFE_Z = 5;

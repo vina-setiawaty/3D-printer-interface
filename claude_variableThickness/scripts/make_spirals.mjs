@@ -7,6 +7,7 @@
 // Usage: node make_spirals.mjs <texture_functions.js> <out.gcode>
 import { pathToFileURL } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
+import { labelled } from "./label.mjs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -14,7 +15,8 @@ const [, , libPath, outPath] = process.argv;
 const copy = join(dirname(fileURLToPath(import.meta.url)), "tf_copy.mjs");
 writeFileSync(copy, readFileSync(libPath, "utf8") + "\nexport { brushVariableThickness, restOfPath };\n");
 const TF = await import(pathToFileURL(copy).href + `?t=${Date.now()}`);
-const { Emitter, samplePath, totalLength, brushVariableThickness, restOfPath } = TF;
+const { Emitter, samplePath, totalLength, restOfPath } = TF;
+const brushVariableThickness = labelled("brushVariableThickness", TF.brushVariableThickness);
 
 const TAU = 2 * Math.PI, SAFE_Z = 5, AREA = { x0: 10, x1: 210, y0: 10, y1: 210 };
 const em = new Emitter();

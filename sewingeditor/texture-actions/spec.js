@@ -93,4 +93,15 @@ export const PARAMS = {
   stepsPerWave: { step: 1, min: 1, unit: "steps" },
   phase: { step: 0.25, unit: "waves" },
   peak: { step: 0.05, min: 0, max: 1, unit: "of wave" },
+
+  // suspend hair (X-Hair)
+  side: { options: ["left", "right"] },
+  foundationHeight: { step: 0.5, min: 0.2, unit: "mm" },
+  foundationWidth: { step: 0.45, min: 0.45, unit: "mm" },
+  supportWallMm: { step: 1, min: 0, unit: "mm" },
+  extrudeRatio: { step: 0.05, min: 0, max: 1, unit: "of length" },
+  hairAngleDeg: { step: 1, min: -90, max: 90, unit: "deg" },
+  startInset: { step: 0.1, min: 0, unit: "mm" },
+  stringSpeed: { step: 500, min: 1, unit: "F" },
+  cutHopMm: { step: 0.5, min: 0, unit: "mm" },
 };
